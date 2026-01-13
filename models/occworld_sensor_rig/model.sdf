@@ -1,0 +1,624 @@
+<?xml version="1.0"?>
+<!--
+  OccWorld Sensor Rig for BEVFusion Pipeline
+
+  This sensor rig provides:
+  - 6 surround-view cameras (BEVFusion compatible)
+  - Ground robot GPU LiDAR (64-beam, 120m range)
+  - Drone GPU LiDAR (32-beam, 100m, wide vertical FOV)
+  - High-rate IMU (200Hz) with realistic noise
+  - GPS/NavSat sensor (10Hz) with position/velocity noise
+
+  Camera Configuration (nuScenes-style):
+  - CAM_FRONT: 0 yaw
+  - CAM_FRONT_LEFT: +45 yaw
+  - CAM_FRONT_RIGHT: -45 yaw
+  - CAM_BACK: 180 yaw
+  - CAM_BACK_LEFT: +135 yaw
+  - CAM_BACK_RIGHT: -135 yaw
+
+  All sensors publish to Gazebo Transport topics for ros_gz_bridge integration.
+-->
+<sdf version="1.9">
+  <model name="occworld_sensor_rig">
+    <static>false</static>
+
+    <!-- ================================================================== -->
+    <!-- BASE LINK - Attachment point for all sensors                       -->
+    <!-- ================================================================== -->
+    <link name="sensor_base">
+      <inertial>
+        <mass>0.5</mass>
+        <inertia>
+          <ixx>0.01</ixx>
+          <iyy>0.01</iyy>
+          <izz>0.01</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <visual name="sensor_base_visual">
+        <geometry>
+          <box><size>0.1 0.1 0.05</size></box>
+        </geometry>
+        <material>
+          <ambient>0.3 0.3 0.3 1</ambient>
+        </material>
+      </visual>
+    </link>
+
+    <!-- ================================================================== -->
+    <!-- CAMERA ARRAY - 6 Surround-View Cameras for BEVFusion               -->
+    <!-- Resolution: 1600x900, FOV: 70deg, Rate: 10Hz                       -->
+    <!-- Intrinsics: fx=fy=1142.5, cx=800, cy=450                          -->
+    <!-- ================================================================== -->
+
+    <!-- FRONT CAMERA (CAM_FRONT) - 0 degrees yaw -->
+    <link name="camera_front_link">
+      <pose relative_to="sensor_base">2.0 0 1.5 0 0 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0 0 0.8 1</ambient></material>
+      </visual>
+      <sensor name="camera_front" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>true</visualize>
+        <topic>camera/front/image</topic>
+        <gz_frame_id>camera_front_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>  <!-- 70 degrees -->
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <distortion>
+            <k1>0.0</k1>
+            <k2>0.0</k2>
+            <k3>0.0</k3>
+            <p1>0.0</p1>
+            <p2>0.0</p2>
+          </distortion>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_front_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_front_link</child>
+    </joint>
+
+    <!-- FRONT-LEFT CAMERA (CAM_FRONT_LEFT) - +45 degrees yaw (0.7854 rad) -->
+    <link name="camera_front_left_link">
+      <pose relative_to="sensor_base">1.5 0.8 1.5 0 0 0.7854</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0 0.6 0.8 1</ambient></material>
+      </visual>
+      <sensor name="camera_front_left" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/front_left/image</topic>
+        <gz_frame_id>camera_front_left_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_front_left_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_front_left_link</child>
+    </joint>
+
+    <!-- FRONT-RIGHT CAMERA (CAM_FRONT_RIGHT) - -45 degrees yaw (-0.7854 rad) -->
+    <link name="camera_front_right_link">
+      <pose relative_to="sensor_base">1.5 -0.8 1.5 0 0 -0.7854</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0 0.6 0.8 1</ambient></material>
+      </visual>
+      <sensor name="camera_front_right" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/front_right/image</topic>
+        <gz_frame_id>camera_front_right_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_front_right_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_front_right_link</child>
+    </joint>
+
+    <!-- BACK CAMERA (CAM_BACK) - 180 degrees yaw (3.1416 rad) -->
+    <link name="camera_back_link">
+      <pose relative_to="sensor_base">-2.0 0 1.5 0 0 3.1416</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0.8 0 0 1</ambient></material>
+      </visual>
+      <sensor name="camera_back" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/back/image</topic>
+        <gz_frame_id>camera_back_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_back_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_back_link</child>
+    </joint>
+
+    <!-- BACK-LEFT CAMERA (CAM_BACK_LEFT) - +135 degrees yaw (2.3562 rad) -->
+    <link name="camera_back_left_link">
+      <pose relative_to="sensor_base">-1.5 0.8 1.5 0 0 2.3562</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0.8 0.4 0 1</ambient></material>
+      </visual>
+      <sensor name="camera_back_left" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/back_left/image</topic>
+        <gz_frame_id>camera_back_left_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_back_left_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_back_left_link</child>
+    </joint>
+
+    <!-- BACK-RIGHT CAMERA (CAM_BACK_RIGHT) - -135 degrees yaw (-2.3562 rad) -->
+    <link name="camera_back_right_link">
+      <pose relative_to="sensor_base">-1.5 -0.8 1.5 0 0 -2.3562</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <geometry><box><size>0.05 0.08 0.05</size></box></geometry>
+        <material><ambient>0.8 0.4 0 1</ambient></material>
+      </visual>
+      <sensor name="camera_back_right" type="camera">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/back_right/image</topic>
+        <gz_frame_id>camera_back_right_link</gz_frame_id>
+        <camera>
+          <horizontal_fov>1.2217</horizontal_fov>
+          <image>
+            <width>1600</width>
+            <height>900</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+          <lens>
+            <intrinsics>
+              <fx>1142.5</fx>
+              <fy>1142.5</fy>
+              <cx>800</cx>
+              <cy>450</cy>
+              <s>0</s>
+            </intrinsics>
+          </lens>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </link>
+    <joint name="camera_back_right_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>camera_back_right_link</child>
+    </joint>
+
+    <!-- ================================================================== -->
+    <!-- GROUND ROBOT GPU LiDAR                                             -->
+    <!-- High resolution: 1800 horizontal x 64 vertical beams               -->
+    <!-- Range: 0.5m - 120m, Vertical FOV: -25 to +15 degrees              -->
+    <!-- Gaussian noise: stddev 0.02m (typical Velodyne/Ouster spec)        -->
+    <!-- ================================================================== -->
+    <link name="lidar_ground_link">
+      <pose relative_to="sensor_base">0 0 1.8 0 0 0</pose>
+      <inertial>
+        <mass>0.8</mass>
+        <inertia>
+          <ixx>0.005</ixx><iyy>0.005</iyy><izz>0.005</izz>
+        </inertia>
+      </inertial>
+      <visual name="lidar_visual">
+        <geometry><cylinder><radius>0.05</radius><length>0.1</length></cylinder></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient></material>
+      </visual>
+      <sensor name="gpu_lidar_ground" type="gpu_lidar">
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <visualize>true</visualize>
+        <topic>lidar/ground/points</topic>
+        <gz_frame_id>lidar_ground_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>1800</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>64</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.4363</min_angle>  <!-- -25 degrees -->
+              <max_angle>0.2618</max_angle>   <!-- +15 degrees -->
+            </vertical>
+          </scan>
+          <range>
+            <min>0.5</min>
+            <max>120</max>
+            <resolution>0.01</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.02</stddev>
+          </noise>
+        </lidar>
+      </sensor>
+    </link>
+    <joint name="lidar_ground_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>lidar_ground_link</child>
+    </joint>
+
+    <!-- ================================================================== -->
+    <!-- DRONE GPU LiDAR                                                    -->
+    <!-- Optimized for aerial: 1200 horizontal x 32 vertical beams          -->
+    <!-- Wide vertical FOV: -45 to +45 degrees for downward/upward view     -->
+    <!-- Range: 0.3m - 100m (closer min for low-altitude ops)               -->
+    <!-- Gaussian noise: stddev 0.03m (slightly higher for drone vibration) -->
+    <!-- ================================================================== -->
+    <link name="lidar_drone_link">
+      <pose relative_to="sensor_base">0 0 0 0 0 0</pose>
+      <inertial>
+        <mass>0.3</mass>
+        <inertia>
+          <ixx>0.002</ixx><iyy>0.002</iyy><izz>0.002</izz>
+        </inertia>
+      </inertial>
+      <visual name="lidar_visual">
+        <geometry><cylinder><radius>0.04</radius><length>0.06</length></cylinder></geometry>
+        <material><ambient>0.2 0.2 0.2 1</ambient></material>
+      </visual>
+      <sensor name="gpu_lidar_drone" type="gpu_lidar">
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <visualize>true</visualize>
+        <topic>lidar/drone/points</topic>
+        <gz_frame_id>lidar_drone_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>1200</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>32</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.7854</min_angle>  <!-- -45 degrees (look down) -->
+              <max_angle>0.7854</max_angle>   <!-- +45 degrees (look up) -->
+            </vertical>
+          </scan>
+          <range>
+            <min>0.3</min>
+            <max>100</max>
+            <resolution>0.01</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.03</stddev>
+          </noise>
+        </lidar>
+      </sensor>
+    </link>
+    <joint name="lidar_drone_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>lidar_drone_link</child>
+    </joint>
+
+    <!-- ================================================================== -->
+    <!-- IMU SENSOR                                                         -->
+    <!-- High-rate: 200Hz for state estimation                              -->
+    <!-- Noise modeled after typical MEMS IMU (MPU-6050 class)              -->
+    <!-- Angular velocity noise: 0.0003 rad/s (0.017 deg/s)                 -->
+    <!-- Linear acceleration noise: 0.01 m/s^2                              -->
+    <!-- ================================================================== -->
+    <link name="imu_link">
+      <pose relative_to="sensor_base">0 0 0.5 0 0 0</pose>
+      <inertial>
+        <mass>0.02</mass>
+        <inertia>
+          <ixx>0.00001</ixx><iyy>0.00001</iyy><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <sensor name="imu_sensor" type="imu">
+        <always_on>true</always_on>
+        <update_rate>200</update_rate>
+        <visualize>false</visualize>
+        <topic>imu/data</topic>
+        <gz_frame_id>imu_link</gz_frame_id>
+        <imu>
+          <angular_velocity>
+            <x>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.0003</stddev>
+              </noise>
+            </x>
+            <y>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.0003</stddev>
+              </noise>
+            </y>
+            <z>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.0003</stddev>
+              </noise>
+            </z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.01</stddev>
+              </noise>
+            </x>
+            <y>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.01</stddev>
+              </noise>
+            </y>
+            <z>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.01</stddev>
+              </noise>
+            </z>
+          </linear_acceleration>
+          <!-- Enable gravity reference -->
+          <enable_orientation>true</enable_orientation>
+        </imu>
+      </sensor>
+    </link>
+    <joint name="imu_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>imu_link</child>
+    </joint>
+
+    <!-- ================================================================== -->
+    <!-- GPS/NavSat SENSOR                                                  -->
+    <!-- Rate: 10Hz (typical consumer GPS)                                  -->
+    <!-- Position noise: 0.5m horizontal, 1.0m vertical (RTK-like accuracy) -->
+    <!-- Velocity noise: 0.05 m/s horizontal, 0.1 m/s vertical              -->
+    <!-- ================================================================== -->
+    <link name="gps_link">
+      <pose relative_to="sensor_base">0 0 0.6 0 0 0</pose>
+      <inertial>
+        <mass>0.03</mass>
+        <inertia>
+          <ixx>0.00001</ixx><iyy>0.00001</iyy><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <visual name="gps_visual">
+        <geometry><box><size>0.03 0.03 0.01</size></box></geometry>
+        <material><ambient>0 0.5 0 1</ambient></material>
+      </visual>
+      <sensor name="navsat_sensor" type="navsat">
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <topic>gps/fix</topic>
+        <gz_frame_id>gps_link</gz_frame_id>
+        <navsat>
+          <position_sensing>
+            <horizontal>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.5</stddev>  <!-- ~0.5m horizontal error -->
+              </noise>
+            </horizontal>
+            <vertical>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>1.0</stddev>  <!-- ~1m vertical error -->
+              </noise>
+            </vertical>
+          </position_sensing>
+          <velocity_sensing>
+            <horizontal>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.05</stddev>
+              </noise>
+            </horizontal>
+            <vertical>
+              <noise type="gaussian">
+                <mean>0</mean>
+                <stddev>0.1</stddev>
+              </noise>
+            </vertical>
+          </velocity_sensing>
+        </navsat>
+      </sensor>
+    </link>
+    <joint name="gps_joint" type="fixed">
+      <parent>sensor_base</parent>
+      <child>gps_link</child>
+    </joint>
+
+  </model>
+</sdf>
