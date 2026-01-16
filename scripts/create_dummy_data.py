@@ -45,14 +45,18 @@ def create_dummy_session(session_path, num_frames=20):
 
         # Dummy camera image (just black image for testing)
         dummy_img = np.zeros((900, 1600, 3), dtype=np.uint8)
+        img_path = f'{session_path}/images/{frame_id}_CAM_FRONT.jpg'
         try:
             import cv2
-            cv2.imwrite(f'{session_path}/images/{frame_id}_CAM_FRONT.jpg', dummy_img)
-        except ImportError:
-            # Fallback: create empty file
-            from PIL import Image
-            img = Image.fromarray(dummy_img)
-            img.save(f'{session_path}/images/{frame_id}_CAM_FRONT.jpg')
+            cv2.imwrite(img_path, dummy_img)
+        except Exception:
+            try:
+                from PIL import Image
+                img = Image.fromarray(dummy_img)
+                img.save(img_path)
+            except Exception:
+                # Last resort: save as raw numpy
+                np.save(img_path.replace('.jpg', '.npy'), dummy_img)
 
     print(f'Created {num_frames} frames in {session_path}')
 
