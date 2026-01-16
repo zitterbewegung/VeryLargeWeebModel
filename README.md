@@ -151,6 +151,29 @@ screen -r training
 | Connection dropped | Use `screen`, reattach with `screen -r` |
 | NaN loss | Lower learning rate: `--lr 0.00001` |
 | Import errors | Run setup script again |
+| Safari certificate error | See [Jupyter SSL Certificate Setup](#jupyter-ssl-certificate-safari) below |
+
+### Jupyter SSL Certificate (Safari)
+
+When using Vast.ai's direct Jupyter access, Safari blocks the self-signed certificate. To fix:
+
+1. Open the Jupyter URL in Safari → "This Connection Is Not Private" appears
+2. Click **"Show Details"** → **"visit this website"** → enter password
+
+**If that doesn't work**, add the certificate to Keychain:
+
+1. In Safari, click the lock icon in the address bar
+2. Click **"Show Certificate"**
+3. Drag the certificate icon to your Desktop (creates a `.cer` file)
+4. Open **Keychain Access** (Spotlight → search "Keychain Access")
+5. Select **"System"** in the left sidebar
+6. Drag the `.cer` file into the Keychain Access window
+7. Double-click the certificate → expand **"Trust"**
+8. Set **"When using this certificate"** to **"Always Trust"**
+9. Close the window and enter your password to confirm
+10. Restart Safari and revisit the Jupyter URL
+
+**Chrome/Firefox users**: Click "Advanced" → "Proceed anyway" when prompted.
 
 ## Sanity Check
 
