@@ -49,7 +49,6 @@ dataset_config = dict(
     future_frames=future_frames,
     frame_skip=frame_skip,
     agent_type='both',  # 'drone', 'rover', or 'both'
-    split='train',
     val_ratio=0.1,
     test_ratio=0.1,
     image_size=(900, 1600),
