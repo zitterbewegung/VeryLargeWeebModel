@@ -211,7 +211,8 @@ log_step "Installing mesh processing dependencies..."
 pip install -q \
     pyvista \
     fast_simplification \
-    numpy-stl
+    numpy-stl \
+    pycollada
 
 log_success "Mesh processing dependencies installed"
 
