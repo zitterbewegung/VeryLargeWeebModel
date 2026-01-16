@@ -165,13 +165,12 @@ When using Vast.ai's direct Jupyter access, Safari blocks the self-signed certif
 1. In Safari, click the lock icon in the address bar
 2. Click **"Show Certificate"**
 3. Drag the certificate icon to your Desktop (creates a `.cer` file)
-4. Open **Keychain Access** (Spotlight → search "Keychain Access")
-5. Select **"System"** in the left sidebar
-6. Drag the `.cer` file into the Keychain Access window
-7. Double-click the certificate → expand **"Trust"**
-8. Set **"When using this certificate"** to **"Always Trust"**
-9. Close the window and enter your password to confirm
-10. Restart Safari and revisit the Jupyter URL
+4. **Double-click the `.cer` file** - Keychain Access opens automatically
+5. Enter your password to add the certificate
+6. In Keychain Access, double-click the certificate → expand **"Trust"**
+7. Set **"When using this certificate"** to **"Always Trust"**
+8. Close and enter your password to confirm
+9. Restart Safari and revisit the Jupyter URL
 
 **Chrome/Firefox users**: Click "Advanced" → "Proceed anyway" when prompted.
 
