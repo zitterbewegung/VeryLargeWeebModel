@@ -42,13 +42,24 @@ from torch.utils.tensorboard import SummaryWriter
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import our custom dataset
+# Import our custom datasets
 from dataset.gazebo_occworld_dataset import (
     GazeboOccWorldDataset,
     DatasetConfig,
     collate_fn,
     create_dataloader,
 )
+
+# Try to import nuScenes dataset
+try:
+    from dataset.nuscenes_occworld_dataset import (
+        NuScenesOccWorldDataset,
+        NuScenesConfig,
+        collate_fn as nuscenes_collate_fn,
+    )
+    HAS_NUSCENES = True
+except ImportError:
+    HAS_NUSCENES = False
 
 
 def parse_args():
@@ -340,21 +351,61 @@ def main():
     print("Creating dataset...")
     data_root = getattr(config, 'data_root', 'data/tokyo_gazebo')
 
-    dataset_cfg = DatasetConfig(
-        history_frames=getattr(config, 'history_frames', 4),
-        future_frames=getattr(config, 'future_frames', 6),
-        frame_skip=getattr(config, 'frame_skip', 1),
-        agent_type=getattr(config, 'dataset_config', {}).get('agent_type', 'both'),
-        split='train',
-        point_cloud_range=getattr(config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)),
-        voxel_size=getattr(config, 'voxel_size', (0.4, 0.4, 1.25)),
-    )
+    # Detect dataset type from config
+    dataset_type = getattr(config, 'dataset_type', None)
+    if dataset_type is None:
+        # Auto-detect from config path or data_root
+        if 'nuscenes' in str(args.config).lower() or 'nuscenes' in str(data_root).lower():
+            dataset_type = 'nuscenes'
+        else:
+            dataset_type = 'gazebo'
 
-    train_dataset = GazeboOccWorldDataset(data_root, dataset_cfg)
+    print(f"Dataset type: {dataset_type}")
 
-    val_cfg = DatasetConfig(**vars(dataset_cfg))
-    val_cfg.split = 'val'
-    val_dataset = GazeboOccWorldDataset(data_root, val_cfg)
+    if dataset_type == 'nuscenes':
+        if not HAS_NUSCENES:
+            raise ImportError("nuScenes dataset requested but nuscenes_occworld_dataset.py not found. "
+                            "Run ./scripts/setup_training_data.sh --nuscenes first.")
+
+        # Create nuScenes dataset
+        nuscenes_cfg = NuScenesConfig(
+            version=getattr(config, 'dataset_config', {}).get('version', 'v1.0-mini'),
+            history_frames=getattr(config, 'history_frames', 4),
+            future_frames=getattr(config, 'future_frames', 6),
+            point_cloud_range=tuple(getattr(config, 'point_cloud_range', (-40, -40, -1, 40, 40, 5.4))),
+            voxel_size=tuple(getattr(config, 'voxel_size', (0.4, 0.4, 0.4))),
+            split='train',
+        )
+        train_dataset = NuScenesOccWorldDataset(data_root, nuscenes_cfg)
+
+        val_nuscenes_cfg = NuScenesConfig(
+            version=nuscenes_cfg.version,
+            history_frames=nuscenes_cfg.history_frames,
+            future_frames=nuscenes_cfg.future_frames,
+            point_cloud_range=nuscenes_cfg.point_cloud_range,
+            voxel_size=nuscenes_cfg.voxel_size,
+            split='val',
+        )
+        val_dataset = NuScenesOccWorldDataset(data_root, val_nuscenes_cfg)
+        dataset_collate_fn = nuscenes_collate_fn
+    else:
+        # Create Gazebo dataset
+        dataset_cfg = DatasetConfig(
+            history_frames=getattr(config, 'history_frames', 4),
+            future_frames=getattr(config, 'future_frames', 6),
+            frame_skip=getattr(config, 'frame_skip', 1),
+            agent_type=getattr(config, 'dataset_config', {}).get('agent_type', 'both'),
+            split='train',
+            point_cloud_range=getattr(config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)),
+            voxel_size=getattr(config, 'voxel_size', (0.4, 0.4, 1.25)),
+        )
+
+        train_dataset = GazeboOccWorldDataset(data_root, dataset_cfg)
+
+        val_cfg = DatasetConfig(**vars(dataset_cfg))
+        val_cfg.split = 'val'
+        val_dataset = GazeboOccWorldDataset(data_root, val_cfg)
+        dataset_collate_fn = collate_fn
 
     # Create dataloaders
     batch_size = args.batch_size or getattr(config, 'data', {}).get('samples_per_gpu', 1)
@@ -364,7 +415,7 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         num_workers=4,
-        collate_fn=collate_fn,
+        collate_fn=dataset_collate_fn,
         pin_memory=True,
         drop_last=True,
     )
@@ -374,7 +425,7 @@ def main():
         batch_size=batch_size,
         shuffle=False,
         num_workers=4,
-        collate_fn=collate_fn,
+        collate_fn=dataset_collate_fn,
         pin_memory=True,
     )
 
