@@ -96,7 +96,7 @@ sudo apt-get install -y -qq \
     curl \
     unzip \
     htop \
-    tmux \
+    screen \
     nvtop \
     tree \
     rsync
@@ -204,6 +204,18 @@ pip install -q \
 log_success "OccWorld dependencies installed"
 
 # =============================================================================
+# Mesh Processing Dependencies
+# =============================================================================
+log_step "Installing mesh processing dependencies..."
+
+pip install -q \
+    pyvista \
+    fast_simplification \
+    numpy-stl
+
+log_success "Mesh processing dependencies installed"
+
+# =============================================================================
 # Clone OccWorld Repository
 # =============================================================================
 log_step "Setting up OccWorld repository..."
@@ -291,9 +303,9 @@ alias logs='tail -f ~/checkpoints/*/training.log 2>/dev/null || echo "No trainin
 
 # Quick functions
 start_training() {
-    tmux new-session -d -s training "conda activate occworld && cd ~/VeryLargeWeebModel && python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints/occworld_tokyo"
-    echo "Training started in tmux session 'training'"
-    echo "Attach with: tmux attach -t training"
+    screen -dmS training bash -c "conda activate occworld && cd ~/VeryLargeWeebModel && python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints/occworld_tokyo"
+    echo "Training started in screen session 'training'"
+    echo "Attach with: screen -r training"
 }
 
 backup_checkpoints() {
@@ -380,11 +392,13 @@ echo "   Visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
 echo "   Download to: ~/VeryLargeWeebModel/pretrained/"
 echo ""
 echo "3. Start training:"
-echo "   tmux new -s training"
+echo "   screen -S training"
 echo "   conda activate occworld"
 echo "   cd ~/VeryLargeWeebModel"
 echo "   python train.py --config config/finetune_tokyo.py \\"
 echo "       --work-dir ~/checkpoints/occworld_tokyo"
+echo "   # Detach: Ctrl+A, then D"
+echo "   # Reattach: screen -r training"
 echo ""
 echo "4. Monitor training:"
 echo "   - GPU: nvtop"
@@ -392,7 +406,7 @@ echo "   - TensorBoard: tb (then open http://<IP>:6006)"
 echo "   - Logs: logs"
 echo ""
 echo "5. IMPORTANT - Don't forget to:"
-echo "   - Use tmux to prevent training loss on disconnect"
+echo "   - Use screen to prevent training loss on disconnect"
 echo "   - Download checkpoints before terminating instance"
 echo "   - Terminate instance when done (billing is per-minute!)"
 echo ""

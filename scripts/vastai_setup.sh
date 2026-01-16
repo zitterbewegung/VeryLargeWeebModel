@@ -81,6 +81,15 @@ pip install --quiet \
 
 log_success "ML dependencies installed"
 
+# Install mesh processing dependencies (for PLATEAU data conversion)
+log_info "Installing mesh processing dependencies..."
+pip install --quiet \
+    pyvista \
+    fast_simplification \
+    numpy-stl
+
+log_success "Mesh processing dependencies installed"
+
 # Setup project directory
 PROJECT_DIR="${WORK_DIR}/VeryLargeWeebModel"
 if [ ! -d "$PROJECT_DIR" ]; then
