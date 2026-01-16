@@ -89,6 +89,14 @@ def parse_args():
     parser.add_argument('--use-occworld', action='store_true',
                         help='Use OccWorld library if installed')
 
+    # Hugging Face upload
+    parser.add_argument('--hf-repo', type=str, default=None,
+                        help='HuggingFace repo to upload model (e.g., username/model-name)')
+    parser.add_argument('--hf-token', type=str, default=None,
+                        help='HuggingFace token (or set HF_TOKEN env var)')
+    parser.add_argument('--hf-private', action='store_true',
+                        help='Make HuggingFace repo private')
+
     return parser.parse_args()
 
 
@@ -139,6 +147,165 @@ def try_import_occworld():
     except ImportError:
         print("OccWorld library not found, using standalone mode")
         return False, None
+
+
+def upload_to_huggingface(model, work_dir, args, config, best_val_loss):
+    """Upload trained model to HuggingFace Hub."""
+    try:
+        from huggingface_hub import HfApi, create_repo, upload_file
+    except ImportError:
+        print("ERROR: huggingface_hub not installed. Run: pip install huggingface_hub")
+        return False
+
+    hf_token = args.hf_token or os.environ.get('HF_TOKEN')
+    if not hf_token:
+        print("ERROR: No HuggingFace token. Set --hf-token or HF_TOKEN env var")
+        print("Get token at: https://huggingface.co/settings/tokens")
+        return False
+
+    repo_id = args.hf_repo
+    print(f"\nUploading model to HuggingFace: {repo_id}")
+
+    api = HfApi()
+
+    # Create repo if it doesn't exist
+    try:
+        create_repo(repo_id, token=hf_token, private=args.hf_private, exist_ok=True)
+        print(f"  Repository ready: https://huggingface.co/{repo_id}")
+    except Exception as e:
+        print(f"  Warning creating repo: {e}")
+
+    # Save model in HuggingFace format
+    hf_dir = work_dir / 'hf_upload'
+    hf_dir.mkdir(exist_ok=True)
+
+    # Save PyTorch model
+    model_path = hf_dir / 'pytorch_model.bin'
+    torch.save(model.state_dict(), model_path)
+
+    # Save config
+    config_dict = {
+        'history_frames': getattr(config, 'history_frames', 4),
+        'future_frames': getattr(config, 'future_frames', 6),
+        'point_cloud_range': getattr(config, 'point_cloud_range', [-40, -40, -2, 40, 40, 150]),
+        'voxel_size': getattr(config, 'voxel_size', [0.4, 0.4, 1.25]),
+        'grid_size': getattr(config, 'grid_size', [200, 200, 121]),
+        'best_val_loss': best_val_loss,
+    }
+
+    import json
+    config_path = hf_dir / 'config.json'
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=2)
+
+    # Create model card
+    model_card = f"""---
+license: mit
+tags:
+- occworld
+- occupancy-prediction
+- autonomous-driving
+- 3d-perception
+- tokyo
+- plateau
+datasets:
+- tokyo-plateau
+---
+
+# OccWorld Tokyo Model
+
+Fine-tuned OccWorld model on Tokyo PLATEAU 3D city data.
+
+## Model Description
+
+This model predicts future 3D occupancy grids from historical observations,
+trained on simulated data from Tokyo's PLATEAU 3D city models.
+
+## Training Data
+
+- **Source**: Tokyo PLATEAU 3D city models (Project PLATEAU, MLIT Japan)
+- **License**: CC BY 4.0
+- **Simulation**: Gazebo with ArduPilot
+
+## Performance
+
+- **Best Validation Loss**: {best_val_loss:.4f}
+
+## Usage
+
+```python
+import torch
+from huggingface_hub import hf_hub_download
+
+# Download model
+model_path = hf_hub_download(repo_id="{repo_id}", filename="pytorch_model.bin")
+
+# Load weights
+state_dict = torch.load(model_path)
+model.load_state_dict(state_dict)
+```
+
+## Configuration
+
+```json
+{json.dumps(config_dict, indent=2)}
+```
+
+## Citation
+
+If you use this model, please cite:
+
+```bibtex
+@article{{occworld2024,
+  title={{OccWorld: Learning a 3D Occupancy World Model for Autonomous Driving}},
+  author={{Zheng, Wenzhao and Chen, Weiliang and others}},
+  journal={{ECCV}},
+  year={{2024}}
+}}
+```
+
+## Data Attribution
+
+> 3D city model data provided by Ministry of Land, Infrastructure, Transport
+> and Tourism (MLIT), Japan - Project PLATEAU. Licensed under CC BY 4.0.
+
+## License
+
+MIT License
+"""
+
+    readme_path = hf_dir / 'README.md'
+    with open(readme_path, 'w') as f:
+        f.write(model_card)
+
+    # Upload files
+    files_to_upload = [
+        ('pytorch_model.bin', 'pytorch_model.bin'),
+        ('config.json', 'config.json'),
+        ('README.md', 'README.md'),
+    ]
+
+    # Also upload best.pth if it exists
+    best_pth = work_dir / 'checkpoints' / 'best.pth'
+    if best_pth.exists():
+        files_to_upload.append((str(best_pth), 'best.pth'))
+
+    for local_file, repo_file in files_to_upload:
+        local_path = hf_dir / local_file if not local_file.startswith('/') else Path(local_file)
+        if local_path.exists():
+            print(f"  Uploading {repo_file}...")
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(local_path),
+                    path_in_repo=repo_file,
+                    repo_id=repo_id,
+                    token=hf_token,
+                )
+            except Exception as e:
+                print(f"    Warning: {e}")
+
+    print(f"\nModel uploaded to: https://huggingface.co/{repo_id}")
+    return True
 
 
 class SimpleOccupancyModel(nn.Module):
@@ -482,6 +649,10 @@ def main():
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {work_dir / 'checkpoints'}")
     print("=" * 60)
+
+    # Upload to HuggingFace if requested
+    if args.hf_repo:
+        upload_to_huggingface(model, work_dir, args, config, best_val_loss)
 
 
 if __name__ == '__main__':
