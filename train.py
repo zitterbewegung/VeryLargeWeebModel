@@ -213,6 +213,7 @@ class SimpleOccupancyModel(nn.Module):
             future_occupancy: [B, T_f, X, Y, Z] - Predicted future occupancy
         """
         batch_size = history_occupancy.shape[0]
+        target_shape = history_occupancy.shape[2:]  # [X, Y, Z]
 
         # Encode history
         # Input: [B, T_h, X, Y, Z] -> [B, T_h, X, Y, Z] (treat T_h as channels)
@@ -235,7 +236,16 @@ class SimpleOccupancyModel(nn.Module):
                                               encoded.shape[3],
                                               encoded.shape[4])
 
-        future_occ = self.decoder(decoded_input)  # [B, T_f, X, Y, Z]
+        future_occ = self.decoder(decoded_input)  # [B, T_f, X', Y', Z']
+
+        # Resize to match target dimensions (handles non-divisible grid sizes)
+        if future_occ.shape[2:] != target_shape:
+            future_occ = torch.nn.functional.interpolate(
+                future_occ,
+                size=target_shape,
+                mode='trilinear',
+                align_corners=False
+            )
 
         return torch.sigmoid(future_occ)
 
