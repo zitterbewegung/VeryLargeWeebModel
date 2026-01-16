@@ -179,29 +179,79 @@ gradient_checkpointing = True
 
 ---
 
-## Phase 7: Cost Estimates
+## Phase 7: GPU Selection & Cost Estimates
 
-### Single A100 (Current)
-- Data: Tokyo only (~2GB)
-- Time: ~30 hours
-- Cost: ~$15
+### Vast.ai GPU Pricing (as of Jan 2026)
 
-### Full Japan - Single 8x A100 Node
-- Data: All Japan (~60GB)
-- Time: ~48-72 hours
-- Cost: ~$200-400 (Vast.ai 8x A100 ~$4-6/hr)
+| GPU | $/hr | VRAM | Viable for OccWorld? |
+|-----|------|------|----------------------|
+| RTX 3090 | $0.13 | 24GB | Yes (batch 1) |
+| RTX 3090 Ti | $0.13 | 24GB | Yes (batch 1) |
+| RTX 4090 | $0.29 | 24GB | Yes (batch 1-2) |
+| RTX 5090 | $0.35 | 32GB | Yes (batch 2) |
+| L40S | $0.47 | 48GB | Yes (batch 2-3) |
+| A100 PCIE | $0.52 | 40GB | Yes (batch 2) |
+| A100 SXM4 | $0.64 | 40/80GB | Yes (batch 2-4) |
+| RTX A6000 | $0.37 | 48GB | Yes (batch 2-3) |
+| H100 SXM | $1.56 | 80GB | Yes (batch 4+) |
+| H200 | $2.19 | 141GB | Overkill |
 
-### Full Japan - Multi-Node (2x 8x A100)
-- Data: All Japan (~60GB)
-- Time: ~24-36 hours
-- Cost: ~$200-350
+### Not Recommended (VRAM too low)
 
-### Recommended Approach
+| GPU | VRAM | Issue |
+|-----|------|-------|
+| RTX 3060 | 12GB | Too tight, very slow |
+| RTX 4060/4070 | 8-12GB | Will OOM |
+| RTX 3080 | 10GB | High OOM risk |
+| RTX 2080 Ti | 11GB | Old, too slow |
+| Tesla V100 | 16-32GB | Old architecture |
+
+### Tokyo Only (~2GB data)
+
+| GPU | $/hr | Batch | Time | Total Cost |
+|-----|------|-------|------|------------|
+| **RTX 3090** | $0.13 | 1 | ~48 hrs | **~$6** |
+| RTX 3090 Ti | $0.13 | 1 | ~45 hrs | ~$6 |
+| RTX 4090 | $0.29 | 1-2 | ~36 hrs | ~$10 |
+| A100 40GB | $0.52 | 2 | ~30 hrs | ~$16 |
+| A100 80GB | $0.79 | 4 | ~24 hrs | ~$19 |
+
+**Recommendation:** RTX 3090 @ $0.13/hr for Tokyo-only (~$6 total)
+
+### Full Japan (~60GB data, ~30x more)
+
+| GPU | $/hr | Batch | Est. Time | Est. Cost |
+|-----|------|-------|-----------|-----------|
+| RTX 3090 | $0.13 | 1 | ~200-300 hrs | ~$26-39 |
+| A100 40GB | $0.52 | 2 | ~100-150 hrs | ~$52-78 |
+| A100 80GB | $0.79 | 4 | ~60-80 hrs | ~$47-63 |
+| **4x A100** | ~$2.50 | 8 | ~20-30 hrs | **~$50-75** |
+| **8x A100** | ~$5.00 | 16 | ~10-15 hrs | **~$50-75** |
+
+### Why Single GPU Doesn't Scale
+
+For full Japan with a single RTX 3090:
+- Batch size 1 = sees one city sample at a time
+- Model learns slower (less gradient diversity)
+- 200+ hours = 8+ days of rental
+- High risk of instance interruption
+- No fault tolerance
+
+### Recommendation by Data Size
+
+| Data Size | Best GPU | Why |
+|-----------|----------|-----|
+| Tokyo only | RTX 3090 ($0.13/hr) | Cheapest viable |
+| 5-10 cities | A100 40GB ($0.52/hr) | Good balance |
+| Full Japan | 4-8x A100 node ($2.50-5/hr) | Faster, same cost |
+
+### Cost Summary
+
 | Stage | Setup | Est. Cost |
 |-------|-------|-----------|
-| Prototype | 1x A100, Tokyo only | $15 |
-| Validate | 1x A100, 5 major cities | $30 |
-| Full train | 8x A100, all Japan | $300 |
+| Prototype | RTX 3090, Tokyo only | **$6** |
+| Validate | A100 40GB, 5 major cities | ~$30 |
+| Full train | 8x A100, all Japan | ~$50-75 |
 
 ---
 
