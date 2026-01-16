@@ -2,7 +2,7 @@
 """
 Create dummy training data for testing the OccWorld pipeline.
 
-This generates synthetic occupancy grids, poses, and LiDAR data
+This generates synthetic occupancy grids, poses, LiDAR, and images
 to verify the training pipeline works before using real simulation data.
 
 Usage:
@@ -18,22 +18,41 @@ def create_dummy_session(session_path, num_frames=20):
     os.makedirs(f'{session_path}/occupancy', exist_ok=True)
     os.makedirs(f'{session_path}/poses', exist_ok=True)
     os.makedirs(f'{session_path}/lidar', exist_ok=True)
+    os.makedirs(f'{session_path}/images', exist_ok=True)
 
     for i in range(num_frames):
-        occ = np.random.randint(0, 2, (200, 200, 121), dtype=np.uint8)
-        np.savez_compressed(f'{session_path}/occupancy/{i:06d}_occupancy.npz', occupancy=occ)
+        frame_id = f'{i:06d}'
 
+        # Occupancy grid (200x200x121)
+        occ = np.random.randint(0, 2, (200, 200, 121), dtype=np.uint8)
+        np.savez_compressed(f'{session_path}/occupancy/{frame_id}_occupancy.npz', occupancy=occ)
+
+        # Pose (nested dict format expected by dataset loader)
         pose = {
-            'position': [float(i), 0.0, 10.0 + i],
-            'orientation': [0.0, 0.0, 0.0, 1.0],
-            'linear_velocity': [1.0, 0.0, 0.0],
-            'angular_velocity': [0.0, 0.0, 0.0]
+            'position': {'x': float(i), 'y': 0.0, 'z': 10.0 + i},
+            'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+            'velocity': {
+                'linear': {'x': 1.0, 'y': 0.0, 'z': 0.0},
+                'angular': {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            }
         }
-        with open(f'{session_path}/poses/{i:06d}.json', 'w') as f:
+        with open(f'{session_path}/poses/{frame_id}.json', 'w') as f:
             json.dump(pose, f)
 
+        # LiDAR points
         points = np.random.randn(1000, 4).astype(np.float32)
-        np.save(f'{session_path}/lidar/{i:06d}_LIDAR.npy', points)
+        np.save(f'{session_path}/lidar/{frame_id}_LIDAR.npy', points)
+
+        # Dummy camera image (just black image for testing)
+        dummy_img = np.zeros((900, 1600, 3), dtype=np.uint8)
+        try:
+            import cv2
+            cv2.imwrite(f'{session_path}/images/{frame_id}_CAM_FRONT.jpg', dummy_img)
+        except ImportError:
+            # Fallback: create empty file
+            from PIL import Image
+            img = Image.fromarray(dummy_img)
+            img.save(f'{session_path}/images/{frame_id}_CAM_FRONT.jpg')
 
     print(f'Created {num_frames} frames in {session_path}')
 
