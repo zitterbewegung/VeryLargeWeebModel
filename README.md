@@ -1,0 +1,183 @@
+# OccWorld Tokyo Training Pipeline
+
+Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data using Gazebo simulation.
+
+## Quick Start (Vast.ai - Recommended)
+
+**Cost: ~$15 | Time: ~30 hours | GPU: A100 40GB**
+
+```bash
+# 1. Rent A100 40GB on vast.ai (~$0.50/hr)
+#    - Image: vastai/pytorch
+#    - Disk: 50GB+
+#    - Reliability: >95%
+
+# 2. SSH into your instance
+ssh -p PORT root@ssh.vast.ai
+
+# 3. Clone and setup
+git clone https://github.com/YOUR_USERNAME/VeryLargeWeebModel.git
+cd VeryLargeWeebModel
+./scripts/vastai_setup.sh
+
+# 4. Download data
+./scripts/download_and_prepare_data.sh --all
+
+# 5. Train (use screen to keep alive)
+screen -S training
+python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
+# Detach: Ctrl+A, then D
+
+# 6. Download results (from local machine)
+scp -P PORT root@ssh.vast.ai:/workspace/checkpoints/best.pth ./
+
+# 7. DESTROY INSTANCE (stop billing!)
+```
+
+## Training Options
+
+| Provider | GPU | $/hr | Time | Total Cost |
+|----------|-----|------|------|------------|
+| **Vast.ai** | A100 40GB | $0.50 | ~30 hrs | **~$15** |
+| Vast.ai | A100 80GB | $0.79 | ~24 hrs | ~$19 |
+| Vast.ai | RTX 3090 | $0.25 | ~48 hrs | ~$12 |
+| Lambda Cloud | A100 | $1.79 | ~24 hrs | ~$43 |
+| Local Mac | M1/M2/M3 | $0 | 5-7 days | $0 |
+
+### Vast.ai (Cheapest)
+```bash
+./scripts/vastai_setup.sh
+python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
+```
+
+### Lambda Cloud (Easiest)
+```bash
+./scripts/lambda_setup.sh
+python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints
+```
+
+### Local Mac (Free)
+```bash
+pip install torch torchvision tqdm scipy opencv-python
+python train.py --config config/finetune_tokyo.py --work-dir ./out --batch-size 1
+```
+
+## GPU Comparison
+
+| GPU | VRAM | Est. Time | Notes |
+|-----|------|-----------|-------|
+| A100 80GB | 80GB | ~24 hrs | Fastest, batch 2-4 |
+| A100 40GB | 40GB | ~30 hrs | Best value, batch 1-2 |
+| RTX 4090 | 24GB | ~36 hrs | Batch 1 |
+| RTX 3090 | 24GB | ~48 hrs | Batch 1 |
+| RTX 3080 | 10GB | ~60-80 hrs | Tight on VRAM |
+| Mac M3 Max | 64GB unified | 5-7 days | CPU/MPS training |
+
+## Project Structure
+
+```
+VeryLargeWeebModel/
+├── train.py                     # Training script
+├── config/
+│   └── finetune_tokyo.py        # Tokyo dataset config
+├── dataset/
+│   └── gazebo_occworld_dataset.py  # Custom dataset loader
+├── scripts/
+│   ├── vastai_setup.sh          # Vast.ai setup
+│   ├── lambda_setup.sh          # Lambda Cloud setup
+│   ├── download_and_prepare_data.sh  # Data download
+│   └── sanity_check.sh          # Validate codebase
+├── docs/
+│   ├── training_guide.md        # Detailed training guide
+│   ├── vastai_deployment.md     # Vast.ai deployment
+│   ├── lambda_cloud_deployment.md  # Lambda deployment
+│   └── ...
+├── HOW_TO_TRAIN.md              # Quick training reference
+├── ATTRIBUTION.md               # Data licensing info
+└── README.md                    # This file
+```
+
+## Training Commands
+
+### Basic
+```bash
+python train.py --config config/finetune_tokyo.py --work-dir ./checkpoints
+```
+
+### With Options
+```bash
+python train.py \
+    --config config/finetune_tokyo.py \
+    --work-dir ./checkpoints \
+    --batch-size 1 \
+    --lr 0.0001 \
+    --epochs 50
+```
+
+### Resume Training
+```bash
+python train.py \
+    --config config/finetune_tokyo.py \
+    --work-dir ./checkpoints \
+    --resume
+```
+
+## Monitoring
+
+```bash
+# GPU usage
+watch -n 1 nvidia-smi
+
+# TensorBoard
+tensorboard --logdir ./checkpoints --port 6006
+
+# Reattach to training
+screen -r training
+```
+
+## Expected Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Val Loss | 0.45 | 0.28 |
+| mIoU | 0.32 | 0.47 |
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| CUDA out of memory | Use `--batch-size 1` |
+| Training too slow | Use A100 instead of consumer GPU |
+| Connection dropped | Use `screen`, reattach with `screen -r` |
+| NaN loss | Lower learning rate: `--lr 0.00001` |
+| Import errors | Run setup script again |
+
+## Sanity Check
+
+Validate the codebase before deploying:
+
+```bash
+./scripts/sanity_check.sh
+./scripts/sanity_check.sh --full    # Include dependency checks
+./scripts/sanity_check.sh --fix     # Auto-fix common issues
+```
+
+## Data Attribution
+
+This project uses Tokyo PLATEAU 3D city data, licensed under **CC BY 4.0** (commercial use allowed).
+
+> 3D city model data provided by Ministry of Land, Infrastructure, Transport and Tourism (MLIT), Japan - Project PLATEAU.
+
+See [ATTRIBUTION.md](ATTRIBUTION.md) for full licensing details.
+
+## Documentation
+
+- [HOW_TO_TRAIN.md](HOW_TO_TRAIN.md) - Quick training reference
+- [docs/training_guide.md](docs/training_guide.md) - Detailed training guide
+- [docs/vastai_deployment.md](docs/vastai_deployment.md) - Vast.ai deployment
+- [docs/lambda_cloud_deployment.md](docs/lambda_cloud_deployment.md) - Lambda Cloud deployment
+- [ATTRIBUTION.md](ATTRIBUTION.md) - Data licensing and attribution
+
+## License
+
+MIT License. See [ATTRIBUTION.md](ATTRIBUTION.md) for data source licenses.
