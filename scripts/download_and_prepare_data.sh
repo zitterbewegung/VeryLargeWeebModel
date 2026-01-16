@@ -377,6 +377,12 @@ except ImportError:
     HAS_TRIMESH = False
     print("Warning: trimesh not installed. Install with: pip install trimesh")
 
+try:
+    import pyvista as pv
+    HAS_PYVISTA = True
+except ImportError:
+    HAS_PYVISTA = False
+
 
 def create_sdf_model(name: str, mesh_path: str, output_dir: str,
                      scale: float = 1.0, simplify_ratio: float = 0.1):
@@ -391,11 +397,28 @@ def create_sdf_model(name: str, mesh_path: str, output_dir: str,
         try:
             mesh = trimesh.load(mesh_path)
 
-            # Simplify mesh for performance
-            if hasattr(mesh, 'simplify_quadric_decimation'):
-                target_faces = int(len(mesh.faces) * simplify_ratio)
-                if target_faces > 100:
+            # Simplify mesh for performance using pyvista if available
+            if HAS_PYVISTA and hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+                try:
+                    # Convert to pyvista for simplification
+                    faces_pv = np.hstack([[3] + list(f) for f in mesh.faces])
+                    pv_mesh = pv.PolyData(mesh.vertices, faces_pv)
+                    # Decimate to target reduction (0.9 = remove 90% of faces)
+                    target_reduction = 1.0 - simplify_ratio  # simplify_ratio=0.1 means keep 10%
+                    if target_reduction > 0 and target_reduction < 1:
+                        pv_mesh = pv_mesh.decimate(target_reduction)
+                        # Convert back to trimesh
+                        faces_out = pv_mesh.faces.reshape(-1, 4)[:, 1:4]
+                        mesh = trimesh.Trimesh(vertices=pv_mesh.points, faces=faces_out)
+                except Exception as e:
+                    print(f"  Warning: simplification failed, using original mesh: {e}")
+            elif hasattr(mesh, 'simplify_quadric_decimation'):
+                # Fallback to trimesh simplification
+                try:
+                    target_faces = max(100, int(len(mesh.faces) * simplify_ratio))
                     mesh = mesh.simplify_quadric_decimation(target_faces)
+                except Exception as e:
+                    print(f"  Warning: simplification failed, using original mesh: {e}")
 
             # Export as DAE (Collada) for Gazebo
             output_mesh = os.path.join(meshes_dir, f"{name}.dae")
@@ -512,8 +535,15 @@ def create_world_file(models_dir: str, output_file: str,
                       world_name: str = "tokyo_plateau"):
     """Create a Gazebo world file including all models."""
 
+    # Create output directory if needed
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
     model_dirs = [d for d in os.listdir(models_dir)
                   if os.path.isdir(os.path.join(models_dir, d))]
+
+    if not model_dirs:
+        print(f"Warning: No models found in {models_dir}, skipping world file creation")
+        return
 
     # Generate model includes with grid positioning
     includes = []
