@@ -2,6 +2,59 @@
 
 Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data using Gazebo simulation.
 
+## Training Data Options
+
+This project supports two training data sources:
+
+### 1. nuScenes Dataset (Recommended for Quick Start)
+
+Real-world autonomous driving data from nuScenes. OccWorld was originally trained on this dataset, so it works out of the box.
+
+| Pros | Cons |
+|------|------|
+| Real sensor data (camera, LiDAR) | Ground-level driving only |
+| Proven to work with OccWorld | No aerial/drone perspectives |
+| Well-documented format | Fixed environments (Boston, Singapore) |
+
+```bash
+# Setup nuScenes
+./scripts/setup_training_data.sh --nuscenes
+
+# Train on nuScenes
+python train.py --config config/finetune_nuscenes.py --work-dir /workspace/checkpoints
+```
+
+### 2. Tokyo PLATEAU + Gazebo Simulation (Custom Urban Data)
+
+Simulated data using Tokyo's official 3D city models in Gazebo. Supports drones and custom trajectories.
+
+| Pros | Cons |
+|------|------|
+| Tokyo urban environment | Simulated (not real sensors) |
+| Aerial drone perspectives | Requires Gazebo setup |
+| Custom flight patterns | Data generation takes time |
+| Scalable to all Japan | |
+
+```bash
+# Setup Gazebo + PLATEAU models
+./scripts/setup_training_data.sh --gazebo
+
+# Generate training data (1000 frames × 5 sessions = 5000 samples)
+python scripts/gazebo_data_collector.py --frames 1000 --sessions 5
+
+# Train on Tokyo data
+python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
+```
+
+### Combined Setup
+
+Run both data sources:
+```bash
+./scripts/setup_training_data.sh --all
+```
+
+---
+
 ## Quick Start (Vast.ai - Recommended)
 
 **Cost: ~$15 | Time: ~30 hours | GPU: A100 40GB**
@@ -79,13 +132,19 @@ python train.py --config config/finetune_tokyo.py --work-dir ./out --batch-size 
 VeryLargeWeebModel/
 ├── train.py                     # Training script
 ├── config/
-│   └── finetune_tokyo.py        # Tokyo dataset config
+│   ├── finetune_tokyo.py        # Tokyo/Gazebo dataset config
+│   └── finetune_nuscenes.py     # nuScenes dataset config
 ├── dataset/
-│   └── gazebo_occworld_dataset.py  # Custom dataset loader
+│   ├── gazebo_occworld_dataset.py   # Tokyo/Gazebo dataset loader
+│   └── nuscenes_occworld_dataset.py # nuScenes dataset loader
 ├── scripts/
-│   ├── vastai_setup.sh          # Vast.ai setup
+│   ├── vastai_setup.sh          # Vast.ai environment setup
 │   ├── lambda_setup.sh          # Lambda Cloud setup
-│   ├── download_and_prepare_data.sh  # Data download
+│   ├── setup_training_data.sh   # Setup nuScenes + Gazebo data
+│   ├── download_and_prepare_data.sh  # Download PLATEAU models
+│   ├── gazebo_data_collector.py # Generate simulation data
+│   ├── integration_test.py      # Validate pipeline
+│   ├── create_dummy_data.py     # Create test data
 │   └── sanity_check.sh          # Validate codebase
 ├── docs/
 │   ├── training_guide.md        # Detailed training guide
