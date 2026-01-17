@@ -407,8 +407,8 @@ if [ ! -f "$OCCWORLD_MODEL" ]; then
     log_info "Destination: $OCCWORLD_MODEL"
     echo ""
 
-    # Use curl with full progress display
-    if curl -L -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
+    # Use curl with full progress display and resume support (-C -)
+    if curl -L -C - -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
         echo ""
         MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
         MODEL_SIZE_MB=$((MODEL_SIZE / 1024 / 1024))
@@ -450,7 +450,8 @@ if [ "$DOWNLOAD_NUSCENES" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
 
         if [ ! -f "$NUSCENES_ARCHIVE" ]; then
             log_info "Downloading: $NUSCENES_URL"
-            if curl -L -o "$NUSCENES_ARCHIVE" "$NUSCENES_URL" 2>&1; then
+            # Use -C - to resume partial downloads
+        if curl -L -C - -o "$NUSCENES_ARCHIVE" "$NUSCENES_URL" 2>&1; then
                 ARCHIVE_SIZE=$(stat -f%z "$NUSCENES_ARCHIVE" 2>/dev/null || stat -c%s "$NUSCENES_ARCHIVE" 2>/dev/null || echo 0)
                 ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
                 log_info "Downloaded: ${ARCHIVE_SIZE_MB}MB"
@@ -525,7 +526,8 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
             log_info "URL: $PLATEAU_OBJ_URL"
             echo ""
 
-            if curl -L -o "$PLATEAU_OBJ_ARCHIVE" "$PLATEAU_OBJ_URL"; then
+            # Use -C - to resume partial downloads
+        if curl -L -C - -o "$PLATEAU_OBJ_ARCHIVE" "$PLATEAU_OBJ_URL"; then
                 ARCHIVE_SIZE=$(stat -f%z "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || stat -c%s "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || echo 0)
                 ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
                 log_success "Downloaded PLATEAU OBJ: ${ARCHIVE_SIZE_MB}MB"
