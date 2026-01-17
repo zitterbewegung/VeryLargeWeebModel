@@ -20,6 +20,9 @@
 #   --clean-data        Remove existing training data before setup
 #   --clean-checkpoints Remove existing checkpoints before setup
 #   --clean-all         Remove both data and checkpoints
+#   --skip-nuscenes     Skip nuScenes mini download
+#   --skip-plateau      Skip PLATEAU data download
+#   --skip-real-data    Skip all real data downloads (use dummy data)
 #   --help              Show this help
 #
 # Environment Variables:
@@ -83,6 +86,9 @@ EPOCHS=50
 BATCH_SIZE=""
 CLEAN_DATA=false
 CLEAN_CHECKPOINTS=false
+DOWNLOAD_NUSCENES=true
+DOWNLOAD_PLATEAU=true
+SKIP_REAL_DATA=false
 
 # =============================================================================
 # Banner
@@ -117,7 +123,10 @@ while [[ $# -gt 0 ]]; do
         --clean-data)       CLEAN_DATA=true; shift ;;
         --clean-checkpoints) CLEAN_CHECKPOINTS=true; shift ;;
         --clean-all)        CLEAN_DATA=true; CLEAN_CHECKPOINTS=true; shift ;;
-        --help|-h)          head -35 "$0" | tail -30; exit 0 ;;
+        --skip-nuscenes)    DOWNLOAD_NUSCENES=false; shift ;;
+        --skip-plateau)     DOWNLOAD_PLATEAU=false; shift ;;
+        --skip-real-data)   SKIP_REAL_DATA=true; DOWNLOAD_NUSCENES=false; DOWNLOAD_PLATEAU=false; shift ;;
+        --help|-h)          head -40 "$0" | tail -35; exit 0 ;;
         *)                  log_warn "Unknown option: $1"; shift ;;
     esac
 done
@@ -416,9 +425,184 @@ if [ ! -f "$OCCWORLD_MODEL" ]; then
 fi
 
 # =============================================================================
-# Setup Training Data
+# Download nuScenes Mini Dataset (Real Driving Data)
 # =============================================================================
-log_step "Setting up training data..."
+if [ "$DOWNLOAD_NUSCENES" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
+    log_step "Downloading nuScenes Mini dataset (~4GB)..."
+
+    NUSCENES_DIR="${DATA_DIR}/nuscenes"
+    NUSCENES_ARCHIVE="${DATA_DIR}/v1.0-mini.tgz"
+
+    mkdir -p "$NUSCENES_DIR"
+
+    # Check if already downloaded
+    if [ -d "${NUSCENES_DIR}/v1.0-mini" ] && [ -d "${NUSCENES_DIR}/samples" ]; then
+        log_success "nuScenes Mini already downloaded"
+        ls -la "$NUSCENES_DIR"
+    else
+        log_info "Downloading nuScenes Mini from nuscenes.org..."
+        log_info "This is real autonomous driving data (~4GB)"
+        log_warn "Note: nuScenes requires registration. If download fails, visit https://www.nuscenes.org/"
+        echo ""
+
+        # nuScenes direct download link (may require auth)
+        NUSCENES_URL="https://www.nuscenes.org/data/v1.0-mini.tgz"
+
+        if [ ! -f "$NUSCENES_ARCHIVE" ]; then
+            log_info "Downloading: $NUSCENES_URL"
+            if curl -L -o "$NUSCENES_ARCHIVE" "$NUSCENES_URL" 2>&1; then
+                ARCHIVE_SIZE=$(stat -f%z "$NUSCENES_ARCHIVE" 2>/dev/null || stat -c%s "$NUSCENES_ARCHIVE" 2>/dev/null || echo 0)
+                ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
+                log_info "Downloaded: ${ARCHIVE_SIZE_MB}MB"
+            else
+                log_warn "Direct download failed. You may need to register at nuscenes.org"
+                log_info "Manual download: https://www.nuscenes.org/nuscenes#download"
+                log_info "Place v1.0-mini.tgz in: ${DATA_DIR}/"
+            fi
+        fi
+
+        # Extract if archive exists and is valid size
+        if [ -f "$NUSCENES_ARCHIVE" ]; then
+            ARCHIVE_SIZE=$(stat -f%z "$NUSCENES_ARCHIVE" 2>/dev/null || stat -c%s "$NUSCENES_ARCHIVE" 2>/dev/null || echo 0)
+            if [ "$ARCHIVE_SIZE" -gt 100000000 ]; then  # > 100MB
+                log_info "Extracting nuScenes Mini..."
+                cd "$NUSCENES_DIR"
+                tar -xzf "$NUSCENES_ARCHIVE" --strip-components=0 || tar -xzf "$NUSCENES_ARCHIVE"
+                cd "$PROJECT_DIR"
+                log_success "nuScenes Mini extracted"
+
+                # Verify extraction
+                if [ -d "${NUSCENES_DIR}/samples" ] || [ -d "${NUSCENES_DIR}/v1.0-mini/samples" ]; then
+                    log_success "nuScenes Mini ready!"
+                    # Move contents up if nested
+                    if [ -d "${NUSCENES_DIR}/v1.0-mini/samples" ] && [ ! -d "${NUSCENES_DIR}/samples" ]; then
+                        mv ${NUSCENES_DIR}/v1.0-mini/* ${NUSCENES_DIR}/ 2>/dev/null || true
+                    fi
+                else
+                    log_warn "Extraction may have failed - check ${NUSCENES_DIR}"
+                fi
+            else
+                log_warn "Archive too small (${ARCHIVE_SIZE} bytes), download may have failed"
+            fi
+        fi
+    fi
+
+    # Install nuscenes-devkit if needed
+    if ! python3 -c "from nuscenes.nuscenes import NuScenes" 2>/dev/null; then
+        log_info "Installing nuscenes-devkit..."
+        pip install nuscenes-devkit pyquaternion
+    fi
+else
+    log_info "Skipping nuScenes download (--skip-nuscenes or --skip-real-data)"
+fi
+
+# =============================================================================
+# Download PLATEAU Tokyo 3D City Data
+# =============================================================================
+if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
+    log_step "Downloading Tokyo PLATEAU 3D city data..."
+
+    PLATEAU_DIR="${DATA_DIR}/plateau"
+    PLATEAU_RAW="${PLATEAU_DIR}/raw"
+    PLATEAU_MESHES="${PLATEAU_DIR}/meshes"
+
+    mkdir -p "$PLATEAU_RAW"
+    mkdir -p "$PLATEAU_MESHES"
+
+    # PLATEAU OBJ download URL
+    PLATEAU_OBJ_URL="https://gic-plateau.s3.ap-northeast-1.amazonaws.com/2020/13100_tokyo23-ku_2020_obj_3_op.zip"
+    PLATEAU_OBJ_ARCHIVE="${PLATEAU_RAW}/tokyo23ku_obj.zip"
+
+    if [ -d "${PLATEAU_MESHES}/obj" ] && [ "$(ls -A ${PLATEAU_MESHES}/obj 2>/dev/null)" ]; then
+        log_success "PLATEAU meshes already extracted"
+        MESH_COUNT=$(find "${PLATEAU_MESHES}/obj" -name "*.obj" 2>/dev/null | wc -l)
+        log_info "Found $MESH_COUNT OBJ files"
+    else
+        # Download PLATEAU OBJ files (~2.1GB)
+        if [ ! -f "$PLATEAU_OBJ_ARCHIVE" ]; then
+            log_info "Downloading Tokyo PLATEAU OBJ models (~2.1GB)..."
+            log_info "Source: Project PLATEAU (MLIT Japan) - CC BY 4.0"
+            log_info "URL: $PLATEAU_OBJ_URL"
+            echo ""
+
+            if curl -L -o "$PLATEAU_OBJ_ARCHIVE" "$PLATEAU_OBJ_URL"; then
+                ARCHIVE_SIZE=$(stat -f%z "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || stat -c%s "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || echo 0)
+                ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
+                log_success "Downloaded PLATEAU OBJ: ${ARCHIVE_SIZE_MB}MB"
+            else
+                log_error "PLATEAU download failed"
+            fi
+        else
+            log_info "PLATEAU archive already exists"
+        fi
+
+        # Extract
+        if [ -f "$PLATEAU_OBJ_ARCHIVE" ]; then
+            ARCHIVE_SIZE=$(stat -f%z "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || stat -c%s "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || echo 0)
+            if [ "$ARCHIVE_SIZE" -gt 100000000 ]; then  # > 100MB
+                log_info "Extracting PLATEAU meshes..."
+                mkdir -p "${PLATEAU_MESHES}/obj"
+                unzip -q -o "$PLATEAU_OBJ_ARCHIVE" -d "${PLATEAU_MESHES}/obj/" || {
+                    log_warn "Unzip had issues, trying alternate method..."
+                    cd "${PLATEAU_MESHES}/obj" && unzip -o "$PLATEAU_OBJ_ARCHIVE"
+                    cd "$PROJECT_DIR"
+                }
+                MESH_COUNT=$(find "${PLATEAU_MESHES}/obj" -name "*.obj" 2>/dev/null | wc -l)
+                log_success "Extracted $MESH_COUNT OBJ mesh files"
+            fi
+        fi
+    fi
+
+    # Convert PLATEAU to OccWorld training format
+    if [ -f "${PROJECT_DIR}/scripts/plateau_to_occworld.py" ]; then
+        PLATEAU_TRAINING_DIR="${DATA_DIR}/tokyo_gazebo"
+
+        # Check if already converted
+        EXISTING_PLATEAU_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
+
+        if [ "$EXISTING_PLATEAU_SESSIONS" -gt 3 ]; then
+            log_success "PLATEAU training data already generated: $EXISTING_PLATEAU_SESSIONS sessions"
+        else
+            log_info "Converting PLATEAU meshes to OccWorld training format..."
+            log_info "This generates occupancy grids and synthetic trajectories"
+            echo ""
+
+            # Install trimesh if needed
+            if ! python3 -c "import trimesh" 2>/dev/null; then
+                log_info "Installing trimesh for mesh processing..."
+                pip install trimesh
+            fi
+
+            python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
+                --input "${PLATEAU_MESHES}/obj" \
+                --output "$PLATEAU_TRAINING_DIR" \
+                --frames 500 \
+                --sessions 10 \
+                --pattern survey \
+                --max-meshes 30 || {
+                log_warn "PLATEAU conversion had issues, trying with fewer meshes..."
+                python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
+                    --input "${PLATEAU_MESHES}/obj" \
+                    --output "$PLATEAU_TRAINING_DIR" \
+                    --frames 200 \
+                    --sessions 5 \
+                    --max-meshes 10 || log_warn "PLATEAU conversion failed"
+            }
+
+            GENERATED_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
+            log_success "Generated $GENERATED_SESSIONS training sessions from PLATEAU data"
+        fi
+    else
+        log_warn "plateau_to_occworld.py not found, skipping conversion"
+    fi
+else
+    log_info "Skipping PLATEAU download (--skip-plateau or --skip-real-data)"
+fi
+
+# =============================================================================
+# Setup Training Data (Fallback to Dummy if No Real Data)
+# =============================================================================
+log_step "Verifying training data..."
 
 log_info "Creating data directory: ${DATA_DIR}/tokyo_gazebo"
 mkdir -p "${DATA_DIR}/tokyo_gazebo"
