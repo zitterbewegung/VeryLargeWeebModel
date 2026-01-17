@@ -444,23 +444,27 @@ def main():
 
     model = model.to(device)
 
-    # Load pretrained weights
+    # Load pretrained weights or resume checkpoint
+    resume_checkpoint = None
     if not args.from_scratch:
         load_from = getattr(config, 'load_from', None)
         if args.resume_from:
             load_from = args.resume_from
+            resume_checkpoint = load_from
         elif args.resume:
             # Find latest checkpoint
             ckpts = sorted((work_dir / 'checkpoints').glob('epoch_*.pth'))
             if ckpts:
                 load_from = str(ckpts[-1])
+                resume_checkpoint = load_from
 
         if load_from and os.path.exists(load_from):
             print(f"Loading weights from: {load_from}")
-            state_dict = torch.load(load_from, map_location=device)
-            if 'state_dict' in state_dict:
-                state_dict = state_dict['state_dict']
-            model.load_state_dict(state_dict, strict=False)
+            checkpoint = torch.load(load_from, map_location=device)
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'], strict=False)
+            else:
+                model.load_state_dict(checkpoint, strict=False)
 
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -482,13 +486,28 @@ def main():
     # TensorBoard
     writer = SummaryWriter(log_dir=str(work_dir / 'logs'))
 
+    # Resume optimizer/scheduler state if resuming from checkpoint
+    start_epoch = 0
+    best_val_loss = float('inf')
+
+    if resume_checkpoint and os.path.exists(resume_checkpoint):
+        checkpoint = torch.load(resume_checkpoint, map_location=device)
+        if 'epoch' in checkpoint:
+            start_epoch = checkpoint['epoch']
+            print(f"Resuming from epoch {start_epoch}")
+        if 'optimizer' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print("  Restored optimizer state")
+        if 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
+            print("  Restored scheduler state")
+        if 'val_loss' in checkpoint:
+            best_val_loss = checkpoint['val_loss']
+
     # Training loop
     print("=" * 60)
-    print(f"Starting training for {max_epochs} epochs")
+    print(f"Starting training for {max_epochs} epochs (from epoch {start_epoch})")
     print("=" * 60)
-
-    best_val_loss = float('inf')
-    start_epoch = 0
 
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
