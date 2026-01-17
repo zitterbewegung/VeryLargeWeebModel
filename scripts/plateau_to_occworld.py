@@ -420,6 +420,10 @@ def main():
     parser.add_argument('--pattern', '-p', choices=['survey', 'orbit', 'random'],
                         default='survey', help='Trajectory pattern')
     parser.add_argument('--agent', '-a', choices=['drone', 'rover'], default='drone', help='Agent type')
+    parser.add_argument('--allow-synthetic', action='store_true',
+                        help='Allow synthetic building generation if no real meshes found (for testing only)')
+    parser.add_argument('--synthetic-buildings', type=int, default=100,
+                        help='Number of synthetic buildings to generate (only with --allow-synthetic)')
     args = parser.parse_args()
 
     if not HAS_TRIMESH:
@@ -439,22 +443,54 @@ def main():
     loaded = voxelizer.load_meshes(args.input, args.max_meshes)
 
     if loaded == 0:
-        print("No meshes loaded. Creating synthetic city...")
-        # Create simple synthetic buildings
+        if not args.allow_synthetic:
+            print("=" * 60)
+            print("ERROR: No real PLATEAU meshes found!")
+            print("=" * 60)
+            print(f"\nInput directory: {args.input}")
+            print("\nTo download real Tokyo 3D city data, run:")
+            print("  ./scripts/download_and_prepare_data.sh --plateau")
+            print("\nOr download manually:")
+            print("  mkdir -p data/plateau/raw data/plateau/meshes/obj")
+            print("  wget -O data/plateau/raw/tokyo23ku_obj.zip \\")
+            print("    'https://gic-plateau.s3.ap-northeast-1.amazonaws.com/2020/13100_tokyo23-ku_2020_obj_3_op.zip'")
+            print("  unzip data/plateau/raw/tokyo23ku_obj.zip -d data/plateau/meshes/obj/")
+            print("\nTo use synthetic data for TESTING ONLY, add: --allow-synthetic")
+            print("WARNING: Synthetic data will cause model to overfit quickly!")
+            sys.exit(1)
+
+        print("=" * 60)
+        print("WARNING: Using SYNTHETIC buildings (testing mode)")
+        print("=" * 60)
+        print("This data is for TESTING ONLY - model will overfit!")
+        print("For real training, download PLATEAU data first.\n")
+
+        # Create more diverse synthetic buildings
         buildings = []
-        for i in range(20):
-            x = np.random.uniform(-200, 200)
-            y = np.random.uniform(-200, 200)
-            w = np.random.uniform(10, 30)
-            h = np.random.uniform(10, 30)
-            z = np.random.uniform(20, 100)
+        num_buildings = args.synthetic_buildings
+
+        # Create varied building types for more diversity
+        for i in range(num_buildings):
+            x = np.random.uniform(-500, 500)
+            y = np.random.uniform(-500, 500)
+
+            # Vary building types
+            building_type = np.random.choice(['small', 'medium', 'tall', 'wide'])
+            if building_type == 'small':
+                w, h, z = np.random.uniform(5, 15), np.random.uniform(5, 15), np.random.uniform(10, 30)
+            elif building_type == 'medium':
+                w, h, z = np.random.uniform(15, 30), np.random.uniform(15, 30), np.random.uniform(30, 60)
+            elif building_type == 'tall':
+                w, h, z = np.random.uniform(10, 20), np.random.uniform(10, 20), np.random.uniform(60, 150)
+            else:  # wide
+                w, h, z = np.random.uniform(30, 60), np.random.uniform(30, 60), np.random.uniform(15, 40)
 
             building = trimesh.creation.box(extents=[w, h, z])
             building.apply_translation([x, y, z/2])
             buildings.append(building)
 
         voxelizer.meshes = buildings
-        print(f"Created {len(buildings)} synthetic buildings")
+        print(f"Created {len(buildings)} synthetic buildings (testing mode)")
 
     # Combine meshes
     print("\nCombining meshes...")

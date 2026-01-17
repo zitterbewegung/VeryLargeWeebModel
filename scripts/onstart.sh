@@ -597,7 +597,8 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
         # Check if already converted
         EXISTING_PLATEAU_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
 
-        if [ "$EXISTING_PLATEAU_SESSIONS" -gt 3 ]; then
+        # Need at least 30 sessions for proper training (prevents overfitting)
+        if [ "$EXISTING_PLATEAU_SESSIONS" -gt 30 ]; then
             log_success "PLATEAU training data already generated: $EXISTING_PLATEAU_SESSIONS sessions"
         else
             log_info "Converting PLATEAU meshes to training format..."
@@ -610,21 +611,44 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
                 pip install trimesh
             fi
 
+            # Generate diverse training data with multiple trajectory patterns
+            log_info "Generating training data with RANDOM trajectories (most diverse)..."
             python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
                 --input "${PLATEAU_MESHES}/obj" \
                 --output "$PLATEAU_TRAINING_DIR" \
-                --frames 500 \
-                --sessions 10 \
-                --pattern survey \
-                --max-meshes 30 || {
+                --frames 300 \
+                --sessions 30 \
+                --pattern random \
+                --max-meshes 50 || {
                 log_warn "PLATEAU conversion had issues, trying with fewer meshes..."
                 python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
                     --input "${PLATEAU_MESHES}/obj" \
                     --output "$PLATEAU_TRAINING_DIR" \
                     --frames 200 \
-                    --sessions 5 \
-                    --max-meshes 10 || log_warn "PLATEAU conversion failed"
+                    --sessions 20 \
+                    --pattern random \
+                    --max-meshes 30 || log_warn "PLATEAU random conversion failed"
             }
+
+            # Add survey pattern sessions for additional diversity
+            log_info "Adding SURVEY pattern trajectories for diversity..."
+            python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
+                --input "${PLATEAU_MESHES}/obj" \
+                --output "$PLATEAU_TRAINING_DIR" \
+                --frames 200 \
+                --sessions 10 \
+                --pattern survey \
+                --max-meshes 50 || log_warn "PLATEAU survey conversion failed"
+
+            # Add orbit pattern sessions
+            log_info "Adding ORBIT pattern trajectories for diversity..."
+            python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
+                --input "${PLATEAU_MESHES}/obj" \
+                --output "$PLATEAU_TRAINING_DIR" \
+                --frames 200 \
+                --sessions 10 \
+                --pattern orbit \
+                --max-meshes 50 || log_warn "PLATEAU orbit conversion failed"
 
             GENERATED_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
             log_success "Generated $GENERATED_SESSIONS training sessions from PLATEAU data"
