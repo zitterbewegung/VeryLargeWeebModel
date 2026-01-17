@@ -1,0 +1,542 @@
+#!/bin/bash
+# =============================================================================
+# OccWorld Auto-Setup and Training Script
+# =============================================================================
+# One-shot script for cloud GPU instances (Vast.ai, Lambda, RunPod, etc.)
+# Automatically sets up environment, downloads data, and starts training.
+#
+# Usage:
+#   # As onstart script (runs everything automatically):
+#   curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/VeryLargeWeebModel/main/scripts/onstart.sh | bash
+#
+#   # Or clone first and run:
+#   ./scripts/onstart.sh [OPTIONS]
+#
+# Options:
+#   --no-train      Setup only, don't start training
+#   --resume        Resume from existing checkpoint
+#   --epochs N      Set number of epochs (default: 50)
+#   --batch-size N  Override batch size
+#   --help          Show this help
+#
+# Environment Variables:
+#   GITHUB_REPO     Repository to clone (default: zitterbewegung/VeryLargeWeebModel)
+#   WORK_DIR        Working directory (auto-detected)
+#   CHECKPOINT_DIR  Checkpoint directory (default: $WORK_DIR/checkpoints)
+# =============================================================================
+
+set -e
+
+# =============================================================================
+# Configuration
+# =============================================================================
+GITHUB_REPO="${GITHUB_REPO:-zitterbewegung/VeryLargeWeebModel}"
+GITHUB_URL="https://github.com/${GITHUB_REPO}.git"
+SCRIPT_START_TIME=$(date +%s)
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Logging
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_step()    { echo -e "\n${CYAN}${BOLD}==> $1${NC}"; }
+
+# Default options
+START_TRAINING=true
+RESUME_TRAINING=false
+EPOCHS=50
+BATCH_SIZE=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-train)     START_TRAINING=false; shift ;;
+        --resume)       RESUME_TRAINING=true; shift ;;
+        --epochs)       EPOCHS="$2"; shift 2 ;;
+        --batch-size)   BATCH_SIZE="$2"; shift 2 ;;
+        --help|-h)      head -30 "$0" | tail -25; exit 0 ;;
+        *)              log_warn "Unknown option: $1"; shift ;;
+    esac
+done
+
+# =============================================================================
+# Environment Detection
+# =============================================================================
+log_step "Detecting environment..."
+
+# Detect cloud provider
+if [ -d "/workspace" ]; then
+    CLOUD_ENV="vastai"
+    WORK_DIR="/workspace"
+    log_info "Detected: Vast.ai"
+elif [ -f "/etc/lambda-stack-version" ]; then
+    CLOUD_ENV="lambda"
+    WORK_DIR="/home/ubuntu"
+    log_info "Detected: Lambda Cloud ($(cat /etc/lambda-stack-version))"
+elif [ -d "/root/workspace" ]; then
+    CLOUD_ENV="runpod"
+    WORK_DIR="/root/workspace"
+    log_info "Detected: RunPod"
+else
+    CLOUD_ENV="generic"
+    WORK_DIR="${HOME}"
+    log_info "Detected: Generic Linux"
+fi
+
+PROJECT_DIR="${WORK_DIR}/VeryLargeWeebModel"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${WORK_DIR}/checkpoints}"
+DATA_DIR="${PROJECT_DIR}/data"
+PRETRAINED_DIR="${PROJECT_DIR}/pretrained"
+
+log_info "Working directory: $WORK_DIR"
+log_info "Project directory: $PROJECT_DIR"
+log_info "Checkpoint directory: $CHECKPOINT_DIR"
+
+# =============================================================================
+# GPU Check
+# =============================================================================
+log_step "Checking GPU..."
+
+if command -v nvidia-smi &> /dev/null; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown")
+    GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown")
+    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo "1")
+    log_success "GPU: $GPU_NAME ($GPU_MEM) x $GPU_COUNT"
+
+    # Recommend batch size based on GPU memory
+    MEM_GB=$(echo "$GPU_MEM" | grep -oE '[0-9]+' | head -1)
+    if [ -n "$MEM_GB" ] && [ -z "$BATCH_SIZE" ]; then
+        if [ "$MEM_GB" -ge 80 ]; then
+            BATCH_SIZE=4
+        elif [ "$MEM_GB" -ge 40 ]; then
+            BATCH_SIZE=2
+        else
+            BATCH_SIZE=1
+        fi
+        log_info "Auto-selected batch size: $BATCH_SIZE (based on ${MEM_GB}GB VRAM)"
+    fi
+else
+    log_error "No GPU detected! Training will be very slow."
+    GPU_NAME="CPU"
+fi
+
+# =============================================================================
+# System Packages
+# =============================================================================
+log_step "Installing system packages..."
+
+# Detect package manager
+if command -v apt-get &> /dev/null; then
+    PKG_MGR="apt"
+    sudo apt-get update -qq 2>/dev/null || apt-get update -qq 2>/dev/null || true
+    sudo apt-get install -y -qq git wget curl unzip screen tmux htop 2>/dev/null || \
+        apt-get install -y -qq git wget curl unzip screen tmux htop 2>/dev/null || true
+elif command -v yum &> /dev/null; then
+    PKG_MGR="yum"
+    sudo yum install -y -q git wget curl unzip screen tmux htop 2>/dev/null || true
+fi
+
+log_success "System packages ready"
+
+# =============================================================================
+# Clone Repository
+# =============================================================================
+log_step "Setting up project repository..."
+
+if [ -d "$PROJECT_DIR/.git" ]; then
+    log_info "Repository exists, pulling latest..."
+    cd "$PROJECT_DIR"
+    git pull --ff-only 2>/dev/null || log_warn "Could not pull latest (may have local changes)"
+else
+    log_info "Cloning repository..."
+    git clone "$GITHUB_URL" "$PROJECT_DIR"
+    cd "$PROJECT_DIR"
+fi
+
+log_success "Repository ready: $PROJECT_DIR"
+
+# =============================================================================
+# Python Environment
+# =============================================================================
+log_step "Setting up Python environment..."
+
+# Check for conda
+CONDA_FOUND=false
+for conda_path in ~/miniconda3 /opt/miniconda3 ~/anaconda3 /opt/conda; do
+    if [ -f "${conda_path}/etc/profile.d/conda.sh" ]; then
+        source "${conda_path}/etc/profile.d/conda.sh"
+        CONDA_FOUND=true
+        log_info "Found conda at: $conda_path"
+        break
+    fi
+done
+
+if [ "$CONDA_FOUND" = true ]; then
+    # Create/activate conda environment
+    if conda env list | grep -q "^occworld "; then
+        log_info "Activating existing conda environment..."
+        conda activate occworld
+    else
+        log_info "Creating conda environment..."
+        conda create -n occworld python=3.10 -y
+        conda activate occworld
+    fi
+else
+    log_info "Using system Python (conda not found)"
+fi
+
+# Check Python version
+PYTHON_VERSION=$(python3 --version 2>&1 | cut -d' ' -f2)
+log_success "Python: $PYTHON_VERSION"
+
+# =============================================================================
+# PyTorch Installation
+# =============================================================================
+log_step "Installing PyTorch..."
+
+# Check if PyTorch already installed with CUDA
+if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
+    CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda)")
+    log_success "PyTorch $TORCH_VERSION with CUDA $CUDA_VERSION already installed"
+else
+    log_info "Installing PyTorch with CUDA support..."
+
+    # Detect CUDA version
+    if command -v nvcc &> /dev/null; then
+        NVCC_VERSION=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//')
+        log_info "NVCC version: $NVCC_VERSION"
+    fi
+
+    # Install PyTorch (use pip for broadest compatibility)
+    pip install --upgrade pip
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 2>/dev/null || \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 2>/dev/null || \
+    pip install torch torchvision
+
+    # Verify
+    if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+        TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
+        log_success "PyTorch $TORCH_VERSION installed with CUDA"
+    else
+        log_warn "PyTorch installed but CUDA not available"
+    fi
+fi
+
+# =============================================================================
+# Project Dependencies
+# =============================================================================
+log_step "Installing project dependencies..."
+
+cd "$PROJECT_DIR"
+
+# Install from requirements if exists
+if [ -f "requirements.txt" ]; then
+    log_info "Installing from requirements.txt..."
+    pip install -q -r requirements.txt 2>/dev/null || pip install -r requirements.txt
+else
+    log_info "Installing core dependencies..."
+    pip install -q \
+        tqdm \
+        scipy \
+        opencv-python \
+        pillow \
+        tensorboard \
+        einops \
+        timm \
+        open3d \
+        trimesh \
+        pyvista
+fi
+
+log_success "Dependencies installed"
+
+# =============================================================================
+# Download Pretrained Models
+# =============================================================================
+log_step "Downloading pretrained models..."
+
+mkdir -p "${PRETRAINED_DIR}/occworld"
+
+OCCWORLD_MODEL="${PRETRAINED_DIR}/occworld/latest.pth"
+OCCWORLD_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1"
+
+if [ -f "$OCCWORLD_MODEL" ]; then
+    MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
+    if [ "$MODEL_SIZE" -gt 700000000 ]; then
+        log_success "OccWorld checkpoint already downloaded ($(numfmt --to=iec $MODEL_SIZE 2>/dev/null || echo "${MODEL_SIZE} bytes"))"
+    else
+        log_warn "Existing checkpoint seems incomplete, re-downloading..."
+        rm -f "$OCCWORLD_MODEL"
+    fi
+fi
+
+if [ ! -f "$OCCWORLD_MODEL" ]; then
+    log_info "Downloading OccWorld checkpoint (~721MB)..."
+
+    if curl -L --progress-bar -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
+        MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
+        if [ "$MODEL_SIZE" -gt 700000000 ]; then
+            log_success "OccWorld checkpoint downloaded!"
+        else
+            log_error "Download seems incomplete (${MODEL_SIZE} bytes)"
+            log_info "Try manual download: curl -L -o ${OCCWORLD_MODEL} '${OCCWORLD_URL}'"
+        fi
+    else
+        log_error "Download failed. Training will start from scratch."
+    fi
+fi
+
+# =============================================================================
+# Setup Training Data
+# =============================================================================
+log_step "Setting up training data..."
+
+mkdir -p "${DATA_DIR}/tokyo_gazebo"
+
+# Check if data already exists
+EXISTING_SESSIONS=$(ls -d ${DATA_DIR}/tokyo_gazebo/drone_* ${DATA_DIR}/tokyo_gazebo/rover_* 2>/dev/null | wc -l || echo 0)
+
+if [ "$EXISTING_SESSIONS" -gt 0 ]; then
+    log_success "Training data exists: $EXISTING_SESSIONS sessions"
+else
+    log_info "Generating training data..."
+
+    # Try to run the data generation script
+    if [ -f "${PROJECT_DIR}/scripts/download_and_prepare_data.sh" ]; then
+        chmod +x "${PROJECT_DIR}/scripts/download_and_prepare_data.sh"
+        "${PROJECT_DIR}/scripts/download_and_prepare_data.sh" --models --skip-plateau --generate-data 2>/dev/null || {
+            log_warn "Data generation had issues, creating minimal dataset..."
+        }
+    fi
+
+    # Fallback: create dummy data for testing
+    if [ ! -d "${DATA_DIR}/tokyo_gazebo/drone_session_001" ]; then
+        log_info "Creating minimal test dataset..."
+        python3 -c "
+import os
+import numpy as np
+import json
+
+data_dir = '${DATA_DIR}/tokyo_gazebo'
+for session_type in ['drone', 'rover']:
+    session_dir = os.path.join(data_dir, f'{session_type}_session_001')
+    for subdir in ['images', 'lidar', 'poses', 'occupancy']:
+        os.makedirs(os.path.join(session_dir, subdir), exist_ok=True)
+
+    # Create 20 frames
+    for i in range(1, 21):
+        fid = f'{i:06d}'
+
+        # Dummy occupancy
+        occ = np.random.rand(200, 200, 16) > 0.95  # Sparse occupancy
+        np.savez_compressed(os.path.join(session_dir, 'occupancy', f'{fid}_occupancy.npz'), occupancy=occ)
+
+        # Dummy pose
+        pose = {
+            'position': [float(i), 0.0, 10.0],
+            'orientation': [0.0, 0.0, 0.0, 1.0],
+            'timestamp': float(i) * 0.1,
+            'linear_velocity': [1.0, 0.0, 0.0],
+            'angular_velocity': [0.0, 0.0, 0.0]
+        }
+        with open(os.path.join(session_dir, 'poses', f'{fid}.json'), 'w') as f:
+            json.dump(pose, f)
+
+        # Dummy lidar
+        points = np.random.rand(1000, 4).astype(np.float32)
+        np.save(os.path.join(session_dir, 'lidar', f'{fid}_LIDAR.npy'), points)
+
+print('Created minimal test dataset')
+" 2>/dev/null || log_warn "Could not create test dataset"
+    fi
+
+    log_success "Training data ready"
+fi
+
+# =============================================================================
+# Create Directories
+# =============================================================================
+log_step "Creating checkpoint directories..."
+
+mkdir -p "$CHECKPOINT_DIR"
+mkdir -p "${CHECKPOINT_DIR}/logs"
+
+log_success "Directories ready"
+
+# =============================================================================
+# Shell Configuration
+# =============================================================================
+log_step "Configuring shell..."
+
+SHELL_CONFIG=""
+case "$CLOUD_ENV" in
+    vastai)  SHELL_CONFIG="$HOME/.bashrc" ;;
+    lambda)  SHELL_CONFIG="$HOME/.bashrc" ;;
+    runpod)  SHELL_CONFIG="$HOME/.bashrc" ;;
+    *)       SHELL_CONFIG="$HOME/.bashrc" ;;
+esac
+
+if [ -n "$SHELL_CONFIG" ] && ! grep -q "# OccWorld Training Setup" "$SHELL_CONFIG" 2>/dev/null; then
+    cat >> "$SHELL_CONFIG" << EOF
+
+# OccWorld Training Setup
+# -----------------------
+export PROJECT_DIR="$PROJECT_DIR"
+export CHECKPOINT_DIR="$CHECKPOINT_DIR"
+
+# Aliases
+alias train='cd \$PROJECT_DIR && python train.py --config config/finetune_tokyo.py --work-dir \$CHECKPOINT_DIR'
+alias gpu='watch -n 1 nvidia-smi'
+alias tb='tensorboard --logdir \$CHECKPOINT_DIR --port 6006 --bind_all'
+alias logs='tail -f \$CHECKPOINT_DIR/*.log 2>/dev/null || echo "No logs found"'
+alias attach='screen -r training'
+
+# Conda activation (if available)
+[ -f ~/miniconda3/etc/profile.d/conda.sh ] && source ~/miniconda3/etc/profile.d/conda.sh && conda activate occworld 2>/dev/null
+EOF
+    log_success "Shell configuration added"
+fi
+
+# =============================================================================
+# Verification
+# =============================================================================
+log_step "Verifying installation..."
+
+echo ""
+echo "=============================================="
+echo "         Installation Summary                "
+echo "=============================================="
+echo ""
+echo "  Cloud:        $CLOUD_ENV"
+echo "  GPU:          $GPU_NAME"
+echo "  Python:       $PYTHON_VERSION"
+echo "  PyTorch:      $(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'N/A')"
+echo "  CUDA:         $(python3 -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 'N/A')"
+echo ""
+echo "  Project:      $PROJECT_DIR"
+echo "  Checkpoints:  $CHECKPOINT_DIR"
+echo "  Data:         $DATA_DIR"
+echo ""
+
+# Check pretrained model
+if [ -f "$OCCWORLD_MODEL" ]; then
+    echo -e "  ${GREEN}✓${NC} Pretrained model: OK"
+else
+    echo -e "  ${RED}✗${NC} Pretrained model: MISSING"
+fi
+
+# Check training data
+DATA_SESSIONS=$(ls -d ${DATA_DIR}/tokyo_gazebo/*_session_* ${DATA_DIR}/tokyo_gazebo/drone_* ${DATA_DIR}/tokyo_gazebo/rover_* 2>/dev/null | wc -l || echo 0)
+if [ "$DATA_SESSIONS" -gt 0 ]; then
+    echo -e "  ${GREEN}✓${NC} Training data: $DATA_SESSIONS sessions"
+else
+    echo -e "  ${YELLOW}!${NC} Training data: minimal/test only"
+fi
+
+echo ""
+echo "=============================================="
+
+# =============================================================================
+# Start Training
+# =============================================================================
+if [ "$START_TRAINING" = true ]; then
+    log_step "Starting training..."
+
+    cd "$PROJECT_DIR"
+
+    # Build training command
+    TRAIN_CMD="python train.py --config config/finetune_tokyo.py --work-dir $CHECKPOINT_DIR"
+
+    if [ "$RESUME_TRAINING" = true ]; then
+        TRAIN_CMD="$TRAIN_CMD --resume"
+    fi
+
+    if [ -n "$BATCH_SIZE" ]; then
+        TRAIN_CMD="$TRAIN_CMD --batch-size $BATCH_SIZE"
+    fi
+
+    if [ -n "$EPOCHS" ]; then
+        TRAIN_CMD="$TRAIN_CMD --epochs $EPOCHS"
+    fi
+
+    log_info "Training command: $TRAIN_CMD"
+
+    # Start in screen session
+    screen -dmS training bash -c "
+        cd $PROJECT_DIR
+        source ~/.bashrc 2>/dev/null || true
+        echo 'Starting training at \$(date)...'
+        echo 'Command: $TRAIN_CMD'
+        echo ''
+        $TRAIN_CMD 2>&1 | tee ${CHECKPOINT_DIR}/training_\$(date +%Y%m%d_%H%M%S).log
+        echo ''
+        echo 'Training completed at \$(date)'
+        echo 'Press Enter to exit...'
+        read
+    "
+
+    sleep 2
+
+    if screen -list | grep -q "training"; then
+        log_success "Training started in screen session 'training'"
+        echo ""
+        echo "=============================================="
+        echo "              Training Started!              "
+        echo "=============================================="
+        echo ""
+        echo "  Monitor training:"
+        echo "    screen -r training     # Attach to training session"
+        echo "    Ctrl+A, D              # Detach from session"
+        echo ""
+        echo "  Monitor GPU:"
+        echo "    nvidia-smi -l 1"
+        echo "    nvtop"
+        echo ""
+        echo "  TensorBoard:"
+        echo "    tensorboard --logdir $CHECKPOINT_DIR --port 6006 --bind_all"
+        echo "    Then open http://<IP>:6006"
+        echo ""
+        echo "  Checkpoints saved to: $CHECKPOINT_DIR"
+        echo ""
+        echo "=============================================="
+    else
+        log_error "Failed to start training screen session"
+        log_info "Try running manually:"
+        echo "  cd $PROJECT_DIR"
+        echo "  $TRAIN_CMD"
+    fi
+else
+    echo ""
+    echo "=============================================="
+    echo "            Setup Complete!                  "
+    echo "=============================================="
+    echo ""
+    echo "  Start training manually:"
+    echo "    cd $PROJECT_DIR"
+    echo "    python train.py --config config/finetune_tokyo.py \\"
+    echo "        --work-dir $CHECKPOINT_DIR"
+    echo ""
+    echo "  Or use screen for persistent session:"
+    echo "    screen -S training"
+    echo "    # Then run training command"
+    echo "    # Detach: Ctrl+A, D"
+    echo ""
+    echo "=============================================="
+fi
+
+# =============================================================================
+# Timing
+# =============================================================================
+SCRIPT_END_TIME=$(date +%s)
+ELAPSED=$((SCRIPT_END_TIME - SCRIPT_START_TIME))
+log_info "Setup completed in ${ELAPSED} seconds"
