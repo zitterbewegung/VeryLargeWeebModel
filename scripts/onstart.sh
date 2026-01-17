@@ -861,34 +861,124 @@ echo ""
 echo "=============================================="
 
 # =============================================================================
+# GPU Detection and Optimization
+# =============================================================================
+detect_gpu_config() {
+    if command -v nvidia-smi &> /dev/null; then
+        GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+        GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
+
+        log_info "Detected: $GPU_NAME ($GPU_MEMORY MB) x $GPU_COUNT"
+
+        # Auto-detect optimal batch size
+        if [ -z "$BATCH_SIZE" ]; then
+            if [ "$GPU_MEMORY" -ge 70000 ]; then
+                BATCH_SIZE=12  # A100-80GB, H100-80GB
+            elif [ "$GPU_MEMORY" -ge 35000 ]; then
+                BATCH_SIZE=6   # A100-40GB, A6000
+            elif [ "$GPU_MEMORY" -ge 20000 ]; then
+                BATCH_SIZE=4   # RTX 3090, RTX 4090
+            elif [ "$GPU_MEMORY" -ge 10000 ]; then
+                BATCH_SIZE=2   # RTX 3080, RTX 4080
+            else
+                BATCH_SIZE=1
+            fi
+            log_info "Auto-detected batch size: $BATCH_SIZE"
+        fi
+
+        # Set precision based on GPU
+        if echo "$GPU_NAME" | grep -qiE "A100|H100|H200|A6000|RTX 40|RTX 30"; then
+            export USE_BF16=1
+            log_info "Using BF16 precision (native support)"
+        fi
+    else
+        log_warn "nvidia-smi not found, using defaults"
+        BATCH_SIZE=${BATCH_SIZE:-1}
+    fi
+}
+
+# =============================================================================
+# Install Optimized Dependencies
+# =============================================================================
+install_gpu_optimizations() {
+    log_step "Installing GPU optimizations..."
+
+    # Flash Attention 2
+    if ! python3 -c "import flash_attn" 2>/dev/null; then
+        log_info "Installing Flash Attention 2..."
+        pip install flash-attn --no-build-isolation -q 2>/dev/null || \
+            log_warn "Flash Attention install failed (optional, requires CUDA 11.6+)"
+    else
+        log_success "Flash Attention already installed"
+    fi
+
+    # xFormers
+    if ! python3 -c "import xformers" 2>/dev/null; then
+        log_info "Installing xFormers..."
+        pip install xformers -q 2>/dev/null || log_warn "xFormers install failed (optional)"
+    fi
+}
+
+# =============================================================================
 # Start Training
 # =============================================================================
 if [ "$START_TRAINING" = true ]; then
-    log_step "Starting training..."
+    log_step "Starting optimized training..."
 
     cd "$PROJECT_DIR"
 
-    # Build training command
-    TRAIN_CMD="python train.py --config config/finetune_tokyo.py --work-dir $CHECKPOINT_DIR"
+    # Detect GPU and set optimal config
+    detect_gpu_config
 
-    if [ "$RESUME_TRAINING" = true ]; then
-        TRAIN_CMD="$TRAIN_CMD --resume"
-    fi
+    # Install optimizations
+    install_gpu_optimizations
 
-    if [ -n "$BATCH_SIZE" ]; then
-        TRAIN_CMD="$TRAIN_CMD --batch-size $BATCH_SIZE"
-    fi
+    # Use optimized training script if available
+    if [ -f "${PROJECT_DIR}/scripts/train_optimized.sh" ]; then
+        TRAIN_CMD="${PROJECT_DIR}/scripts/train_optimized.sh --config config/finetune_tokyo.py --work-dir $CHECKPOINT_DIR"
 
-    if [ -n "$EPOCHS" ]; then
-        TRAIN_CMD="$TRAIN_CMD --epochs $EPOCHS"
+        if [ "$RESUME_TRAINING" = true ] && [ -n "$(ls ${CHECKPOINT_DIR}/*.pth 2>/dev/null | head -1)" ]; then
+            LATEST_CKPT=$(ls -t ${CHECKPOINT_DIR}/*.pth 2>/dev/null | head -1)
+            TRAIN_CMD="$TRAIN_CMD --resume $LATEST_CKPT"
+        fi
+
+        if [ -n "$BATCH_SIZE" ]; then
+            TRAIN_CMD="$TRAIN_CMD --batch-size $BATCH_SIZE"
+        fi
+
+        if [ -n "$EPOCHS" ]; then
+            TRAIN_CMD="$TRAIN_CMD --epochs $EPOCHS"
+        fi
+    else
+        # Fallback to direct python call
+        TRAIN_CMD="python train.py --config config/finetune_tokyo.py --work-dir $CHECKPOINT_DIR"
+
+        if [ "$RESUME_TRAINING" = true ]; then
+            TRAIN_CMD="$TRAIN_CMD --resume"
+        fi
+
+        if [ -n "$BATCH_SIZE" ]; then
+            TRAIN_CMD="$TRAIN_CMD --batch-size $BATCH_SIZE"
+        fi
+
+        if [ -n "$EPOCHS" ]; then
+            TRAIN_CMD="$TRAIN_CMD --epochs $EPOCHS"
+        fi
     fi
 
     log_info "Training command: $TRAIN_CMD"
+
+    # Set CUDA optimizations
+    export CUDA_LAUNCH_BLOCKING=0
+    export NVIDIA_TF32_OVERRIDE=1
 
     # Start in screen session
     screen -dmS training bash -c "
         cd $PROJECT_DIR
         source ~/.bashrc 2>/dev/null || true
+        export CUDA_LAUNCH_BLOCKING=0
+        export NVIDIA_TF32_OVERRIDE=1
         echo 'Starting training at \$(date)...'
         echo 'Command: $TRAIN_CMD'
         echo ''
@@ -905,8 +995,12 @@ if [ "$START_TRAINING" = true ]; then
         log_success "Training started in screen session 'training'"
         echo ""
         echo "=============================================="
-        echo "              Training Started!              "
+        echo "         Optimized Training Started!         "
         echo "=============================================="
+        echo ""
+        echo "  GPU: $GPU_NAME"
+        echo "  Batch Size: $BATCH_SIZE"
+        echo "  Precision: $([ -n \"$USE_BF16\" ] && echo 'BF16' || echo 'FP16')"
         echo ""
         echo "  Monitor training:"
         echo "    screen -r training     # Attach to training session"
@@ -914,11 +1008,10 @@ if [ "$START_TRAINING" = true ]; then
         echo ""
         echo "  Monitor GPU:"
         echo "    nvidia-smi -l 1"
-        echo "    nvtop"
+        echo "    watch -n1 nvidia-smi"
         echo ""
         echo "  TensorBoard:"
         echo "    tensorboard --logdir $CHECKPOINT_DIR --port 6006 --bind_all"
-        echo "    Then open http://<IP>:6006"
         echo ""
         echo "  Checkpoints saved to: $CHECKPOINT_DIR"
         echo ""
