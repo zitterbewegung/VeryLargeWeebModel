@@ -34,6 +34,11 @@ GITHUB_REPO="${GITHUB_REPO:-zitterbewegung/VeryLargeWeebModel}"
 GITHUB_URL="https://github.com/${GITHUB_REPO}.git"
 SCRIPT_START_TIME=$(date +%s)
 
+# Show all commands if VERBOSE is set
+if [ "${VERBOSE:-0}" = "1" ]; then
+    set -x
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -48,13 +53,54 @@ log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step()    { echo -e "\n${CYAN}${BOLD}==> $1${NC}"; }
+
+# Step tracking with timing
+STEP_NUM=0
+STEP_START=0
+log_step() {
+    # Print elapsed time for previous step
+    if [ "$STEP_START" -gt 0 ]; then
+        local elapsed=$(($(date +%s) - STEP_START))
+        echo -e "${GREEN}    ✓ Completed in ${elapsed}s${NC}"
+    fi
+
+    STEP_NUM=$((STEP_NUM + 1))
+    STEP_START=$(date +%s)
+    echo ""
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}${BOLD}  Step $STEP_NUM: $1${NC}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
 
 # Default options
 START_TRAINING=true
 RESUME_TRAINING=false
 EPOCHS=50
 BATCH_SIZE=""
+
+# =============================================================================
+# Banner
+# =============================================================================
+echo ""
+echo -e "${CYAN}${BOLD}"
+echo "╔═══════════════════════════════════════════════════════════════════════╗"
+echo "║                                                                       ║"
+echo "║     ██████╗  ██████╗ ██████╗██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗║"
+echo "║    ██╔═══██╗██╔════╝██╔════╝██║    ██║██╔═══██╗██╔══██╗██║     ██╔══██╗"
+echo "║    ██║   ██║██║     ██║     ██║ █╗ ██║██║   ██║██████╔╝██║     ██║  ██║"
+echo "║    ██║   ██║██║     ██║     ██║███╗██║██║   ██║██╔══██╗██║     ██║  ██║"
+echo "║    ╚██████╔╝╚██████╗╚██████╗╚███╔███╔╝╚██████╔╝██║  ██║███████╗██████╔╝"
+echo "║     ╚═════╝  ╚═════╝ ╚═════╝ ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═════╝ "
+echo "║                                                                       ║"
+echo "║              Auto-Setup & Training Script for Cloud GPUs              ║"
+echo "║                                                                       ║"
+echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+echo ""
+echo -e "${BLUE}Started at:${NC} $(date)"
+echo -e "${BLUE}Repository:${NC} $GITHUB_REPO"
+echo ""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -137,12 +183,15 @@ log_step "Installing system packages..."
 # Detect package manager
 if command -v apt-get &> /dev/null; then
     PKG_MGR="apt"
-    sudo apt-get update -qq 2>/dev/null || apt-get update -qq 2>/dev/null || true
-    sudo apt-get install -y -qq git wget curl unzip screen tmux htop 2>/dev/null || \
-        apt-get install -y -qq git wget curl unzip screen tmux htop 2>/dev/null || true
+    log_info "Updating package lists..."
+    sudo apt-get update 2>/dev/null || apt-get update 2>/dev/null || true
+    log_info "Installing: git wget curl unzip screen tmux htop..."
+    sudo apt-get install -y git wget curl unzip screen tmux htop 2>/dev/null || \
+        apt-get install -y git wget curl unzip screen tmux htop 2>/dev/null || true
 elif command -v yum &> /dev/null; then
     PKG_MGR="yum"
-    sudo yum install -y -q git wget curl unzip screen tmux htop 2>/dev/null || true
+    log_info "Installing: git wget curl unzip screen tmux htop..."
+    sudo yum install -y git wget curl unzip screen tmux htop 2>/dev/null || true
 fi
 
 log_success "System packages ready"
@@ -153,14 +202,20 @@ log_success "System packages ready"
 log_step "Setting up project repository..."
 
 if [ -d "$PROJECT_DIR/.git" ]; then
-    log_info "Repository exists, pulling latest..."
+    log_info "Repository already exists at: $PROJECT_DIR"
     cd "$PROJECT_DIR"
-    git pull --ff-only 2>/dev/null || log_warn "Could not pull latest (may have local changes)"
+    log_info "Pulling latest changes..."
+    git fetch --all
+    git status
+    git pull --ff-only || log_warn "Could not pull latest (may have local changes)"
 else
-    log_info "Cloning repository..."
-    git clone "$GITHUB_URL" "$PROJECT_DIR"
+    log_info "Cloning repository from: $GITHUB_URL"
+    log_info "Destination: $PROJECT_DIR"
+    git clone --progress "$GITHUB_URL" "$PROJECT_DIR"
     cd "$PROJECT_DIR"
 fi
+log_info "Current commit:"
+git log --oneline -1
 
 log_success "Repository ready: $PROJECT_DIR"
 
@@ -171,27 +226,36 @@ log_step "Setting up Python environment..."
 
 # Check for conda
 CONDA_FOUND=false
+log_info "Searching for conda installation..."
 for conda_path in ~/miniconda3 /opt/miniconda3 ~/anaconda3 /opt/conda; do
+    log_info "  Checking: $conda_path"
     if [ -f "${conda_path}/etc/profile.d/conda.sh" ]; then
         source "${conda_path}/etc/profile.d/conda.sh"
         CONDA_FOUND=true
-        log_info "Found conda at: $conda_path"
+        log_success "Found conda at: $conda_path"
         break
     fi
 done
 
 if [ "$CONDA_FOUND" = true ]; then
     # Create/activate conda environment
+    log_info "Checking for existing 'occworld' environment..."
+    conda env list
+    echo ""
+
     if conda env list | grep -q "^occworld "; then
-        log_info "Activating existing conda environment..."
+        log_info "Activating existing conda environment 'occworld'..."
         conda activate occworld
+        log_success "Activated conda environment"
     else
-        log_info "Creating conda environment..."
+        log_info "Creating new conda environment 'occworld' with Python 3.10..."
         conda create -n occworld python=3.10 -y
+        log_info "Activating conda environment..."
         conda activate occworld
+        log_success "Created and activated conda environment"
     fi
 else
-    log_info "Using system Python (conda not found)"
+    log_warn "Conda not found, using system Python"
 fi
 
 # Check Python version
@@ -218,10 +282,21 @@ else
     fi
 
     # Install PyTorch (use pip for broadest compatibility)
+    log_info "Upgrading pip..."
     pip install --upgrade pip
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 2>/dev/null || \
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 2>/dev/null || \
-    pip install torch torchvision
+
+    log_info "Installing PyTorch (trying CUDA 12.1 first)..."
+    if pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121; then
+        log_success "PyTorch installed with CUDA 12.1"
+    else
+        log_warn "CUDA 12.1 failed, trying CUDA 11.8..."
+        if pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118; then
+            log_success "PyTorch installed with CUDA 11.8"
+        else
+            log_warn "CUDA versions failed, installing default PyTorch..."
+            pip install torch torchvision
+        fi
+    fi
 
     # Verify
     if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
@@ -242,20 +317,19 @@ cd "$PROJECT_DIR"
 # Install from requirements if exists
 if [ -f "requirements.txt" ]; then
     log_info "Installing from requirements.txt..."
-    pip install -q -r requirements.txt 2>/dev/null || pip install -r requirements.txt
+    pip install -r requirements.txt
 else
     log_info "Installing core dependencies..."
-    pip install -q \
-        tqdm \
-        scipy \
-        opencv-python \
-        pillow \
-        tensorboard \
-        einops \
-        timm \
-        open3d \
-        trimesh \
-        pyvista
+
+    DEPS=(tqdm scipy opencv-python pillow tensorboard einops timm open3d trimesh pyvista)
+    TOTAL=${#DEPS[@]}
+    CURRENT=0
+
+    for dep in "${DEPS[@]}"; do
+        CURRENT=$((CURRENT + 1))
+        echo -e "${BLUE}[$CURRENT/$TOTAL]${NC} Installing $dep..."
+        pip install "$dep" || log_warn "Failed to install $dep"
+    done
 fi
 
 log_success "Dependencies installed"
@@ -282,16 +356,23 @@ fi
 
 if [ ! -f "$OCCWORLD_MODEL" ]; then
     log_info "Downloading OccWorld checkpoint (~721MB)..."
+    log_info "URL: $OCCWORLD_URL"
+    log_info "Destination: $OCCWORLD_MODEL"
+    echo ""
 
-    if curl -L --progress-bar -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
+    # Use curl with full progress display
+    if curl -L -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
+        echo ""
         MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
+        MODEL_SIZE_MB=$((MODEL_SIZE / 1024 / 1024))
         if [ "$MODEL_SIZE" -gt 700000000 ]; then
-            log_success "OccWorld checkpoint downloaded!"
+            log_success "OccWorld checkpoint downloaded! (${MODEL_SIZE_MB}MB)"
         else
-            log_error "Download seems incomplete (${MODEL_SIZE} bytes)"
+            log_error "Download seems incomplete (${MODEL_SIZE_MB}MB, expected ~721MB)"
             log_info "Try manual download: curl -L -o ${OCCWORLD_MODEL} '${OCCWORLD_URL}'"
         fi
     else
+        echo ""
         log_error "Download failed. Training will start from scratch."
     fi
 fi
@@ -301,22 +382,29 @@ fi
 # =============================================================================
 log_step "Setting up training data..."
 
+log_info "Creating data directory: ${DATA_DIR}/tokyo_gazebo"
 mkdir -p "${DATA_DIR}/tokyo_gazebo"
 
 # Check if data already exists
+log_info "Checking for existing training data..."
 EXISTING_SESSIONS=$(ls -d ${DATA_DIR}/tokyo_gazebo/drone_* ${DATA_DIR}/tokyo_gazebo/rover_* 2>/dev/null | wc -l || echo 0)
 
 if [ "$EXISTING_SESSIONS" -gt 0 ]; then
     log_success "Training data exists: $EXISTING_SESSIONS sessions"
+    log_info "Existing sessions:"
+    ls -la ${DATA_DIR}/tokyo_gazebo/ | head -20
 else
-    log_info "Generating training data..."
+    log_info "No existing training data found. Generating..."
 
     # Try to run the data generation script
     if [ -f "${PROJECT_DIR}/scripts/download_and_prepare_data.sh" ]; then
+        log_info "Running download_and_prepare_data.sh..."
         chmod +x "${PROJECT_DIR}/scripts/download_and_prepare_data.sh"
-        "${PROJECT_DIR}/scripts/download_and_prepare_data.sh" --models --skip-plateau --generate-data 2>/dev/null || {
+        "${PROJECT_DIR}/scripts/download_and_prepare_data.sh" --models --skip-plateau --generate-data || {
             log_warn "Data generation had issues, creating minimal dataset..."
         }
+    else
+        log_warn "download_and_prepare_data.sh not found"
     fi
 
     # Fallback: create dummy data for testing
