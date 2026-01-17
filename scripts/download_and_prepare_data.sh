@@ -212,101 +212,178 @@ download_pretrained_models() {
     # -------------------------------------------------------------------------
     log_info "Downloading OccWorld models from Tsinghua Cloud..."
 
-    # Direct download links from Tsinghua Cloud (dl=1 forces download)
-    # These are the shared file IDs from the OccWorld repository
+    # Tsinghua Cloud (Seafile) requires browser-based download
+    # Direct wget/curl doesn't work - must use browser or seafile client
     # Source: https://github.com/wzzheng/OccWorld
 
-    # VQVAE checkpoint
-    local VQVAE_URL="https://cloud.tsinghua.edu.cn/f/3eb7652db5c74595810e/?dl=1"
     local VQVAE_FILE="${PROJECT_ROOT}/pretrained/vqvae/epoch_125.pth"
-
-    # OccWorld world model checkpoint
-    local OCCWORLD_URL="https://cloud.tsinghua.edu.cn/f/67ee94b0e4704614880f/?dl=1"
     local OCCWORLD_FILE="${PROJECT_ROOT}/pretrained/occworld/latest.pth"
+    local TSINGHUA_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
 
-    # Download VQVAE
-    if [ -f "$VQVAE_FILE" ]; then
-        log_warn "VQVAE checkpoint already exists, skipping..."
-    else
-        log_info "Downloading VQVAE checkpoint (~500MB)..."
-        if wget -q --show-progress -O "$VQVAE_FILE" "$VQVAE_URL" 2>/dev/null; then
-            log_success "VQVAE checkpoint downloaded"
-        elif curl -L --progress-bar -o "$VQVAE_FILE" "$VQVAE_URL" 2>/dev/null; then
-            log_success "VQVAE checkpoint downloaded"
-        else
-            log_warn "Auto-download failed. Manual download required:"
-            log_info "  1. Visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
-            log_info "  2. Download vqvae checkpoint"
-            log_info "  3. Save to: $VQVAE_FILE"
-            rm -f "$VQVAE_FILE"
-        fi
-    fi
-
-    # Download OccWorld
-    if [ -f "$OCCWORLD_FILE" ]; then
-        log_warn "OccWorld checkpoint already exists, skipping..."
-    else
-        log_info "Downloading OccWorld checkpoint (~200MB)..."
-        if wget -q --show-progress -O "$OCCWORLD_FILE" "$OCCWORLD_URL" 2>/dev/null; then
-            log_success "OccWorld checkpoint downloaded"
-        elif curl -L --progress-bar -o "$OCCWORLD_FILE" "$OCCWORLD_URL" 2>/dev/null; then
-            log_success "OccWorld checkpoint downloaded"
-        else
-            log_warn "Auto-download failed. Manual download required:"
-            log_info "  1. Visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
-            log_info "  2. Download occworld checkpoint"
-            log_info "  3. Save to: $OCCWORLD_FILE"
-            rm -f "$OCCWORLD_FILE"
-        fi
-    fi
-
-    # Verify downloads
+    # Check if models already exist
     if [ -f "$VQVAE_FILE" ] && [ -f "$OCCWORLD_FILE" ]; then
-        local vqvae_size=$(stat -f%z "$VQVAE_FILE" 2>/dev/null || stat -c%s "$VQVAE_FILE" 2>/dev/null)
-        local occworld_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null)
+        local vqvae_size=$(stat -f%z "$VQVAE_FILE" 2>/dev/null || stat -c%s "$VQVAE_FILE" 2>/dev/null || echo 0)
+        local occworld_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null || echo 0)
 
         if [ "$vqvae_size" -gt 1000000 ] && [ "$occworld_size" -gt 1000000 ]; then
-            log_success "Pretrained models verified!"
-        else
-            log_warn "Downloaded files may be incomplete. Check file sizes."
+            log_success "Pretrained models already downloaded!"
+            return 0
         fi
     fi
 
-    # Create fallback instructions
+    # Try using gdown for Google Drive mirrors (if available)
+    if command -v gdown &> /dev/null; then
+        log_info "Trying gdown for alternative mirrors..."
+        # Note: Add Google Drive file IDs here if community mirrors become available
+    fi
+
+    # Try using seafile-client if installed
+    if command -v seaf-cli &> /dev/null; then
+        log_info "Seafile client found, attempting download..."
+        # seaf-cli doesn't easily support shared links, skip for now
+    fi
+
+    # Provide manual download instructions
+    log_warn "=============================================="
+    log_warn "MANUAL DOWNLOAD REQUIRED"
+    log_warn "=============================================="
+    log_info ""
+    log_info "Tsinghua Cloud requires browser-based download."
+    log_info ""
+    log_info "Steps:"
+    log_info "  1. Open in browser: ${TSINGHUA_URL}"
+    log_info "  2. Download these files:"
+    log_info "     - vqvae/epoch_125.pth"
+    log_info "     - occworld/latest.pth"
+    log_info "  3. Place them in:"
+    log_info "     - ${VQVAE_FILE}"
+    log_info "     - ${OCCWORLD_FILE}"
+    log_info ""
+
+    # Create a helper script for after manual download
+    cat << 'SCRIPT' > "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
+#!/bin/bash
+# Run this after manually downloading the pretrained models
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "Checking pretrained models..."
+
+VQVAE="${SCRIPT_DIR}/vqvae/epoch_125.pth"
+OCCWORLD="${SCRIPT_DIR}/occworld/latest.pth"
+
+check_file() {
+    local file="$1"
+    local name="$2"
+    local min_size="$3"
+
+    if [ -f "$file" ]; then
+        size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
+        if [ "$size" -gt "$min_size" ]; then
+            echo "✓ $name: OK ($(numfmt --to=iec $size 2>/dev/null || echo ${size} bytes))"
+            return 0
+        else
+            echo "✗ $name: File too small (${size} bytes), may be corrupted"
+            return 1
+        fi
+    else
+        echo "✗ $name: NOT FOUND"
+        return 1
+    fi
+}
+
+check_file "$VQVAE" "VQVAE checkpoint" 100000000
+vqvae_ok=$?
+
+check_file "$OCCWORLD" "OccWorld checkpoint" 50000000
+occworld_ok=$?
+
+echo ""
+if [ $vqvae_ok -eq 0 ] && [ $occworld_ok -eq 0 ]; then
+    echo "All pretrained models ready!"
+    echo "You can now run training."
+else
+    echo "Missing or invalid models. Please download from:"
+    echo "  https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+fi
+SCRIPT
+    chmod +x "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
+
+    # Create detailed instructions
     cat << 'EOF' > "${PROJECT_ROOT}/pretrained/DOWNLOAD_INSTRUCTIONS.md"
-# OccWorld Pretrained Models
+# OccWorld Pretrained Models - Download Instructions
 
-## Automatic Download
-The download script attempts to fetch models automatically. If it fails:
+## Why Manual Download?
 
-## Manual Download
+Tsinghua Cloud (Seafile) doesn't support direct wget/curl downloads.
+You must use a web browser to download the files.
 
-### Option 1: Tsinghua Cloud (Official)
-1. Visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
-2. Download:
-   - `vqvae_epoch_125.pth` → `pretrained/vqvae/epoch_125.pth`
-   - `occworld_latest.pth` → `pretrained/occworld/latest.pth`
+## Step-by-Step Instructions
 
-### Option 2: Direct Links
+### 1. Open the download page
+
+Visit: **https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/**
+
+### 2. Download the checkpoint files
+
+You should see a folder structure. Download these files:
+- `vqvae/epoch_125.pth` (~500MB) - VQVAE encoder/decoder
+- `occworld/latest.pth` (~200MB) - World model transformer
+
+Click on each file, then click the **Download** button.
+
+### 3. Move files to correct location
+
 ```bash
-# VQVAE
-wget -O pretrained/vqvae/epoch_125.pth \
-    "https://cloud.tsinghua.edu.cn/f/3eb7652db5c74595810e/?dl=1"
+# Create directories if needed
+mkdir -p pretrained/vqvae pretrained/occworld
 
-# OccWorld
-wget -O pretrained/occworld/latest.pth \
-    "https://cloud.tsinghua.edu.cn/f/67ee94b0e4704614880f/?dl=1"
+# Move downloaded files (adjust paths as needed)
+mv ~/Downloads/epoch_125.pth pretrained/vqvae/
+mv ~/Downloads/latest.pth pretrained/occworld/
 ```
 
-### Option 3: Google Drive Mirror (if available)
-Check OccWorld GitHub issues for community mirrors.
+### 4. Verify downloads
 
-## Verification
+```bash
+./pretrained/verify_downloads.sh
+```
+
+Or manually check:
 ```bash
 ls -lh pretrained/vqvae/epoch_125.pth   # Should be ~500MB
 ls -lh pretrained/occworld/latest.pth   # Should be ~200MB
 ```
+
+## Alternative: Use a Different Machine
+
+If you have browser access on another machine:
+
+1. Download files on that machine
+2. Transfer via scp:
+```bash
+scp epoch_125.pth user@remote:/workspace/VeryLargeWeebModel/pretrained/vqvae/
+scp latest.pth user@remote:/workspace/VeryLargeWeebModel/pretrained/occworld/
+```
+
+## Training Without Pretrained Models
+
+If you can't download the pretrained models, you can still train from scratch:
+
+```bash
+# Edit config to disable pretrained loading
+# In config/finetune_tokyo.py, comment out:
+#   load_from = occworld_checkpoint
+#   vqvae_ckpt = vqvae_checkpoint
+
+python train.py --py-config config/finetune_tokyo.py --work-dir /workspace/checkpoints
+```
+
+Note: Training from scratch will take significantly longer and may not converge as well.
 EOF
+
+    log_info "Instructions saved to: ${PROJECT_ROOT}/pretrained/DOWNLOAD_INSTRUCTIONS.md"
+    log_info "After downloading, run: ./pretrained/verify_downloads.sh"
 
     # -------------------------------------------------------------------------
     # BEVFusion Models (Optional)
@@ -1022,16 +1099,12 @@ print_summary() {
     echo ""
 
     if [ ! -f "${PROJECT_ROOT}/pretrained/vqvae/epoch_125.pth" ] || [ ! -f "${PROJECT_ROOT}/pretrained/occworld/latest.pth" ]; then
-        echo "1. Download missing pretrained models:"
-        echo "   # VQVAE"
-        echo "   wget -O pretrained/vqvae/epoch_125.pth \\"
-        echo "       'https://cloud.tsinghua.edu.cn/f/3eb7652db5c74595810e/?dl=1'"
+        echo "1. Download pretrained models (browser required):"
+        echo "   Open: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+        echo "   Download: vqvae/epoch_125.pth → pretrained/vqvae/"
+        echo "   Download: occworld/latest.pth → pretrained/occworld/"
         echo ""
-        echo "   # OccWorld"
-        echo "   wget -O pretrained/occworld/latest.pth \\"
-        echo "       'https://cloud.tsinghua.edu.cn/f/67ee94b0e4704614880f/?dl=1'"
-        echo ""
-        echo "   Or visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+        echo "   Then verify: ./pretrained/verify_downloads.sh"
         echo ""
     fi
 
