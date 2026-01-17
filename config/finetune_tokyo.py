@@ -59,9 +59,12 @@ dataset_config = dict(
 )
 
 # Data pipeline
+# For A100-40GB: samples_per_gpu=4-6
+# For A100-80GB: samples_per_gpu=8-12
+# For smaller GPUs (24GB): samples_per_gpu=1-2
 data = dict(
-    samples_per_gpu=1,  # Batch size per GPU
-    workers_per_gpu=4,
+    samples_per_gpu=8,  # Batch size per GPU (optimized for A100)
+    workers_per_gpu=8,  # Match or exceed batch size
     train=dict(
         type='GazeboOccWorldDataset',
         data_root=data_root,
@@ -259,10 +262,15 @@ deterministic = False
 # CUDA settings
 cudnn_benchmark = True
 
-# Mixed precision training (saves memory)
+# Mixed precision training
+# A100/H100: Use BF16 (native support, more stable than FP16)
+# Older GPUs: Use FP16
+bf16 = dict(
+    enabled=True,  # BF16 for A100/H100
+)
 fp16 = dict(
     loss_scale='dynamic',
-    enabled=True,
+    enabled=False,  # Disable FP16 when using BF16
 )
 
 
