@@ -199,6 +199,9 @@ start_tensorboard() {
     local TB_PORT=6007
     local TB_DIR="$WORK_DIR"
 
+    # Create work dir if needed
+    mkdir -p "$WORK_DIR"
+
     # Kill existing tensorboard
     pkill -f "tensorboard.*${TB_DIR}" 2>/dev/null || true
 
@@ -212,7 +215,7 @@ start_tensorboard() {
 
     if kill -0 $TB_PID 2>/dev/null; then
         log_success "TensorBoard running at http://localhost:${TB_PORT}"
-        echo $TB_PID > "${WORK_DIR}/.tensorboard.pid"
+        echo $TB_PID > "${WORK_DIR}/.tensorboard.pid" 2>/dev/null || true
     else
         log_warn "TensorBoard failed to start"
     fi
