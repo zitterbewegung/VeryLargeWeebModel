@@ -218,13 +218,32 @@ Static city geometry risks severe overfitting. We employ aggressive augmentation
 
 \subsection{Dataset}
 
-We generate training data from Tokyo PLATEAU~\cite{plateau}:
+We utilize multiple data sources with different licensing:
+
+\paragraph{Primary: nuScenes + Occ3D (Research Use)}
+For research applications, we leverage:
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
+    \item \textbf{nuScenes}~\cite{nuscenes}: 28,130 training / 6,019 validation frames
+    \item \textbf{Occ3D}: 3D occupancy ground truth annotations
+    \item \textbf{License}: CC BY-NC-SA 4.0 (non-commercial)
+\end{itemize}
+
+\paragraph{Secondary: Tokyo PLATEAU (Commercial OK)}
+For commercial applications, we generate training data from:
 \begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
     \item \textbf{Source}: Tokyo 23-ward 3D city model (CC BY 4.0)
     \item \textbf{Meshes}: 4,500+ building OBJ files
     \item \textbf{Sessions}: 70 trajectories (50 drone, 20 rover)
     \item \textbf{Frames}: $\sim$21,000 training samples
     \item \textbf{Patterns}: Random (60\%), Survey (20\%), Orbit (20\%)
+\end{itemize}
+
+\paragraph{Aerial: VisDrone (Research Use)}
+For aerial-specific supervision:
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
+    \item \textbf{VisDrone}~\cite{visdrone}: 261,908 frames from 14 cities
+    \item \textbf{Content}: Pedestrians, vehicles from drone viewpoints
+    \item \textbf{License}: Research use only
 \end{itemize}
 
 \subsection{Training Configuration}
