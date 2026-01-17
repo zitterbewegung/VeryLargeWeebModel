@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# OccWorld Auto-Setup and Training Script
+# VeryLargeWeebModel Auto-Setup and Training Script
 # =============================================================================
 # One-shot script for cloud GPU instances (Vast.ai, Lambda, RunPod, etc.)
 # Automatically sets up environment, downloads data, and starts training.
@@ -95,18 +95,18 @@ SKIP_REAL_DATA=false
 # =============================================================================
 echo ""
 echo -e "${CYAN}${BOLD}"
-echo "╔═══════════════════════════════════════════════════════════════════════╗"
-echo "║                                                                       ║"
-echo "║     ██████╗  ██████╗ ██████╗██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗║"
-echo "║    ██╔═══██╗██╔════╝██╔════╝██║    ██║██╔═══██╗██╔══██╗██║     ██╔══██╗"
-echo "║    ██║   ██║██║     ██║     ██║ █╗ ██║██║   ██║██████╔╝██║     ██║  ██║"
-echo "║    ██║   ██║██║     ██║     ██║███╗██║██║   ██║██╔══██╗██║     ██║  ██║"
-echo "║    ╚██████╔╝╚██████╗╚██████╗╚███╔███╔╝╚██████╔╝██║  ██║███████╗██████╔╝"
-echo "║     ╚═════╝  ╚═════╝ ╚═════╝ ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═════╝ "
-echo "║                                                                       ║"
-echo "║              Auto-Setup & Training Script for Cloud GPUs              ║"
-echo "║                                                                       ║"
-echo "╚═══════════════════════════════════════════════════════════════════════╝"
+echo "╔════════════════════════════════════════════════════════════════════════════╗"
+echo "║                                                                          ║"
+echo "║  ██╗   ██╗██╗    ██╗    ██╗███╗   ███╗ ██████╗ ██████╗ ███████╗██╗       ║"
+echo "║  ██║   ██║██║    ██║    ██║████╗ ████║██╔═══██╗██╔══██╗██╔════╝██║       ║"
+echo "║  ██║   ██║██║    ██║ █╗ ██║██╔████╔██║██║   ██║██║  ██║█████╗  ██║       ║"
+echo "║  ╚██╗ ██╔╝██║    ██║███╗██║██║╚██╔╝██║██║   ██║██║  ██║██╔══╝  ██║       ║"
+echo "║   ╚████╔╝ ███████╗╚███╔███╔╝██║ ╚═╝ ██║╚██████╔╝██████╔╝███████╗███████╗ ║"
+echo "║    ╚═══╝  ╚══════╝ ╚══╝╚══╝ ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝ ║"
+echo "║                                                                          ║"
+echo "║          VeryLargeWeebModel - Auto-Setup & Training for Cloud GPUs       ║"
+echo "║                                                                          ║"
+echo "╚════════════════════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo ""
 echo -e "${BLUE}Started at:${NC} $(date)"
@@ -286,19 +286,19 @@ done
 
 if [ "$CONDA_FOUND" = true ]; then
     # Create/activate conda environment
-    log_info "Checking for existing 'occworld' environment..."
+    log_info "Checking for existing 'vlwm' environment..."
     conda env list
     echo ""
 
-    if conda env list | grep -q "^occworld "; then
-        log_info "Activating existing conda environment 'occworld'..."
-        conda activate occworld
+    if conda env list | grep -q "^vlwm "; then
+        log_info "Activating existing conda environment 'vlwm'..."
+        conda activate vlwm
         log_success "Activated conda environment"
     else
-        log_info "Creating new conda environment 'occworld' with Python 3.10..."
-        conda create -n occworld python=3.10 -y
+        log_info "Creating new conda environment 'vlwm' with Python 3.10..."
+        conda create -n vlwm python=3.10 -y
         log_info "Activating conda environment..."
-        conda activate occworld
+        conda activate vlwm
         log_success "Created and activated conda environment"
     fi
 else
@@ -555,7 +555,7 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
         fi
     fi
 
-    # Convert PLATEAU to OccWorld training format
+    # Convert PLATEAU to VeryLargeWeebModel training format
     if [ -f "${PROJECT_DIR}/scripts/plateau_to_occworld.py" ]; then
         PLATEAU_TRAINING_DIR="${DATA_DIR}/tokyo_gazebo"
 
@@ -565,7 +565,7 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
         if [ "$EXISTING_PLATEAU_SESSIONS" -gt 3 ]; then
             log_success "PLATEAU training data already generated: $EXISTING_PLATEAU_SESSIONS sessions"
         else
-            log_info "Converting PLATEAU meshes to OccWorld training format..."
+            log_info "Converting PLATEAU meshes to training format..."
             log_info "This generates occupancy grids and synthetic trajectories"
             echo ""
 
@@ -721,11 +721,11 @@ case "$CLOUD_ENV" in
     *)       SHELL_CONFIG="$HOME/.bashrc" ;;
 esac
 
-if [ -n "$SHELL_CONFIG" ] && ! grep -q "# OccWorld Training Setup" "$SHELL_CONFIG" 2>/dev/null; then
+if [ -n "$SHELL_CONFIG" ] && ! grep -q "# VeryLargeWeebModel Training Setup" "$SHELL_CONFIG" 2>/dev/null; then
     cat >> "$SHELL_CONFIG" << EOF
 
-# OccWorld Training Setup
-# -----------------------
+# VeryLargeWeebModel Training Setup
+# ----------------------------------
 export PROJECT_DIR="$PROJECT_DIR"
 export CHECKPOINT_DIR="$CHECKPOINT_DIR"
 
@@ -737,7 +737,7 @@ alias logs='tail -f \$CHECKPOINT_DIR/*.log 2>/dev/null || echo "No logs found"'
 alias attach='screen -r training'
 
 # Conda activation (if available)
-[ -f ~/miniconda3/etc/profile.d/conda.sh ] && source ~/miniconda3/etc/profile.d/conda.sh && conda activate occworld 2>/dev/null
+[ -f ~/miniconda3/etc/profile.d/conda.sh ] && source ~/miniconda3/etc/profile.d/conda.sh && conda activate vlwm 2>/dev/null
 EOF
     log_success "Shell configuration added"
 fi
