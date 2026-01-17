@@ -34,6 +34,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -261,6 +262,44 @@ class SimpleOccupancyModel(nn.Module):
         return torch.sigmoid(future_occ)
 
 
+class OccupancyLoss(nn.Module):
+    """
+    Combined loss for sparse occupancy prediction.
+
+    Uses weighted BCE + Dice loss to handle highly imbalanced occupancy grids
+    where most voxels are empty (unoccupied).
+
+    Args:
+        bce_weight: Weight for BCE loss component
+        dice_weight: Weight for Dice loss component
+        pos_weight: Weight multiplier for occupied voxels in BCE (higher = more penalty for missing occupied)
+        smooth: Smoothing factor for Dice loss to avoid division by zero
+    """
+
+    def __init__(self, bce_weight=1.0, dice_weight=1.0, pos_weight=10.0, smooth=1.0):
+        super().__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.pos_weight = pos_weight
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        # Weighted BCE: occupied voxels get pos_weight, empty voxels get 1.0
+        weight = target * (self.pos_weight - 1) + 1  # pos_weight for occupied, 1 for empty
+        bce_loss = F.binary_cross_entropy(pred, target, weight=weight, reduction='mean')
+
+        # Dice loss: better handles class imbalance
+        pred_flat = pred.view(-1)
+        target_flat = target.view(-1)
+        intersection = (pred_flat * target_flat).sum()
+        dice_loss = 1 - (2 * intersection + self.smooth) / (
+            pred_flat.sum() + target_flat.sum() + self.smooth
+        )
+
+        total_loss = self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        return total_loss
+
+
 def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
     """Train for one epoch."""
     model.train()
@@ -480,8 +519,12 @@ def main():
     max_epochs = args.epochs or getattr(config, 'max_epochs', 50)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
 
-    # Loss function
-    criterion = nn.BCELoss()  # Binary cross-entropy for occupancy
+    # Loss function - weighted BCE + Dice for sparse occupancy grids
+    criterion = OccupancyLoss(
+        bce_weight=1.0,
+        dice_weight=1.0,
+        pos_weight=10.0,  # 10x penalty for missing occupied voxels
+    )
 
     # TensorBoard
     writer = SummaryWriter(log_dir=str(work_dir / 'logs'))
