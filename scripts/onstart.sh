@@ -647,17 +647,18 @@ for session_type in ['drone', 'rover']:
     for i in range(1, 21):
         fid = f'{i:06d}'
 
-        # Dummy occupancy
-        occ = np.random.rand(200, 200, 16) > 0.95  # Sparse occupancy
+        # Dummy occupancy (correct shape: 200x200x121)
+        occ = np.random.rand(200, 200, 121) > 0.98  # Sparse occupancy ~2%
         np.savez_compressed(os.path.join(session_dir, 'occupancy', f'{fid}_occupancy.npz'), occupancy=occ)
 
-        # Dummy pose
+        # Dummy pose (correct nested dict format)
         pose = {
-            'position': [float(i), 0.0, 10.0],
-            'orientation': [0.0, 0.0, 0.0, 1.0],
-            'timestamp': float(i) * 0.1,
-            'linear_velocity': [1.0, 0.0, 0.0],
-            'angular_velocity': [0.0, 0.0, 0.0]
+            'position': {'x': float(i), 'y': 0.0, 'z': 50.0},
+            'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+            'velocity': {
+                'linear': {'x': 1.0, 'y': 0.0, 'z': 0.0},
+                'angular': {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            }
         }
         with open(os.path.join(session_dir, 'poses', f'{fid}.json'), 'w') as f:
             json.dump(pose, f)
@@ -671,6 +672,28 @@ print('Created minimal test dataset')
     fi
 
     log_success "Training data ready"
+fi
+
+# =============================================================================
+# Sanity Check Training Data
+# =============================================================================
+log_step "Running data sanity check..."
+
+if [ -f "${PROJECT_DIR}/scripts/sanity_check_data.py" ]; then
+    python3 "${PROJECT_DIR}/scripts/sanity_check_data.py" --data "${DATA_DIR}/tokyo_gazebo" || {
+        log_warn "Sanity check found issues - training may fail"
+        log_info "Review the output above for details"
+    }
+else
+    log_warn "sanity_check_data.py not found, skipping validation"
+
+    # Basic check
+    FRAME_COUNT=$(find "${DATA_DIR}/tokyo_gazebo" -name "*_occupancy.npz" 2>/dev/null | wc -l)
+    if [ "$FRAME_COUNT" -gt 50 ]; then
+        log_success "Found $FRAME_COUNT occupancy frames"
+    else
+        log_warn "Only $FRAME_COUNT frames found (may be insufficient)"
+    fi
 fi
 
 # =============================================================================
