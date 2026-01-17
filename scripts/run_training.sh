@@ -196,7 +196,7 @@ generate_data() {
 start_tensorboard() {
     log_info "Starting TensorBoard..."
 
-    local TB_PORT=6006
+    local TB_PORT=6007
     local TB_DIR="$WORK_DIR"
 
     # Kill existing tensorboard
