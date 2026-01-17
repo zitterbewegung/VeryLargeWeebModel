@@ -243,54 +243,15 @@ run_training() {
     log_info "Command: $CMD"
     echo ""
 
-    # Run with logging and live progress display
+    # Run with logging
     local LOG_FILE="${WORK_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
     local START_TIME=$(date +%s)
 
-    # Run training with unbuffered output, tee to log, and format progress
-    stdbuf -oL $CMD 2>&1 | while IFS= read -r line; do
-        # Log everything
-        echo "$line" >> "$LOG_FILE"
+    log_info "Log file: $LOG_FILE"
+    echo ""
 
-        # Format: "Epoch 1 [750/758] Loss: 0.0004"
-        if [[ "$line" =~ Epoch\ ([0-9]+)\ \[([0-9]+)/([0-9]+)\]\ Loss:\ ([0-9.]+) ]]; then
-            local epoch="${BASH_REMATCH[1]}"
-            local step="${BASH_REMATCH[2]}"
-            local total="${BASH_REMATCH[3]}"
-            local loss="${BASH_REMATCH[4]}"
-            local pct=$((step * 100 / total))
-            local elapsed=$(($(date +%s) - START_TIME))
-            local elapsed_fmt=$(printf '%02d:%02d:%02d' $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
-
-            # Progress bar
-            local bar_width=25
-            local filled=$((pct * bar_width / 100))
-            local empty=$((bar_width - filled))
-            local bar=$(printf "%${filled}s" | tr ' ' '#')$(printf "%${empty}s" | tr ' ' '-')
-
-            printf "\r[%s] Epoch %d/%d [%s] %3d%% | %d/%d | Loss: %s   " \
-                "$elapsed_fmt" "$epoch" "$EPOCHS" "$bar" "$pct" "$step" "$total" "$loss"
-
-        elif [[ "$line" == *"complete"* ]] || [[ "$line" == *"Saving"* ]] || [[ "$line" == *"checkpoint"* ]]; then
-            echo ""
-            echo -e "${GREEN}>>> $line${NC}"
-
-        elif [[ "$line" == *"Validation"* ]] || [[ "$line" == *"mIoU"* ]] || [[ "$line" == *"VPQ"* ]]; then
-            echo ""
-            echo -e "${BLUE}[EVAL] $line${NC}"
-
-        elif [[ "$line" == *"Error"* ]] || [[ "$line" == *"ERROR"* ]] || [[ "$line" == *"Traceback"* ]]; then
-            echo ""
-            echo -e "${RED}[ERROR] $line${NC}"
-
-        elif [[ "$line" == *"Warning"* ]] || [[ "$line" == *"WARNING"* ]]; then
-            : # Skip warnings to reduce noise
-
-        elif [[ "$line" == *"=="* ]] || [[ "$line" == *"---"* ]] || [[ "$line" == *"Training"* ]] || [[ "$line" == *"Device"* ]]; then
-            # Show header lines
-            echo "$line"
-        fi
-    done
+    # Simple: run training and show all output, tee to log
+    $CMD 2>&1 | tee "$LOG_FILE"
 
     local EXIT_CODE=${PIPESTATUS[0]}
 
