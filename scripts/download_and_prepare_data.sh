@@ -212,178 +212,132 @@ download_pretrained_models() {
     # -------------------------------------------------------------------------
     log_info "Downloading OccWorld models from Tsinghua Cloud..."
 
-    # Tsinghua Cloud (Seafile) requires browser-based download
-    # Direct wget/curl doesn't work - must use browser or seafile client
+    # OccWorld pretrained models from Tsinghua Cloud
+    # Direct download URL discovered via Seafile API
     # Source: https://github.com/wzzheng/OccWorld
 
-    local VQVAE_FILE="${PROJECT_ROOT}/pretrained/vqvae/epoch_125.pth"
     local OCCWORLD_FILE="${PROJECT_ROOT}/pretrained/occworld/latest.pth"
     local TSINGHUA_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+    local DOWNLOAD_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1"
 
-    # Check if models already exist
-    if [ -f "$VQVAE_FILE" ] && [ -f "$OCCWORLD_FILE" ]; then
-        local vqvae_size=$(stat -f%z "$VQVAE_FILE" 2>/dev/null || stat -c%s "$VQVAE_FILE" 2>/dev/null || echo 0)
+    # Note: The share only contains latest.pth (721MB) which includes both OccWorld and VQVAE weights
+    # There is no separate epoch_125.pth file in the official share
+
+    # Check if model already exists
+    if [ -f "$OCCWORLD_FILE" ]; then
         local occworld_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null || echo 0)
 
-        if [ "$vqvae_size" -gt 1000000 ] && [ "$occworld_size" -gt 1000000 ]; then
-            log_success "Pretrained models already downloaded!"
-            return 0
-        fi
-    fi
-
-    # Try using gdown for Google Drive mirrors (if available)
-    if command -v gdown &> /dev/null; then
-        log_info "Trying gdown for alternative mirrors..."
-        # Note: Add Google Drive file IDs here if community mirrors become available
-    fi
-
-    # Try using seafile-client if installed
-    if command -v seaf-cli &> /dev/null; then
-        log_info "Seafile client found, attempting download..."
-        # seaf-cli doesn't easily support shared links, skip for now
-    fi
-
-    # Provide manual download instructions
-    log_warn "=============================================="
-    log_warn "MANUAL DOWNLOAD REQUIRED"
-    log_warn "=============================================="
-    log_info ""
-    log_info "Tsinghua Cloud requires browser-based download."
-    log_info ""
-    log_info "Steps:"
-    log_info "  1. Open in browser: ${TSINGHUA_URL}"
-    log_info "  2. Download these files:"
-    log_info "     - vqvae/epoch_125.pth"
-    log_info "     - occworld/latest.pth"
-    log_info "  3. Place them in:"
-    log_info "     - ${VQVAE_FILE}"
-    log_info "     - ${OCCWORLD_FILE}"
-    log_info ""
-
-    # Create a helper script for after manual download
-    cat << 'SCRIPT' > "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
-#!/bin/bash
-# Run this after manually downloading the pretrained models
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-echo "Checking pretrained models..."
-
-VQVAE="${SCRIPT_DIR}/vqvae/epoch_125.pth"
-OCCWORLD="${SCRIPT_DIR}/occworld/latest.pth"
-
-check_file() {
-    local file="$1"
-    local name="$2"
-    local min_size="$3"
-
-    if [ -f "$file" ]; then
-        size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
-        if [ "$size" -gt "$min_size" ]; then
-            echo "✓ $name: OK ($(numfmt --to=iec $size 2>/dev/null || echo ${size} bytes))"
+        if [ "$occworld_size" -gt 100000000 ]; then  # > 100MB
+            log_success "OccWorld checkpoint already downloaded! ($(numfmt --to=iec $occworld_size 2>/dev/null || echo "${occworld_size} bytes"))"
             return 0
         else
-            echo "✗ $name: File too small (${size} bytes), may be corrupted"
-            return 1
+            log_warn "Existing file seems incomplete, re-downloading..."
+            rm -f "$OCCWORLD_FILE"
         fi
-    else
-        echo "✗ $name: NOT FOUND"
-        return 1
     fi
-}
 
-check_file "$VQVAE" "VQVAE checkpoint" 100000000
-vqvae_ok=$?
+    # Download OccWorld checkpoint (includes VQVAE weights)
+    log_info "Downloading OccWorld checkpoint (~721MB)..."
+    log_info "  URL: ${DOWNLOAD_URL}"
 
-check_file "$OCCWORLD" "OccWorld checkpoint" 50000000
-occworld_ok=$?
+    mkdir -p "$(dirname "$OCCWORLD_FILE")"
 
+    if curl -L --progress-bar -o "$OCCWORLD_FILE" "$DOWNLOAD_URL" 2>&1; then
+        local downloaded_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null || echo 0)
+
+        if [ "$downloaded_size" -gt 100000000 ]; then  # > 100MB
+            log_success "OccWorld checkpoint downloaded! ($(numfmt --to=iec $downloaded_size 2>/dev/null || echo "${downloaded_size} bytes"))"
+        else
+            log_error "Download failed or file is too small (${downloaded_size} bytes)"
+            log_info "Try manual download: curl -L -o ${OCCWORLD_FILE} '${DOWNLOAD_URL}'"
+            rm -f "$OCCWORLD_FILE"
+        fi
+    elif wget -q --show-progress -O "$OCCWORLD_FILE" "$DOWNLOAD_URL" 2>&1; then
+        log_success "OccWorld checkpoint downloaded!"
+    else
+        log_error "Download failed. Try manually:"
+        log_info "  curl -L -o ${OCCWORLD_FILE} '${DOWNLOAD_URL}'"
+        rm -f "$OCCWORLD_FILE"
+    fi
+
+    # Create a helper script to verify downloads
+    cat << 'SCRIPT' > "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
+#!/bin/bash
+# Verify OccWorld pretrained model download
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OCCWORLD="${SCRIPT_DIR}/occworld/latest.pth"
+
+echo "Checking pretrained models..."
 echo ""
-if [ $vqvae_ok -eq 0 ] && [ $occworld_ok -eq 0 ]; then
-    echo "All pretrained models ready!"
-    echo "You can now run training."
+
+if [ -f "$OCCWORLD" ]; then
+    size=$(stat -f%z "$OCCWORLD" 2>/dev/null || stat -c%s "$OCCWORLD" 2>/dev/null || echo 0)
+    size_mb=$((size / 1024 / 1024))
+
+    if [ "$size" -gt 700000000 ]; then  # > 700MB
+        echo "✓ OccWorld checkpoint: OK (${size_mb}MB)"
+        echo ""
+        echo "Pretrained model ready! You can now run training."
+    elif [ "$size" -gt 100000000 ]; then  # > 100MB
+        echo "⚠ OccWorld checkpoint: ${size_mb}MB (expected ~721MB, may be incomplete)"
+    else
+        echo "✗ OccWorld checkpoint: File too small (${size_mb}MB), download failed"
+    fi
 else
-    echo "Missing or invalid models. Please download from:"
-    echo "  https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+    echo "✗ OccWorld checkpoint: NOT FOUND"
+    echo ""
+    echo "Download with:"
+    echo "  curl -L -o pretrained/occworld/latest.pth \\"
+    echo "    'https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1'"
 fi
 SCRIPT
     chmod +x "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
 
-    # Create detailed instructions
+    # Create instructions file
     cat << 'EOF' > "${PROJECT_ROOT}/pretrained/DOWNLOAD_INSTRUCTIONS.md"
-# OccWorld Pretrained Models - Download Instructions
+# OccWorld Pretrained Model Download
 
-## Why Manual Download?
-
-Tsinghua Cloud (Seafile) doesn't support direct wget/curl downloads.
-You must use a web browser to download the files.
-
-## Step-by-Step Instructions
-
-### 1. Open the download page
-
-Visit: **https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/**
-
-### 2. Download the checkpoint files
-
-You should see a folder structure. Download these files:
-- `vqvae/epoch_125.pth` (~500MB) - VQVAE encoder/decoder
-- `occworld/latest.pth` (~200MB) - World model transformer
-
-Click on each file, then click the **Download** button.
-
-### 3. Move files to correct location
+## Direct Download (Recommended)
 
 ```bash
-# Create directories if needed
-mkdir -p pretrained/vqvae pretrained/occworld
+mkdir -p pretrained/occworld
 
-# Move downloaded files (adjust paths as needed)
-mv ~/Downloads/epoch_125.pth pretrained/vqvae/
-mv ~/Downloads/latest.pth pretrained/occworld/
+curl -L -o pretrained/occworld/latest.pth \
+  "https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1"
 ```
 
-### 4. Verify downloads
+This downloads `latest.pth` (~721MB) which contains both OccWorld and VQVAE weights.
+
+## Verify Download
 
 ```bash
 ./pretrained/verify_downloads.sh
+
+# Or manually:
+ls -lh pretrained/occworld/latest.pth   # Should be ~721MB
 ```
 
-Or manually check:
-```bash
-ls -lh pretrained/vqvae/epoch_125.pth   # Should be ~500MB
-ls -lh pretrained/occworld/latest.pth   # Should be ~200MB
-```
+## Alternative: Browser Download
 
-## Alternative: Use a Different Machine
-
-If you have browser access on another machine:
-
-1. Download files on that machine
-2. Transfer via scp:
-```bash
-scp epoch_125.pth user@remote:/workspace/VeryLargeWeebModel/pretrained/vqvae/
-scp latest.pth user@remote:/workspace/VeryLargeWeebModel/pretrained/occworld/
-```
+1. Visit: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
+2. Download `latest.pth`
+3. Move to `pretrained/occworld/latest.pth`
 
 ## Training Without Pretrained Models
 
-If you can't download the pretrained models, you can still train from scratch:
+If download fails, you can train from scratch (slower):
 
 ```bash
-# Edit config to disable pretrained loading
-# In config/finetune_tokyo.py, comment out:
-#   load_from = occworld_checkpoint
-#   vqvae_ckpt = vqvae_checkpoint
+# First train VQVAE
+python train.py --py-config config/train_vqvae.py --work-dir out/vqvae
 
-python train.py --py-config config/finetune_tokyo.py --work-dir /workspace/checkpoints
+# Then train OccWorld (update vqvae path in config first)
+python train.py --py-config config/finetune_tokyo.py --work-dir out/occworld
 ```
-
-Note: Training from scratch will take significantly longer and may not converge as well.
 EOF
 
-    log_info "Instructions saved to: ${PROJECT_ROOT}/pretrained/DOWNLOAD_INSTRUCTIONS.md"
-    log_info "After downloading, run: ./pretrained/verify_downloads.sh"
+    log_info "Verify download with: ./pretrained/verify_downloads.sh"
 
     # -------------------------------------------------------------------------
     # BEVFusion Models (Optional)
@@ -1072,16 +1026,16 @@ print_summary() {
     echo ""
 
     # Check pretrained models
-    if [ -f "${PROJECT_ROOT}/pretrained/vqvae/epoch_125.pth" ]; then
-        echo -e "  ${GREEN}✓${NC} VQVAE checkpoint downloaded"
-    else
-        echo -e "  ${RED}✗${NC} VQVAE checkpoint missing - manual download required"
-    fi
-
     if [ -f "${PROJECT_ROOT}/pretrained/occworld/latest.pth" ]; then
-        echo -e "  ${GREEN}✓${NC} OccWorld checkpoint downloaded"
+        local size=$(stat -f%z "${PROJECT_ROOT}/pretrained/occworld/latest.pth" 2>/dev/null || stat -c%s "${PROJECT_ROOT}/pretrained/occworld/latest.pth" 2>/dev/null || echo 0)
+        local size_mb=$((size / 1024 / 1024))
+        if [ "$size" -gt 700000000 ]; then
+            echo -e "  ${GREEN}✓${NC} OccWorld checkpoint: ${size_mb}MB"
+        else
+            echo -e "  ${YELLOW}!${NC} OccWorld checkpoint: ${size_mb}MB (expected ~721MB)"
+        fi
     else
-        echo -e "  ${RED}✗${NC} OccWorld checkpoint missing - manual download required"
+        echo -e "  ${RED}✗${NC} OccWorld checkpoint missing"
     fi
 
     # Check training data
@@ -1098,11 +1052,10 @@ print_summary() {
     echo "=============================================================================="
     echo ""
 
-    if [ ! -f "${PROJECT_ROOT}/pretrained/vqvae/epoch_125.pth" ] || [ ! -f "${PROJECT_ROOT}/pretrained/occworld/latest.pth" ]; then
-        echo "1. Download pretrained models (browser required):"
-        echo "   Open: https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
-        echo "   Download: vqvae/epoch_125.pth → pretrained/vqvae/"
-        echo "   Download: occworld/latest.pth → pretrained/occworld/"
+    if [ ! -f "${PROJECT_ROOT}/pretrained/occworld/latest.pth" ]; then
+        echo "1. Download pretrained model (~721MB):"
+        echo "   curl -L -o pretrained/occworld/latest.pth \\"
+        echo "     'https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1'"
         echo ""
         echo "   Then verify: ./pretrained/verify_downloads.sh"
         echo ""
