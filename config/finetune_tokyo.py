@@ -267,18 +267,33 @@ fp16 = dict(
 
 
 # ============================================================================
-# Data Augmentation (Optional)
+# Data Augmentation (Aggressive - prevents overfitting on PLATEAU data)
 # ============================================================================
 
 train_pipeline = [
     dict(type='LoadMultiViewImages'),
     dict(type='LoadLiDARPoints'),
     dict(type='LoadOccupancy'),
-    # Augmentations
+
+    # Aggressive spatial augmentations (critical for PLATEAU data)
     dict(type='RandomFlip3D', flip_ratio=0.5),
-    dict(type='RandomRotate', angle=(-5, 5), prob=0.5),
-    dict(type='PointCloudNoise', std=0.02, prob=0.3),
+    dict(type='RandomFlip3D', flip_ratio=0.5, direction='vertical'),
+    dict(type='RandomRotate', angle=(-45, 45), prob=0.8),  # Much larger rotation range
+    dict(type='RandomScale', scale_range=(0.9, 1.1), prob=0.5),
+
+    # Point cloud augmentations
+    dict(type='PointCloudNoise', std=0.05, prob=0.5),  # Increased noise
+    dict(type='PointCloudDropout', dropout_ratio=0.1, prob=0.3),  # Random dropout
+    dict(type='PointCloudJitter', jitter_std=0.02, prob=0.3),
+
+    # Occupancy augmentations
+    dict(type='OccupancyDropout', dropout_ratio=0.05, prob=0.3),  # Drop random voxels
+    dict(type='OccupancyNoise', flip_prob=0.02, prob=0.3),  # Flip random voxel states
+
+    # Image augmentations
     dict(type='ImageNormalize', mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    dict(type='ColorJitter', brightness=0.2, contrast=0.2, saturation=0.2, prob=0.5),
+
     # Format
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['history_images', 'history_lidar', 'history_occupancy',

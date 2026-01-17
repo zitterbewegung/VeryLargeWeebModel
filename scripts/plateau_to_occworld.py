@@ -286,7 +286,8 @@ class TrajectoryGenerator:
         self,
         num_frames: int,
         altitude_range: Tuple[float, float] = (30.0, 100.0),
-        speed: float = 3.0
+        speed: float = 3.0,
+        agent_type: str = 'drone'
     ) -> List[Dict]:
         """Generate random exploration trajectory."""
         waypoints = []
@@ -303,7 +304,7 @@ class TrajectoryGenerator:
             # Random walk with momentum
             dx = np.random.uniform(-5, 5)
             dy = np.random.uniform(-5, 5)
-            dz = np.random.uniform(-2, 2)
+            dz = np.random.uniform(-2, 2) if agent_type == 'drone' else 0
             dyaw = np.random.uniform(-0.2, 0.2)
 
             x = np.clip(x + dx, x_min, x_max)
@@ -312,7 +313,52 @@ class TrajectoryGenerator:
             yaw = yaw + dyaw
 
             waypoints.append(self._create_waypoint(
-                x, y, z, yaw, speed, 'drone'
+                x, y, z, yaw, speed, agent_type
+            ))
+
+        return waypoints
+
+    def generate_rover_patrol(
+        self,
+        num_frames: int,
+        altitude: float = 1.5,  # Ground level camera height
+        speed: float = 2.0
+    ) -> List[Dict]:
+        """Generate ground-level rover patrol trajectory."""
+        waypoints = []
+
+        x_min, y_min, x_max, y_max = self.bounds
+
+        # Start at random position
+        x = np.random.uniform(x_min, x_max)
+        y = np.random.uniform(y_min, y_max)
+        yaw = np.random.uniform(0, 2 * np.pi)
+
+        for i in range(num_frames):
+            # Ground vehicle dynamics - smoother turns, no altitude change
+            dyaw = np.random.uniform(-0.15, 0.15)  # Gentler turns than drone
+            yaw = yaw + dyaw
+
+            # Move forward with occasional speed variation
+            current_speed = speed * np.random.uniform(0.8, 1.2)
+            dx = current_speed * np.cos(yaw)
+            dy = current_speed * np.sin(yaw)
+
+            # Bounce off boundaries
+            new_x = x + dx
+            new_y = y + dy
+
+            if new_x < x_min or new_x > x_max:
+                yaw = np.pi - yaw  # Reflect
+                new_x = np.clip(new_x, x_min, x_max)
+            if new_y < y_min or new_y > y_max:
+                yaw = -yaw  # Reflect
+                new_y = np.clip(new_y, y_min, y_max)
+
+            x, y = new_x, new_y
+
+            waypoints.append(self._create_waypoint(
+                x, y, altitude, yaw, current_speed, 'rover'
             ))
 
         return waypoints
@@ -524,14 +570,28 @@ def main():
         for subdir in ['occupancy', 'poses', 'lidar', 'images']:
             os.makedirs(os.path.join(session_dir, subdir), exist_ok=True)
 
-        # Generate trajectory
-        if args.pattern == 'survey':
-            waypoints = traj_gen.generate_survey_pattern(args.frames)
-        elif args.pattern == 'orbit':
-            center = ((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
-            waypoints = traj_gen.generate_orbit_pattern(args.frames, center=center)
+        # Generate trajectory based on agent type
+        if args.agent == 'rover':
+            # Ground-level trajectories for rover
+            if args.pattern == 'random':
+                waypoints = traj_gen.generate_rover_patrol(args.frames)
+            else:
+                # Use random walk at ground level for other patterns
+                waypoints = traj_gen.generate_random_walk(
+                    args.frames,
+                    altitude_range=(1.5, 2.0),  # Ground level
+                    speed=2.0,
+                    agent_type='rover'
+                )
         else:
-            waypoints = traj_gen.generate_random_walk(args.frames)
+            # Aerial trajectories for drone
+            if args.pattern == 'survey':
+                waypoints = traj_gen.generate_survey_pattern(args.frames)
+            elif args.pattern == 'orbit':
+                center = ((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
+                waypoints = traj_gen.generate_orbit_pattern(args.frames, center=center)
+            else:
+                waypoints = traj_gen.generate_random_walk(args.frames, agent_type='drone')
 
         # Generate data for each frame
         for frame_idx, waypoint in enumerate(waypoints):

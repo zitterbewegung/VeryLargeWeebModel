@@ -650,8 +650,28 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
                 --pattern orbit \
                 --max-meshes 50 || log_warn "PLATEAU orbit conversion failed"
 
-            GENERATED_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
-            log_success "Generated $GENERATED_SESSIONS training sessions from PLATEAU data"
+            # Add ROVER (ground-level) trajectories for domain diversity
+            log_info "Adding ROVER ground-level trajectories..."
+            python3 "${PROJECT_DIR}/scripts/plateau_to_occworld.py" \
+                --input "${PLATEAU_MESHES}/obj" \
+                --output "$PLATEAU_TRAINING_DIR" \
+                --frames 300 \
+                --sessions 20 \
+                --pattern random \
+                --agent rover \
+                --max-meshes 50 || log_warn "PLATEAU rover conversion failed"
+
+            # Final count
+            DRONE_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/drone_* 2>/dev/null | wc -l || echo 0)
+            ROVER_SESSIONS=$(ls -d ${PLATEAU_TRAINING_DIR}/rover_* 2>/dev/null | wc -l || echo 0)
+            TOTAL_SESSIONS=$((DRONE_SESSIONS + ROVER_SESSIONS))
+            TOTAL_FRAMES=$(find "$PLATEAU_TRAINING_DIR" -name "*_occupancy.npz" 2>/dev/null | wc -l || echo 0)
+
+            log_success "Generated training data from PLATEAU:"
+            log_success "  - Drone sessions: $DRONE_SESSIONS"
+            log_success "  - Rover sessions: $ROVER_SESSIONS"
+            log_success "  - Total sessions: $TOTAL_SESSIONS"
+            log_success "  - Total frames: $TOTAL_FRAMES"
         fi
     else
         log_warn "plateau_to_occworld.py not found, skipping conversion"

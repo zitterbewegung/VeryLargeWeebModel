@@ -1,6 +1,6 @@
-# OccWorld Tokyo Training Pipeline
+# VeryLargeWeebModel
 
-Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data using Gazebo simulation.
+Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data using Gazebo simulation for 4D occupancy forecasting.
 
 ## Training Data Options
 
@@ -51,6 +51,172 @@ python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoi
 Run both data sources:
 ```bash
 ./scripts/setup_training_data.sh --all
+```
+
+---
+
+## Architecture
+
+### What are Voxels?
+
+**Voxels are 3D pixels.** Just like pixels divide a 2D image into a grid of colored squares, voxels divide 3D space into a grid of small cubes. Each voxel stores a binary value:
+- `1` = occupied (there's something there - building, car, person)
+- `0` = empty (free space, air)
+
+```
+2D Image (Pixels)              3D Space (Voxels)
+┌───┬───┬───┬───┐             ┌───┬───┬───┐
+│ ░ │ ▓ │ ▓ │ ░ │             │░░░│▓▓▓│░░░│  ← Top layer (sky)
+├───┼───┼───┼───┤            ┌┴───┼───┼───┴┐
+│ ░ │ ▓ │ ▓ │ ░ │            │░░░│▓▓▓│░░░│  ← Middle layer (buildings)
+├───┼───┼───┼───┤           ┌┴───┼───┼───┴┐
+│ ░ │ ░ │ ░ │ ░ │           │░░░│░░░│░░░│  ← Bottom layer (ground)
+└───┴───┴───┴───┘           └───┴───┴───┘
+```
+
+### Voxel Grid Configuration
+
+VeryLargeWeebModel uses a **200 × 200 × 121** voxel grid:
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │             121 voxels (Z)              │
+                    │              = ~151 meters              │
+                    │            (-2m to +150m)               │
+        80m ────────┼──────────────────┼──────────────────────┤
+                    │                  │                      │
+                    │     200 voxels (Y) = 80 meters         │
+                    │        (-40m to +40m)                  │
+                    │                  │                      │
+       -40m ────────┼──────────────────┼──────────────────────┤
+                    │                  │                      │
+                    └──────────────────┼──────────────────────┘
+                   -40m               0m                    +40m
+                              200 voxels (X) = 80 meters
+```
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| **Grid Size** | 200 × 200 × 121 | Number of voxels in X, Y, Z |
+| **Voxel Size** | 0.4m × 0.4m × 1.25m | Physical size of each voxel |
+| **X Range** | -40m to +40m | 80 meters left/right |
+| **Y Range** | -40m to +40m | 80 meters front/back |
+| **Z Range** | -2m to +150m | ~152 meters vertical (below ground to tall buildings) |
+| **Total Voxels** | 4,840,000 | 200 × 200 × 121 per frame |
+| **Total Volume** | ~970,000 m³ | Coverage area per prediction |
+
+### Training Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        VeryLargeWeebModel Training Pipeline                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐
+│   PLATEAU   │     │   Gazebo    │     │    LiDAR Point      │
+│ 3D City     │────▶│ Simulation  │────▶│    Cloud (N × 4)    │
+│   Models    │     │ (Drone)     │     │   [x, y, z, intensity]
+└─────────────┘     └─────────────┘     └──────────┬──────────┘
+                                                   │
+                                                   ▼
+                                        ┌─────────────────────┐
+                                        │   Voxelization      │
+                                        │   (200 × 200 × 121) │
+                                        └──────────┬──────────┘
+                                                   │
+         ┌─────────────────────────────────────────┴──────────────────────┐
+         │                                                                 │
+         ▼                                                                 ▼
+┌─────────────────────┐                                    ┌─────────────────────┐
+│ Current Occupancy   │                                    │  Ground Truth       │
+│ (Input to Model)    │                                    │  (Future Frames)    │
+└──────────┬──────────┘                                    └──────────┬──────────┘
+           │                                                          │
+           ▼                                                          │
+┌─────────────────────┐                                               │
+│    OccWorld Model   │                                               │
+│   (Transformer)     │                                               │
+└──────────┬──────────┘                                               │
+           │                                                          │
+           ▼                                                          │
+┌─────────────────────┐     ┌─────────────────────┐                   │
+│ Predicted Future    │────▶│   OccupancyLoss     │◀──────────────────┘
+│    Occupancy        │     │ (BCE + Dice Loss)   │
+└─────────────────────┘     └─────────────────────┘
+```
+
+### OccupancyLoss Function
+
+Occupancy grids are **extremely sparse** - typically less than 1% of voxels are occupied. Standard BCE loss would cause the model to predict all zeros (achieving 99% accuracy by doing nothing).
+
+**Solution: Weighted BCE + Dice Loss**
+
+```python
+class OccupancyLoss(nn.Module):
+    """
+    Combined loss for sparse occupancy prediction:
+    - Weighted BCE: 10× penalty for missing occupied voxels
+    - Dice Loss: Measures overlap, robust to class imbalance
+    """
+    def __init__(self, pos_weight=10.0):
+        self.pos_weight = pos_weight  # Weight for occupied voxels
+
+    def forward(self, pred, target):
+        # Weighted BCE - penalize missing occupied voxels more
+        weight = target * (self.pos_weight - 1) + 1
+        bce_loss = F.binary_cross_entropy(pred, target, weight=weight)
+
+        # Dice loss - overlap-based, handles imbalance
+        intersection = (pred * target).sum()
+        dice_loss = 1 - (2 * intersection) / (pred.sum() + target.sum())
+
+        return bce_loss + dice_loss
+```
+
+| Loss Component | Purpose | Effect |
+|----------------|---------|--------|
+| **Weighted BCE** | Penalize false negatives | Model learns to find occupied voxels |
+| **Dice Loss** | Measure set overlap | Robust to extreme class imbalance |
+| **pos_weight=10** | 10× penalty for missed objects | Prevents all-zero predictions |
+
+### Data Format
+
+Each training sample contains:
+
+```python
+sample = {
+    'lidar': np.ndarray,      # Shape: (N, 4) - [x, y, z, intensity]
+    'occupancy': np.ndarray,  # Shape: (200, 200, 121) - binary voxel grid
+    'pose': {
+        'position': {'x': float, 'y': float, 'z': float},
+        'orientation': {'x': float, 'y': float, 'z': float, 'w': float}
+    },
+    'timestamp': float        # Unix timestamp
+}
+```
+
+### Model Architecture
+
+VeryLargeWeebModel is based on [OccWorld](https://github.com/wzzheng/OccWorld), a transformer-based model for 4D occupancy forecasting:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OccWorld Architecture                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │  3D Encoder  │───▶│  World Model │───▶│  3D Decoder  │  │
+│  │ (Voxel→Latent)│   │ (Transformer)│   │ (Latent→Voxel)│  │
+│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│         │                   │                    │          │
+│         ▼                   ▼                    ▼          │
+│    VQ-VAE Encoder     Temporal Attention    VQ-VAE Decoder │
+│    (Compression)       (Forecasting)        (Reconstruction)│
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Input: Current occupancy grid (200×200×121)
+Output: Predicted future occupancy grids (T×200×200×121)
 ```
 
 ---
