@@ -62,6 +62,14 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
+# Install gdown if not available
+install_gdown() {
+    if ! command -v gdown &> /dev/null; then
+        log_info "Installing gdown for Google Drive downloads..."
+        pip install gdown -q
+    fi
+}
+
 echo "=============================================="
 echo "  AerialWorld Research Data Download"
 echo "=============================================="
@@ -245,20 +253,40 @@ unzip VisDrone2019-DET-val.zip -d data/visdrone/
 EOF
 
     if [ "$SKIP_LARGE" = false ]; then
-        log_info "VisDrone requires manual download from Google Drive"
-        log_info "See: ${VISDRONE_DIR}/DOWNLOAD_INSTRUCTIONS.md"
+        # Install gdown for Google Drive downloads
+        install_gdown
 
-        # Try to download with gdown if available
-        if command -v gdown &> /dev/null; then
-            log_info "gdown found, attempting VisDrone download..."
+        log_info "Downloading VisDrone from Google Drive..."
 
-            if [ ! -f "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" ]; then
-                gdown 1bxK5zgLn0_L8x276eKkuYA_FzwCIjb59 -O "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" || \
-                    log_warn "VisDrone download failed - try manual download"
-            fi
-        else
-            log_info "Install gdown for automatic download: pip install gdown"
+        # VisDrone2019-DET-train (~1.5GB)
+        if [ ! -f "${VISDRONE_DIR}/VisDrone2019-DET-train.zip" ] && [ ! -d "${VISDRONE_DIR}/VisDrone2019-DET-train" ]; then
+            log_info "Downloading VisDrone2019-DET-train (~1.5GB)..."
+            gdown 1a2oHjcEcwXP8oUF95qiwrqzACb2YlUhn -O "${VISDRONE_DIR}/VisDrone2019-DET-train.zip" && \
+                log_success "VisDrone train downloaded" || \
+                log_warn "VisDrone train download failed - try manual download"
         fi
+
+        # VisDrone2019-DET-val (~78MB)
+        if [ ! -f "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" ] && [ ! -d "${VISDRONE_DIR}/VisDrone2019-DET-val" ]; then
+            log_info "Downloading VisDrone2019-DET-val (~78MB)..."
+            gdown 1bxK5zgLn0_L8x276eKkuYA_FzwCIjb59 -O "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" && \
+                log_success "VisDrone val downloaded" || \
+                log_warn "VisDrone val download failed - try manual download"
+        fi
+
+        # Extract if downloaded
+        if [ -f "${VISDRONE_DIR}/VisDrone2019-DET-train.zip" ]; then
+            log_info "Extracting VisDrone train..."
+            unzip -q -o "${VISDRONE_DIR}/VisDrone2019-DET-train.zip" -d "${VISDRONE_DIR}/"
+        fi
+
+        if [ -f "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" ]; then
+            log_info "Extracting VisDrone val..."
+            unzip -q -o "${VISDRONE_DIR}/VisDrone2019-DET-val.zip" -d "${VISDRONE_DIR}/"
+        fi
+    else
+        log_info "Skipping large VisDrone download (--skip-large)"
+        log_info "See: ${VISDRONE_DIR}/DOWNLOAD_INSTRUCTIONS.md"
     fi
 
     log_success "VisDrone setup complete"
