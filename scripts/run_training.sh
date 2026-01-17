@@ -243,17 +243,76 @@ run_training() {
     log_info "Command: $CMD"
     echo ""
 
-    # Run with logging
+    # Run with logging and live progress display
     local LOG_FILE="${WORK_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
+    local START_TIME=$(date +%s)
 
-    $CMD 2>&1 | tee "$LOG_FILE"
+    # Create a named pipe for processing output
+    local PIPE=$(mktemp -u)
+    mkfifo "$PIPE"
 
-    local EXIT_CODE=${PIPESTATUS[0]}
+    # Process output in background - show progress and log to file
+    (
+        while IFS= read -r line; do
+            echo "$line" >> "$LOG_FILE"
+
+            # Parse and display progress
+            if [[ "$line" =~ Epoch[[:space:]]+([0-9]+)[[:space:]]+\[([0-9]+)/([0-9]+)\][[:space:]]+Loss:[[:space:]]+([0-9.]+) ]]; then
+                local epoch="${BASH_REMATCH[1]}"
+                local step="${BASH_REMATCH[2]}"
+                local total="${BASH_REMATCH[3]}"
+                local loss="${BASH_REMATCH[4]}"
+                local pct=$((step * 100 / total))
+                local elapsed=$(($(date +%s) - START_TIME))
+                local elapsed_fmt=$(printf '%02d:%02d:%02d' $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+
+                # Progress bar
+                local bar_width=30
+                local filled=$((pct * bar_width / 100))
+                local empty=$((bar_width - filled))
+                local bar=$(printf "%${filled}s" | tr ' ' '█')$(printf "%${empty}s" | tr ' ' '░')
+
+                printf "\r${BLUE}[${elapsed_fmt}]${NC} Epoch %d/%d ${GREEN}[%s]${NC} %3d%% | Step %d/%d | Loss: ${YELLOW}%.6f${NC}    " \
+                    "$epoch" "$EPOCHS" "$bar" "$pct" "$step" "$total" "$loss"
+
+            elif [[ "$line" =~ "Epoch".*"complete" ]] || [[ "$line" =~ "Saving checkpoint" ]]; then
+                echo ""
+                echo -e "${GREEN}>>>${NC} $line"
+
+            elif [[ "$line" =~ "Validation" ]] || [[ "$line" =~ "mIoU" ]] || [[ "$line" =~ "VPQ" ]]; then
+                echo ""
+                echo -e "${BLUE}[EVAL]${NC} $line"
+
+            elif [[ "$line" =~ "Error" ]] || [[ "$line" =~ "ERROR" ]] || [[ "$line" =~ "Exception" ]]; then
+                echo ""
+                echo -e "${RED}[ERROR]${NC} $line"
+
+            elif [[ "$line" =~ "Warning" ]] || [[ "$line" =~ "WARNING" ]]; then
+                echo -e "${YELLOW}[WARN]${NC} $line"
+            fi
+        done
+    ) < "$PIPE" &
+    local READER_PID=$!
+
+    # Run training, output to pipe
+    $CMD 2>&1 > "$PIPE"
+    local EXIT_CODE=$?
+
+    # Cleanup
+    wait $READER_PID 2>/dev/null
+    rm -f "$PIPE"
+
+    echo ""
+    echo ""
+
+    local END_TIME=$(date +%s)
+    local TOTAL_TIME=$((END_TIME - START_TIME))
+    local TIME_FMT=$(printf '%02d:%02d:%02d' $((TOTAL_TIME/3600)) $((TOTAL_TIME%3600/60)) $((TOTAL_TIME%60)))
 
     if [ $EXIT_CODE -eq 0 ]; then
-        log_success "Training completed!"
+        log_success "Training completed in ${TIME_FMT}!"
     else
-        log_error "Training failed with exit code $EXIT_CODE"
+        log_error "Training failed with exit code $EXIT_CODE after ${TIME_FMT}"
         log_info "Log file: $LOG_FILE"
         log_info "To resume: $0 --resume --work-dir $WORK_DIR"
         return $EXIT_CODE
