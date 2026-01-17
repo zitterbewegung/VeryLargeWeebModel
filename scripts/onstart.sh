@@ -13,11 +13,14 @@
 #   ./scripts/onstart.sh [OPTIONS]
 #
 # Options:
-#   --no-train      Setup only, don't start training
-#   --resume        Resume from existing checkpoint
-#   --epochs N      Set number of epochs (default: 50)
-#   --batch-size N  Override batch size
-#   --help          Show this help
+#   --no-train          Setup only, don't start training
+#   --resume            Resume from existing checkpoint
+#   --epochs N          Set number of epochs (default: 50)
+#   --batch-size N      Override batch size
+#   --clean-data        Remove existing training data before setup
+#   --clean-checkpoints Remove existing checkpoints before setup
+#   --clean-all         Remove both data and checkpoints
+#   --help              Show this help
 #
 # Environment Variables:
 #   GITHUB_REPO     Repository to clone (default: zitterbewegung/VeryLargeWeebModel)
@@ -78,6 +81,8 @@ START_TRAINING=true
 RESUME_TRAINING=false
 EPOCHS=50
 BATCH_SIZE=""
+CLEAN_DATA=false
+CLEAN_CHECKPOINTS=false
 
 # =============================================================================
 # Banner
@@ -105,12 +110,15 @@ echo ""
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --no-train)     START_TRAINING=false; shift ;;
-        --resume)       RESUME_TRAINING=true; shift ;;
-        --epochs)       EPOCHS="$2"; shift 2 ;;
-        --batch-size)   BATCH_SIZE="$2"; shift 2 ;;
-        --help|-h)      head -30 "$0" | tail -25; exit 0 ;;
-        *)              log_warn "Unknown option: $1"; shift ;;
+        --no-train)         START_TRAINING=false; shift ;;
+        --resume)           RESUME_TRAINING=true; shift ;;
+        --epochs)           EPOCHS="$2"; shift 2 ;;
+        --batch-size)       BATCH_SIZE="$2"; shift 2 ;;
+        --clean-data)       CLEAN_DATA=true; shift ;;
+        --clean-checkpoints) CLEAN_CHECKPOINTS=true; shift ;;
+        --clean-all)        CLEAN_DATA=true; CLEAN_CHECKPOINTS=true; shift ;;
+        --help|-h)          head -35 "$0" | tail -30; exit 0 ;;
+        *)                  log_warn "Unknown option: $1"; shift ;;
     esac
 done
 
@@ -146,6 +154,36 @@ PRETRAINED_DIR="${PROJECT_DIR}/pretrained"
 log_info "Working directory: $WORK_DIR"
 log_info "Project directory: $PROJECT_DIR"
 log_info "Checkpoint directory: $CHECKPOINT_DIR"
+
+# =============================================================================
+# Clean Data/Checkpoints (if requested)
+# =============================================================================
+if [ "$CLEAN_DATA" = true ] || [ "$CLEAN_CHECKPOINTS" = true ]; then
+    log_step "Cleaning up..."
+
+    if [ "$CLEAN_DATA" = true ]; then
+        if [ -d "${PROJECT_DIR}/data/tokyo_gazebo" ]; then
+            log_warn "Removing training data: ${PROJECT_DIR}/data/tokyo_gazebo"
+            rm -rf "${PROJECT_DIR}/data/tokyo_gazebo"
+            log_success "Training data removed"
+        else
+            log_info "No training data to remove"
+        fi
+    fi
+
+    if [ "$CLEAN_CHECKPOINTS" = true ]; then
+        if [ -d "$CHECKPOINT_DIR" ]; then
+            log_warn "Removing checkpoints: $CHECKPOINT_DIR"
+            rm -rf "$CHECKPOINT_DIR"
+            log_success "Checkpoints removed"
+        else
+            log_info "No checkpoints to remove"
+        fi
+    fi
+
+    echo ""
+    log_success "Cleanup complete"
+fi
 
 # =============================================================================
 # GPU Check
