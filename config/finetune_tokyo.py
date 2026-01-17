@@ -85,11 +85,15 @@ data = dict(
 # ============================================================================
 
 # Pretrained model paths
-vqvae_checkpoint = os.path.join(PROJECT_ROOT, 'pretrained/vqvae/epoch_125.pth')
+# Note: latest.pth contains both OccWorld and VQVAE weights combined
 occworld_checkpoint = os.path.join(PROJECT_ROOT, 'pretrained/occworld/latest.pth')
 
-# Load from pretrained OccWorld for fine-tuning
+# Load from pretrained OccWorld for fine-tuning (includes VQVAE weights)
 load_from = occworld_checkpoint
+
+# VQVAE checkpoint - set to None since weights are included in occworld_checkpoint
+# If you trained VQVAE separately, point to that checkpoint instead
+vqvae_checkpoint = None
 
 # Model architecture (must match pretrained)
 model = dict(
@@ -142,7 +146,7 @@ model = dict(
     freeze_transformer=False,  # Fine-tune transformer
     freeze_pose=False,         # Fine-tune pose modules
 
-    # Use pretrained VQVAE
+    # VQVAE checkpoint (None = load from main checkpoint via load_from)
     vqvae_ckpt=vqvae_checkpoint,
 )
 
