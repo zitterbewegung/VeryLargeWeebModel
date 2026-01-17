@@ -202,9 +202,11 @@ start_tensorboard() {
     # Kill existing tensorboard
     pkill -f "tensorboard.*${TB_DIR}" 2>/dev/null || true
 
-    # Start tensorboard in background
-    tensorboard --logdir "$TB_DIR" --port $TB_PORT --bind_all &
+    # Start tensorboard in background, redirect ALL output to /dev/null
+    nohup tensorboard --logdir "$TB_DIR" --port $TB_PORT --bind_all \
+        > /dev/null 2>&1 &
     TB_PID=$!
+    disown $TB_PID 2>/dev/null || true
 
     sleep 2
 
@@ -243,15 +245,56 @@ run_training() {
     log_info "Command: $CMD"
     echo ""
 
-    # Run with logging
+    # Run with logging and progress display
     local LOG_FILE="${WORK_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
     local START_TIME=$(date +%s)
 
     log_info "Log file: $LOG_FILE"
     echo ""
 
-    # Simple: run training and show all output, tee to log
-    $CMD 2>&1 | tee "$LOG_FILE"
+    # Run training, process output for progress display
+    $CMD 2>&1 | while IFS= read -r line; do
+        # Log everything
+        echo "$line" >> "$LOG_FILE"
+
+        # Check for progress line: "Epoch 1 [750/758] Loss: 0.0004"
+        if echo "$line" | grep -qE "Epoch [0-9]+ \[[0-9]+/[0-9]+\] Loss:"; then
+            # Extract values
+            epoch=$(echo "$line" | grep -oE "Epoch [0-9]+" | grep -oE "[0-9]+")
+            step=$(echo "$line" | grep -oE "\[[0-9]+/" | grep -oE "[0-9]+")
+            total=$(echo "$line" | grep -oE "/[0-9]+\]" | grep -oE "[0-9]+")
+            loss=$(echo "$line" | grep -oE "Loss: [0-9.]+" | grep -oE "[0-9.]+$")
+
+            # Calculate progress
+            if [ -n "$total" ] && [ "$total" -gt 0 ]; then
+                pct=$((step * 100 / total))
+                elapsed=$(($(date +%s) - START_TIME))
+                elapsed_fmt=$(printf '%02d:%02d:%02d' $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+
+                # Progress bar
+                bar_filled=$((pct / 4))
+                bar_empty=$((25 - bar_filled))
+                bar=$(printf "%${bar_filled}s" | tr ' ' '#')$(printf "%${bar_empty}s" | tr ' ' '-')
+
+                printf "\r[%s] Epoch %s/%s [%s] %3d%% | %s/%s | Loss: %s   " \
+                    "$elapsed_fmt" "$epoch" "$EPOCHS" "$bar" "$pct" "$step" "$total" "$loss"
+            fi
+
+        elif echo "$line" | grep -qiE "complete|saving|checkpoint"; then
+            echo ""
+            echo -e "${GREEN}>>> $line${NC}"
+
+        elif echo "$line" | grep -qiE "error|exception|traceback"; then
+            echo ""
+            echo -e "${RED}[ERROR] $line${NC}"
+
+        elif echo "$line" | grep -qE "^(=|-)"; then
+            echo "$line"
+
+        elif echo "$line" | grep -qiE "^(OccWorld|Training|Device|Work dir|Loading)"; then
+            echo "$line"
+        fi
+    done
 
     local EXIT_CODE=${PIPESTATUS[0]}
 
