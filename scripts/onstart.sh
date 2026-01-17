@@ -60,6 +60,55 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Fast download function - uses aria2c/axel for parallel connections, falls back to curl
+fast_download() {
+    local url="$1"
+    local output="$2"
+    local description="${3:-file}"
+
+    log_info "Downloading $description..."
+    log_info "URL: $url"
+    log_info "Output: $output"
+
+    # Create output directory if needed
+    mkdir -p "$(dirname "$output")"
+
+    # Try aria2c first (fastest - 16 parallel connections)
+    if command -v aria2c &> /dev/null; then
+        log_info "Using aria2c (16 connections)..."
+        if aria2c -x 16 -s 16 --file-allocation=none -o "$output" "$url"; then
+            log_success "Download complete (aria2c)"
+            return 0
+        else
+            log_warn "aria2c failed, trying fallback..."
+            rm -f "$output"
+        fi
+    fi
+
+    # Try axel (also fast - 16 parallel connections)
+    if command -v axel &> /dev/null; then
+        log_info "Using axel (16 connections)..."
+        if axel -n 16 -o "$output" "$url"; then
+            log_success "Download complete (axel)"
+            return 0
+        else
+            log_warn "axel failed, trying fallback..."
+            rm -f "$output"
+        fi
+    fi
+
+    # Fallback to curl (single connection, but supports resume)
+    log_info "Using curl (single connection)..."
+    if curl -L -C - -o "$output" "$url"; then
+        log_success "Download complete (curl)"
+        return 0
+    else
+        log_error "Download failed"
+        rm -f "$output"
+        return 1
+    fi
+}
+
 # Step tracking with timing
 STEP_NUM=0
 STEP_START=0
@@ -232,13 +281,13 @@ if command -v apt-get &> /dev/null; then
     PKG_MGR="apt"
     log_info "Updating package lists..."
     sudo apt-get update 2>/dev/null || apt-get update 2>/dev/null || true
-    log_info "Installing: git wget curl unzip screen tmux htop..."
-    sudo apt-get install -y git wget curl unzip screen tmux htop 2>/dev/null || \
-        apt-get install -y git wget curl unzip screen tmux htop 2>/dev/null || true
+    log_info "Installing: git wget curl unzip screen tmux htop aria2 axel..."
+    sudo apt-get install -y git wget curl unzip screen tmux htop aria2 axel 2>/dev/null || \
+        apt-get install -y git wget curl unzip screen tmux htop aria2 axel 2>/dev/null || true
 elif command -v yum &> /dev/null; then
     PKG_MGR="yum"
-    log_info "Installing: git wget curl unzip screen tmux htop..."
-    sudo yum install -y git wget curl unzip screen tmux htop 2>/dev/null || true
+    log_info "Installing: git wget curl unzip screen tmux htop aria2..."
+    sudo yum install -y git wget curl unzip screen tmux htop aria2 2>/dev/null || true
 fi
 
 log_success "System packages ready"
@@ -402,24 +451,18 @@ if [ -f "$OCCWORLD_MODEL" ]; then
 fi
 
 if [ ! -f "$OCCWORLD_MODEL" ]; then
-    log_info "Downloading OccWorld checkpoint (~721MB)..."
-    log_info "URL: $OCCWORLD_URL"
-    log_info "Destination: $OCCWORLD_MODEL"
-    echo ""
+    fast_download "$OCCWORLD_URL" "$OCCWORLD_MODEL" "pretrained model (~721MB)"
 
-    # Use curl with full progress display and resume support (-C -)
-    if curl -L -C - -o "$OCCWORLD_MODEL" "$OCCWORLD_URL"; then
-        echo ""
+    if [ -f "$OCCWORLD_MODEL" ]; then
         MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
         MODEL_SIZE_MB=$((MODEL_SIZE / 1024 / 1024))
         if [ "$MODEL_SIZE" -gt 700000000 ]; then
-            log_success "OccWorld checkpoint downloaded! (${MODEL_SIZE_MB}MB)"
+            log_success "Pretrained model downloaded! (${MODEL_SIZE_MB}MB)"
         else
             log_error "Download seems incomplete (${MODEL_SIZE_MB}MB, expected ~721MB)"
             log_info "Try manual download: curl -L -o ${OCCWORLD_MODEL} '${OCCWORLD_URL}'"
         fi
     else
-        echo ""
         log_error "Download failed. Training will start from scratch."
     fi
 fi
@@ -440,7 +483,6 @@ if [ "$DOWNLOAD_NUSCENES" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
         log_success "nuScenes Mini already downloaded"
         ls -la "$NUSCENES_DIR"
     else
-        log_info "Downloading nuScenes Mini from nuscenes.org..."
         log_info "This is real autonomous driving data (~4GB)"
         log_warn "Note: nuScenes requires registration. If download fails, visit https://www.nuscenes.org/"
         echo ""
@@ -449,13 +491,9 @@ if [ "$DOWNLOAD_NUSCENES" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
         NUSCENES_URL="https://www.nuscenes.org/data/v1.0-mini.tgz"
 
         if [ ! -f "$NUSCENES_ARCHIVE" ]; then
-            log_info "Downloading: $NUSCENES_URL"
-            # Use -C - to resume partial downloads
-        if curl -L -C - -o "$NUSCENES_ARCHIVE" "$NUSCENES_URL" 2>&1; then
-                ARCHIVE_SIZE=$(stat -f%z "$NUSCENES_ARCHIVE" 2>/dev/null || stat -c%s "$NUSCENES_ARCHIVE" 2>/dev/null || echo 0)
-                ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
-                log_info "Downloaded: ${ARCHIVE_SIZE_MB}MB"
-            else
+            fast_download "$NUSCENES_URL" "$NUSCENES_ARCHIVE" "nuScenes Mini (~4GB)"
+
+            if [ ! -f "$NUSCENES_ARCHIVE" ]; then
                 log_warn "Direct download failed. You may need to register at nuscenes.org"
                 log_info "Manual download: https://www.nuscenes.org/nuscenes#download"
                 log_info "Place v1.0-mini.tgz in: ${DATA_DIR}/"
@@ -521,18 +559,15 @@ if [ "$DOWNLOAD_PLATEAU" = true ] && [ "$SKIP_REAL_DATA" = false ]; then
     else
         # Download PLATEAU OBJ files (~2.1GB)
         if [ ! -f "$PLATEAU_OBJ_ARCHIVE" ]; then
-            log_info "Downloading Tokyo PLATEAU OBJ models (~2.1GB)..."
             log_info "Source: Project PLATEAU (MLIT Japan) - CC BY 4.0"
-            log_info "URL: $PLATEAU_OBJ_URL"
             echo ""
 
-            # Use -C - to resume partial downloads
-        if curl -L -C - -o "$PLATEAU_OBJ_ARCHIVE" "$PLATEAU_OBJ_URL"; then
+            fast_download "$PLATEAU_OBJ_URL" "$PLATEAU_OBJ_ARCHIVE" "Tokyo PLATEAU OBJ models (~2.1GB)"
+
+            if [ -f "$PLATEAU_OBJ_ARCHIVE" ]; then
                 ARCHIVE_SIZE=$(stat -f%z "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || stat -c%s "$PLATEAU_OBJ_ARCHIVE" 2>/dev/null || echo 0)
                 ARCHIVE_SIZE_MB=$((ARCHIVE_SIZE / 1024 / 1024))
                 log_success "Downloaded PLATEAU OBJ: ${ARCHIVE_SIZE_MB}MB"
-            else
-                log_error "PLATEAU download failed"
             fi
         else
             log_info "PLATEAU archive already exists"
