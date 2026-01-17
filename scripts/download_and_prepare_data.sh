@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# OccWorld Data Download and Preparation Script
+# VeryLargeWeebModel Data Download and Preparation Script
 # =============================================================================
 # Downloads and prepares:
 #   - Tokyo PLATEAU 3D city models (for Gazebo simulation)
-#   - OccWorld pretrained models (VQVAE + World Model)
+#   - Pretrained models (VQVAE + World Model)
 #   - BEVFusion pretrained models
 #   - nuScenes metadata pickle files
 #   - Generates training data from PLATEAU meshes
@@ -109,7 +109,7 @@ mkdir -p "${PROJECT_ROOT}/pretrained/bevfusion"
 log_success "Directories created"
 
 # =============================================================================
-# Download Functions
+# Download Functions (Fast parallel downloads with aria2c/axel fallback)
 # =============================================================================
 
 download_file() {
@@ -126,25 +126,57 @@ download_file() {
     log_info "  URL: $url"
     log_info "  Output: $output"
 
-    # Try wget first, fall back to curl
-    if command -v wget &> /dev/null; then
-        wget -q --show-progress -O "$output" "$url" || {
-            log_error "Failed to download $description"
+    # Create output directory if needed
+    mkdir -p "$(dirname "$output")"
+
+    # Try aria2c first (fastest - 16 parallel connections)
+    if command -v aria2c &> /dev/null; then
+        log_info "  Using aria2c (16 connections)..."
+        if aria2c -x 16 -s 16 --file-allocation=none -o "$output" "$url"; then
+            log_success "Downloaded $description (aria2c)"
+            return 0
+        else
+            log_warn "aria2c failed, trying fallback..."
             rm -f "$output"
-            return 1
-        }
-    elif command -v curl &> /dev/null; then
-        curl -L --progress-bar -o "$output" "$url" || {
-            log_error "Failed to download $description"
-            rm -f "$output"
-            return 1
-        }
-    else
-        log_error "Neither wget nor curl found. Please install one."
-        return 1
+        fi
     fi
 
-    log_success "Downloaded $description"
+    # Try axel (also fast - 16 parallel connections)
+    if command -v axel &> /dev/null; then
+        log_info "  Using axel (16 connections)..."
+        if axel -n 16 -o "$output" "$url"; then
+            log_success "Downloaded $description (axel)"
+            return 0
+        else
+            log_warn "axel failed, trying fallback..."
+            rm -f "$output"
+        fi
+    fi
+
+    # Fallback to curl (single connection, but supports resume)
+    if command -v curl &> /dev/null; then
+        log_info "  Using curl..."
+        if curl -L -C - -o "$output" "$url"; then
+            log_success "Downloaded $description (curl)"
+            return 0
+        else
+            rm -f "$output"
+        fi
+    fi
+
+    # Final fallback to wget
+    if command -v wget &> /dev/null; then
+        log_info "  Using wget..."
+        if wget -c -O "$output" "$url"; then
+            log_success "Downloaded $description (wget)"
+            return 0
+        else
+            rm -f "$output"
+        fi
+    fi
+
+    log_error "Failed to download $description"
+    return 1
 }
 
 # =============================================================================
@@ -208,19 +240,19 @@ download_pretrained_models() {
     log_step "Downloading pretrained models..."
 
     # -------------------------------------------------------------------------
-    # OccWorld Models (Tsinghua Cloud)
+    # VeryLargeWeebModel Models (Tsinghua Cloud)
     # -------------------------------------------------------------------------
-    log_info "Downloading OccWorld models from Tsinghua Cloud..."
+    log_info "Downloading VeryLargeWeebModel models from Tsinghua Cloud..."
 
-    # OccWorld pretrained models from Tsinghua Cloud
+    # VeryLargeWeebModel pretrained models from Tsinghua Cloud
     # Direct download URL discovered via Seafile API
-    # Source: https://github.com/wzzheng/OccWorld
+    # Source: https://github.com/wzzheng/VeryLargeWeebModel
 
     local OCCWORLD_FILE="${PROJECT_ROOT}/pretrained/occworld/latest.pth"
     local TSINGHUA_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
     local DOWNLOAD_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1"
 
-    # Note: The share only contains latest.pth (721MB) which includes both OccWorld and VQVAE weights
+    # Note: The share only contains latest.pth (721MB) which includes both VeryLargeWeebModel and VQVAE weights
     # There is no separate epoch_125.pth file in the official share
 
     # Check if model already exists
@@ -228,7 +260,7 @@ download_pretrained_models() {
         local occworld_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null || echo 0)
 
         if [ "$occworld_size" -gt 100000000 ]; then  # > 100MB
-            log_success "OccWorld checkpoint already downloaded! ($(numfmt --to=iec $occworld_size 2>/dev/null || echo "${occworld_size} bytes"))"
+            log_success "VeryLargeWeebModel checkpoint already downloaded! ($(numfmt --to=iec $occworld_size 2>/dev/null || echo "${occworld_size} bytes"))"
             return 0
         else
             log_warn "Existing file seems incomplete, re-downloading..."
@@ -236,8 +268,8 @@ download_pretrained_models() {
         fi
     fi
 
-    # Download OccWorld checkpoint (includes VQVAE weights)
-    log_info "Downloading OccWorld checkpoint (~721MB)..."
+    # Download VeryLargeWeebModel checkpoint (includes VQVAE weights)
+    log_info "Downloading VeryLargeWeebModel checkpoint (~721MB)..."
     log_info "  URL: ${DOWNLOAD_URL}"
 
     mkdir -p "$(dirname "$OCCWORLD_FILE")"
@@ -246,14 +278,14 @@ download_pretrained_models() {
         local downloaded_size=$(stat -f%z "$OCCWORLD_FILE" 2>/dev/null || stat -c%s "$OCCWORLD_FILE" 2>/dev/null || echo 0)
 
         if [ "$downloaded_size" -gt 100000000 ]; then  # > 100MB
-            log_success "OccWorld checkpoint downloaded! ($(numfmt --to=iec $downloaded_size 2>/dev/null || echo "${downloaded_size} bytes"))"
+            log_success "VeryLargeWeebModel checkpoint downloaded! ($(numfmt --to=iec $downloaded_size 2>/dev/null || echo "${downloaded_size} bytes"))"
         else
             log_error "Download failed or file is too small (${downloaded_size} bytes)"
             log_info "Try manual download: curl -L -o ${OCCWORLD_FILE} '${DOWNLOAD_URL}'"
             rm -f "$OCCWORLD_FILE"
         fi
     elif wget -q --show-progress -O "$OCCWORLD_FILE" "$DOWNLOAD_URL" 2>&1; then
-        log_success "OccWorld checkpoint downloaded!"
+        log_success "VeryLargeWeebModel checkpoint downloaded!"
     else
         log_error "Download failed. Try manually:"
         log_info "  curl -L -o ${OCCWORLD_FILE} '${DOWNLOAD_URL}'"
@@ -263,7 +295,7 @@ download_pretrained_models() {
     # Create a helper script to verify downloads
     cat << 'SCRIPT' > "${PROJECT_ROOT}/pretrained/verify_downloads.sh"
 #!/bin/bash
-# Verify OccWorld pretrained model download
+# Verify VeryLargeWeebModel pretrained model download
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OCCWORLD="${SCRIPT_DIR}/occworld/latest.pth"
@@ -276,16 +308,16 @@ if [ -f "$OCCWORLD" ]; then
     size_mb=$((size / 1024 / 1024))
 
     if [ "$size" -gt 700000000 ]; then  # > 700MB
-        echo "✓ OccWorld checkpoint: OK (${size_mb}MB)"
+        echo "✓ VeryLargeWeebModel checkpoint: OK (${size_mb}MB)"
         echo ""
         echo "Pretrained model ready! You can now run training."
     elif [ "$size" -gt 100000000 ]; then  # > 100MB
-        echo "⚠ OccWorld checkpoint: ${size_mb}MB (expected ~721MB, may be incomplete)"
+        echo "⚠ VeryLargeWeebModel checkpoint: ${size_mb}MB (expected ~721MB, may be incomplete)"
     else
-        echo "✗ OccWorld checkpoint: File too small (${size_mb}MB), download failed"
+        echo "✗ VeryLargeWeebModel checkpoint: File too small (${size_mb}MB), download failed"
     fi
 else
-    echo "✗ OccWorld checkpoint: NOT FOUND"
+    echo "✗ VeryLargeWeebModel checkpoint: NOT FOUND"
     echo ""
     echo "Download with:"
     echo "  curl -L -o pretrained/occworld/latest.pth \\"
@@ -296,7 +328,7 @@ SCRIPT
 
     # Create instructions file
     cat << 'EOF' > "${PROJECT_ROOT}/pretrained/DOWNLOAD_INSTRUCTIONS.md"
-# OccWorld Pretrained Model Download
+# VeryLargeWeebModel Pretrained Model Download
 
 ## Direct Download (Recommended)
 
@@ -307,7 +339,7 @@ curl -L -o pretrained/occworld/latest.pth \
   "https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/latest.pth&dl=1"
 ```
 
-This downloads `latest.pth` (~721MB) which contains both OccWorld and VQVAE weights.
+This downloads `latest.pth` (~721MB) which contains both VeryLargeWeebModel and VQVAE weights.
 
 ## Verify Download
 
@@ -332,7 +364,7 @@ If download fails, you can train from scratch (slower):
 # First train VQVAE
 python train.py --py-config config/train_vqvae.py --work-dir out/vqvae
 
-# Then train OccWorld (update vqvae path in config first)
+# Then train VeryLargeWeebModel (update vqvae path in config first)
 python train.py --py-config config/finetune_tokyo.py --work-dir out/occworld
 ```
 EOF
@@ -381,7 +413,7 @@ download_nuscenes_metadata() {
     log_step "Downloading nuScenes metadata pickle files..."
 
     # Direct download links from Tsinghua Cloud
-    # These are preprocessed scene information files for OccWorld training
+    # These are preprocessed scene information files for VeryLargeWeebModel training
     local TRAIN_PKL_URL="https://cloud.tsinghua.edu.cn/f/a05c25067a864e0eb7d0/?dl=1"
     local VAL_PKL_URL="https://cloud.tsinghua.edu.cn/f/8c8f1e9b5f4a47a3b7c2/?dl=1"
 
@@ -601,7 +633,7 @@ def create_sdf_model(name: str, mesh_path: str, output_dir: str,
   <version>1.0</version>
   <sdf version="1.9">model.sdf</sdf>
   <author>
-    <name>PLATEAU/OccWorld</name>
+    <name>PLATEAU/VeryLargeWeebModel</name>
     <email>auto-generated</email>
   </author>
   <description>
@@ -851,7 +883,7 @@ PYTHON_SCRIPT
 # Generate Training Data from PLATEAU Meshes
 # =============================================================================
 generate_training_data() {
-    log_step "Generating OccWorld training data from PLATEAU meshes..."
+    log_step "Generating VeryLargeWeebModel training data from PLATEAU meshes..."
 
     local MESH_DIR="${OUTPUT_DIR}/plateau/meshes/obj"
     local TOKYO_DATA="${OUTPUT_DIR}/tokyo_gazebo"
@@ -933,7 +965,7 @@ generate_training_data() {
 setup_simulation_data_dirs() {
     log_step "Setting up simulation data directories..."
 
-    # Create standard OccWorld data structure
+    # Create standard VeryLargeWeebModel data structure
     local DATA_DIR="${OUTPUT_DIR}/tokyo_gazebo"
 
     mkdir -p "${DATA_DIR}/train"
@@ -978,17 +1010,17 @@ python3 scripts/data_collection_mission.py --vehicle drone --pattern survey
 python3 scripts/depth_occupancy_processor.py --input . --output .
 \`\`\`
 
-## Using with OccWorld Training
+## Using with VeryLargeWeebModel Training
 
 \`\`\`python
-from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
 
 config = DatasetConfig(
     history_frames=4,
     future_frames=6,
     agent_type='both',
 )
-dataset = GazeboOccWorldDataset('data/tokyo_gazebo', config)
+dataset = GazeboVeryLargeWeebModelDataset('data/tokyo_gazebo', config)
 \`\`\`
 EOF
 
@@ -1015,7 +1047,7 @@ print_summary() {
     echo ""
     echo "  ${PROJECT_ROOT}/pretrained/"
     echo "  ├── vqvae/                    # VQVAE checkpoint"
-    echo "  ├── occworld/                 # OccWorld checkpoint"
+    echo "  ├── occworld/                 # VeryLargeWeebModel checkpoint"
     echo "  └── bevfusion/                # BEVFusion checkpoints"
     echo ""
 
@@ -1030,12 +1062,12 @@ print_summary() {
         local size=$(stat -f%z "${PROJECT_ROOT}/pretrained/occworld/latest.pth" 2>/dev/null || stat -c%s "${PROJECT_ROOT}/pretrained/occworld/latest.pth" 2>/dev/null || echo 0)
         local size_mb=$((size / 1024 / 1024))
         if [ "$size" -gt 700000000 ]; then
-            echo -e "  ${GREEN}✓${NC} OccWorld checkpoint: ${size_mb}MB"
+            echo -e "  ${GREEN}✓${NC} VeryLargeWeebModel checkpoint: ${size_mb}MB"
         else
-            echo -e "  ${YELLOW}!${NC} OccWorld checkpoint: ${size_mb}MB (expected ~721MB)"
+            echo -e "  ${YELLOW}!${NC} VeryLargeWeebModel checkpoint: ${size_mb}MB (expected ~721MB)"
         fi
     else
-        echo -e "  ${RED}✗${NC} OccWorld checkpoint missing"
+        echo -e "  ${RED}✗${NC} VeryLargeWeebModel checkpoint missing"
     fi
 
     # Check training data
@@ -1082,7 +1114,7 @@ print_summary() {
 main() {
     echo ""
     echo "=============================================================================="
-    echo "           OccWorld Data Download and Preparation Script                      "
+    echo "           VeryLargeWeebModel Data Download and Preparation Script                      "
     echo "=============================================================================="
     echo ""
     log_info "Output directory: ${OUTPUT_DIR}"

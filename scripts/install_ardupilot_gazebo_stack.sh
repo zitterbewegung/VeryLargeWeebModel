@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # ArduPilot + Gazebo Harmonic + ROS 2 + MAVROS2 Installation Script
-# For OccWorld Simulation Framework
+# For VeryLargeWeebModel Simulation Framework
 # =============================================================================
 # Usage: ./install_ardupilot_gazebo_stack.sh [--skip-ros] [--skip-ardupilot]
 # Prerequisites: Ubuntu 22.04 (Jammy), sudo access
@@ -222,9 +222,9 @@ make -j$(nproc)
 log_success "ardupilot_gazebo plugin built"
 
 # =============================================================================
-# Step 6: Create OccWorld ROS 2 Workspace
+# Step 6: Create VeryLargeWeebModel ROS 2 Workspace
 # =============================================================================
-log_info "Step 6: Setting up OccWorld ROS 2 workspace..."
+log_info "Step 6: Setting up VeryLargeWeebModel ROS 2 workspace..."
 
 OCCWORLD_WS="$HOME/occworld_ws"
 mkdir -p "$OCCWORLD_WS/src"
@@ -245,7 +245,7 @@ mkdir -p occworld_gazebo/models
 mkdir -p occworld_gazebo/worlds
 mkdir -p occworld_gazebo/scripts
 
-log_success "OccWorld workspace structure created at $OCCWORLD_WS"
+log_success "VeryLargeWeebModel workspace structure created at $OCCWORLD_WS"
 
 # =============================================================================
 # Step 7: Configure Environment Variables
@@ -255,7 +255,7 @@ log_info "Step 7: Configuring environment variables..."
 # Create environment setup script
 ENV_SETUP_FILE="$HOME/.occworld_env.sh"
 cat > "$ENV_SETUP_FILE" << 'EOF'
-# OccWorld + ArduPilot Gazebo Environment Setup
+# VeryLargeWeebModel + ArduPilot Gazebo Environment Setup
 # Source this file: source ~/.occworld_env.sh
 
 # Gazebo Harmonic configuration
@@ -263,7 +263,7 @@ export GZ_VERSION=harmonic
 export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ardupilot_gazebo/build:${GZ_SIM_SYSTEM_PLUGIN_PATH}
 export GZ_SIM_RESOURCE_PATH=$HOME/ardupilot_gazebo/models:$HOME/ardupilot_gazebo/worlds:${GZ_SIM_RESOURCE_PATH}
 
-# Add OccWorld workspace resources
+# Add VeryLargeWeebModel workspace resources
 export GZ_SIM_RESOURCE_PATH=$HOME/occworld_ws/src/occworld_gazebo/models:$HOME/occworld_ws/src/occworld_gazebo/worlds:${GZ_SIM_RESOURCE_PATH}
 
 # ArduPilot paths
@@ -274,7 +274,7 @@ if [ -f /opt/ros/humble/setup.bash ]; then
     source /opt/ros/humble/setup.bash
 fi
 
-# OccWorld workspace setup
+# VeryLargeWeebModel workspace setup
 if [ -f $HOME/occworld_ws/install/setup.bash ]; then
     source $HOME/occworld_ws/install/setup.bash
 fi
@@ -286,7 +286,7 @@ EOF
 # Add to .bashrc if not already present
 if ! grep -q "occworld_env.sh" ~/.bashrc; then
     echo "" >> ~/.bashrc
-    echo "# OccWorld Environment" >> ~/.bashrc
+    echo "# VeryLargeWeebModel Environment" >> ~/.bashrc
     echo "source ~/.occworld_env.sh" >> ~/.bashrc
     log_info "Added environment setup to ~/.bashrc"
 fi
@@ -380,7 +380,7 @@ echo ""
 echo "1. Reload your shell environment:"
 echo "   source ~/.bashrc"
 echo ""
-echo "2. Build the OccWorld ROS 2 workspace:"
+echo "2. Build the VeryLargeWeebModel ROS 2 workspace:"
 echo "   cd ~/occworld_ws && colcon build"
 echo ""
 echo "3. Test Gazebo with ArduPilot plugin:"

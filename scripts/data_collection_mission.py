@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Automated Data Collection Mission for OccWorld Training
+Automated Data Collection Mission for VeryLargeWeebModel Training
 
 This script automates drone/rover missions using DroneKit/pymavlink to collect
-synchronized sensor data for OccWorld training. It executes predefined waypoint
+synchronized sensor data for VeryLargeWeebModel training. It executes predefined waypoint
 patterns while ensuring stable data capture.
 
 === ARCHITECTURE OVERVIEW ===
@@ -375,7 +375,7 @@ class MAVLinkVehicle:
 
 class DataCollectionMission:
     """
-    Executes automated data collection missions for OccWorld training.
+    Executes automated data collection missions for VeryLargeWeebModel training.
 
     The mission controller:
     1. Connects to vehicle via MAVLink
@@ -590,7 +590,7 @@ class DataCollectionMission:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='OccWorld Data Collection Mission',
+        description='VeryLargeWeebModel Data Collection Mission',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )

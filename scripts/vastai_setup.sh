@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Vast.ai Setup Script for OccWorld Training
+# Vast.ai Setup Script for VeryLargeWeebModel Training
 # =============================================================================
 # Run this after SSHing into your Vast.ai instance.
 #
@@ -26,7 +26,7 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 echo ""
 echo "=============================================="
-echo "    OccWorld Vast.ai Setup                   "
+echo "    VeryLargeWeebModel Vast.ai Setup                   "
 echo "=============================================="
 echo ""
 
@@ -106,7 +106,7 @@ log_success "Checkpoint directory: ${WORK_DIR}/checkpoints"
 # Create convenience aliases
 cat >> ~/.bashrc << 'EOF'
 
-# OccWorld Vast.ai aliases
+# VeryLargeWeebModel Vast.ai aliases
 alias gpu='watch -n 1 nvidia-smi'
 alias tb='tensorboard --logdir /workspace/checkpoints --port 6006 --bind_all'
 alias train='cd /workspace/VeryLargeWeebModel && python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints'

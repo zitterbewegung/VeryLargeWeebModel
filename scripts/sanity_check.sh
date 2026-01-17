@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Sanity Check Script for OccWorld Tokyo Training Pipeline
+# Sanity Check Script for VeryLargeWeebModel Tokyo Training Pipeline
 # =============================================================================
 # Validates the codebase for:
 #   - Python syntax errors
@@ -77,7 +77,7 @@ cd "$PROJECT_ROOT"
 
 echo ""
 echo "=============================================="
-echo "    OccWorld Sanity Check                    "
+echo "    VeryLargeWeebModel Sanity Check                    "
 echo "=============================================="
 echo "Project: $PROJECT_ROOT"
 echo "Date: $(date)"
@@ -336,7 +336,7 @@ if [ "$FULL_CHECK" = true ] && [ "$QUICK_CHECK" = false ]; then
 import sys
 sys.path.insert(0, '.')
 try:
-    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
     print('IMPORT_OK')
 except ImportError as e:
     print(f'IMPORT_ERROR:{e}')

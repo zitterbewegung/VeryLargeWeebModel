@@ -443,7 +443,7 @@ OCCWORLD_URL="https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/files/?p=/lat
 if [ -f "$OCCWORLD_MODEL" ]; then
     MODEL_SIZE=$(stat -f%z "$OCCWORLD_MODEL" 2>/dev/null || stat -c%s "$OCCWORLD_MODEL" 2>/dev/null || echo 0)
     if [ "$MODEL_SIZE" -gt 700000000 ]; then
-        log_success "OccWorld checkpoint already downloaded ($(numfmt --to=iec $MODEL_SIZE 2>/dev/null || echo "${MODEL_SIZE} bytes"))"
+        log_success "VeryLargeWeebModel checkpoint already downloaded ($(numfmt --to=iec $MODEL_SIZE 2>/dev/null || echo "${MODEL_SIZE} bytes"))"
     else
         log_warn "Existing checkpoint seems incomplete, re-downloading..."
         rm -f "$OCCWORLD_MODEL"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create dummy training data for testing the OccWorld pipeline.
+Create dummy training data for testing the VeryLargeWeebModel pipeline.
 
 This generates synthetic occupancy grids, poses, LiDAR, and images
 to verify the training pipeline works before using real simulation data.

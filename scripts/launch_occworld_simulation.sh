@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# OccWorld Simulation End-to-End Launch Script
+# VeryLargeWeebModel Simulation End-to-End Launch Script
 # =============================================================================
 #
 # This script launches the complete simulation stack:
@@ -8,7 +8,7 @@
 # 2. Multiple ArduPilot SITL instances (drone + rover)
 # 3. ROS 2 bridge for sensor data
 # 4. MAVROS2 for vehicle control
-# 5. Data recorder for OccWorld training
+# 5. Data recorder for VeryLargeWeebModel training
 #
 # Usage:
 #   ./launch_occworld_simulation.sh [OPTIONS]

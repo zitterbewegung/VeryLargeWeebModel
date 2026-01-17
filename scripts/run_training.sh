@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# OccWorld Training Runner
+# VeryLargeWeebModel Training Runner
 # =============================================================================
 # Automates the full training workflow:
 #   - Downloads pretrained models (if needed)
@@ -124,7 +124,7 @@ check_pretrained() {
         local size_mb=$((size / 1024 / 1024))
 
         if [ "$size" -gt 100000000 ]; then
-            log_success "OccWorld checkpoint found (${size_mb}MB)"
+            log_success "VeryLargeWeebModel checkpoint found (${size_mb}MB)"
             return 0
         fi
     fi
@@ -294,7 +294,7 @@ run_training() {
         elif echo "$line" | grep -qE "^(=|-)"; then
             echo "$line"
 
-        elif echo "$line" | grep -qiE "^(OccWorld|Training|Device|Work dir|Loading)"; then
+        elif echo "$line" | grep -qiE "^(VeryLargeWeebModel|Training|Device|Work dir|Loading)"; then
             echo "$line"
         fi
     done
@@ -370,7 +370,7 @@ print_summary() {
 main() {
     echo ""
     echo "=============================================================================="
-    echo "                    OccWorld Training Runner                                  "
+    echo "                    VeryLargeWeebModel Training Runner                                  "
     echo "=============================================================================="
     echo ""
 

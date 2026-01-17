@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# Lambda Cloud Setup Script for OccWorld Training
+# Lambda Cloud Setup Script for VeryLargeWeebModel Training
 # =============================================================================
-# This script sets up a Lambda Cloud GPU instance for OccWorld training.
+# This script sets up a Lambda Cloud GPU instance for VeryLargeWeebModel training.
 #
 # Usage:
 #   ./scripts/lambda_setup.sh [OPTIONS]
@@ -51,7 +51,7 @@ done
 # =============================================================================
 echo ""
 echo "=============================================="
-echo "    OccWorld Lambda Cloud Setup Script       "
+echo "    VeryLargeWeebModel Lambda Cloud Setup Script       "
 echo "=============================================="
 echo ""
 
@@ -123,13 +123,13 @@ else
 fi
 
 # Create environment
-if conda env list | grep -q "^occworld "; then
-    log_warn "Conda environment 'occworld' already exists"
-    conda activate occworld
+if conda env list | grep -q "^vlwm "; then
+    log_warn "Conda environment 'vlwm' already exists"
+    conda activate vlwm
 else
-    log_info "Creating conda environment 'occworld'..."
-    conda create -n occworld python=3.8 -y
-    conda activate occworld
+    log_info "Creating conda environment 'vlwm'..."
+    conda create -n vlwm python=3.8 -y
+    conda activate vlwm
 fi
 
 log_success "Conda environment ready"
@@ -183,9 +183,9 @@ pip install -q mmdet mmsegmentation
 log_success "MMDetection3D stack installed"
 
 # =============================================================================
-# OccWorld Dependencies
+# VeryLargeWeebModel Dependencies
 # =============================================================================
-log_step "Installing OccWorld dependencies..."
+log_step "Installing VeryLargeWeebModel dependencies..."
 
 pip install -q \
     nuscenes-devkit \
@@ -201,7 +201,7 @@ pip install -q \
     timm \
     yapf==0.40.1
 
-log_success "OccWorld dependencies installed"
+log_success "VeryLargeWeebModel dependencies installed"
 
 # =============================================================================
 # Mesh Processing Dependencies
@@ -217,21 +217,21 @@ pip install -q \
 log_success "Mesh processing dependencies installed"
 
 # =============================================================================
-# Clone OccWorld Repository
+# Clone VeryLargeWeebModel Repository
 # =============================================================================
-log_step "Setting up OccWorld repository..."
+log_step "Setting up VeryLargeWeebModel repository..."
 
-if [ ! -d ~/OccWorld ]; then
-    log_info "Cloning OccWorld..."
-    git clone https://github.com/wzzheng/OccWorld.git ~/OccWorld
-    cd ~/OccWorld
+if [ ! -d ~/VeryLargeWeebModel ]; then
+    log_info "Cloning VeryLargeWeebModel..."
+    git clone https://github.com/wzzheng/VeryLargeWeebModel.git ~/VeryLargeWeebModel
+    cd ~/VeryLargeWeebModel
     pip install -q -e .
     cd -
 else
-    log_warn "OccWorld already exists at ~/OccWorld"
+    log_warn "VeryLargeWeebModel already exists at ~/VeryLargeWeebModel"
 fi
 
-log_success "OccWorld repository ready"
+log_success "VeryLargeWeebModel repository ready"
 
 # =============================================================================
 # Setup Persistent Storage
@@ -270,7 +270,7 @@ cd "$PROJECT_DIR"
 
 # Create required directories
 mkdir -p pretrained/vqvae
-mkdir -p pretrained/occworld
+mkdir -p pretrained/vlwm
 mkdir -p pretrained/bevfusion
 mkdir -p data/tokyo_gazebo
 mkdir -p config
@@ -283,10 +283,10 @@ log_success "Project directories ready"
 log_step "Configuring shell..."
 
 # Add aliases and environment to bashrc
-if ! grep -q "# OccWorld Lambda Setup" ~/.bashrc; then
+if ! grep -q "# VeryLargeWeebModel Lambda Setup" ~/.bashrc; then
     cat >> ~/.bashrc << 'EOF'
 
-# OccWorld Lambda Setup
+# VeryLargeWeebModel Lambda Setup
 # ----------------------
 
 # Conda activation
@@ -295,16 +295,16 @@ source /opt/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
 source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null
 
 # Aliases
-alias oc='conda activate occworld'
+alias oc='conda activate vlwm'
 alias gpu='watch -n 1 nvidia-smi'
 alias gpumon='nvtop'
 alias tb='tensorboard --logdir ~/checkpoints --port 6006 --bind_all'
-alias train='cd ~/VeryLargeWeebModel && conda activate occworld'
+alias train='cd ~/VeryLargeWeebModel && conda activate vlwm'
 alias logs='tail -f ~/checkpoints/*/training.log 2>/dev/null || echo "No training logs found"'
 
 # Quick functions
 start_training() {
-    screen -dmS training bash -c "conda activate occworld && cd ~/VeryLargeWeebModel && python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints/occworld_tokyo"
+    screen -dmS training bash -c "conda activate vlwm && cd ~/VeryLargeWeebModel && python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints/vlwm_tokyo"
     echo "Training started in screen session 'training'"
     echo "Attach with: screen -r training"
 }
@@ -316,8 +316,8 @@ backup_checkpoints() {
     echo "Checkpoints backed up to $dest"
 }
 
-# Auto-activate occworld environment
-conda activate occworld 2>/dev/null
+# Auto-activate vlwm environment
+conda activate vlwm 2>/dev/null
 EOF
 
     log_success "Shell configuration added"
@@ -365,9 +365,9 @@ python -c "import torch; print(f'{torch.__version__} (CUDA: {torch.cuda.is_avail
 echo -n "mmcv: "
 python -c "import mmcv; print(mmcv.__version__)" 2>/dev/null || echo "Not installed"
 
-# Check OccWorld
-echo -n "OccWorld: "
-if [ -d ~/OccWorld ]; then echo "Installed"; else echo "Not found"; fi
+# Check VeryLargeWeebModel
+echo -n "VeryLargeWeebModel: "
+if [ -d ~/VeryLargeWeebModel ]; then echo "Installed"; else echo "Not found"; fi
 
 # Check storage
 echo -n "Persistent Storage: "
@@ -394,10 +394,10 @@ echo "   Download to: ~/VeryLargeWeebModel/pretrained/"
 echo ""
 echo "3. Start training:"
 echo "   screen -S training"
-echo "   conda activate occworld"
+echo "   conda activate vlwm"
 echo "   cd ~/VeryLargeWeebModel"
 echo "   python train.py --config config/finetune_tokyo.py \\"
-echo "       --work-dir ~/checkpoints/occworld_tokyo"
+echo "       --work-dir ~/checkpoints/vlwm_tokyo"
 echo "   # Detach: Ctrl+A, then D"
 echo "   # Reattach: screen -r training"
 echo ""

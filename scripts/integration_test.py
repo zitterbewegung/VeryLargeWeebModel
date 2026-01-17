@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration test for OccWorld Tokyo training pipeline.
+Integration test for VeryLargeWeebModel Tokyo training pipeline.
 
 Tests the full pipeline:
 1. Creates dummy data with correct format
@@ -44,7 +44,7 @@ def test_imports():
         errors.append(f"cv2: {e}")
 
     try:
-        from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+        from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
         print("  dataset loader: OK")
     except ImportError as e:
         errors.append(f"dataset loader: {e}")
@@ -119,7 +119,7 @@ def test_dataset_loader(data_dir):
     """Test that dataset loader can read the data."""
     print("\n[TEST] Testing dataset loader...")
 
-    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
 
     config = DatasetConfig(
         history_frames=4,
@@ -130,7 +130,7 @@ def test_dataset_loader(data_dir):
     )
 
     try:
-        dataset = GazeboOccWorldDataset(data_dir, config)
+        dataset = GazeboVeryLargeWeebModelDataset(data_dir, config)
         print(f"  Dataset size: {len(dataset)}")
 
         if len(dataset) == 0:
@@ -217,7 +217,7 @@ def test_training_step(data_dir):
     import torch.nn as nn
     import torch.optim as optim
     from torch.utils.data import DataLoader
-    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig, collate_fn
+    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig, collate_fn
     from train import SimpleOccupancyModel, load_config
 
     try:
@@ -232,7 +232,7 @@ def test_training_step(data_dir):
             val_ratio=0.0,
             test_ratio=0.0,
         )
-        dataset = GazeboOccWorldDataset(data_dir, dataset_cfg)
+        dataset = GazeboVeryLargeWeebModelDataset(data_dir, dataset_cfg)
 
         if len(dataset) == 0:
             print("  ERROR: Empty dataset")
@@ -271,7 +271,7 @@ def test_training_step(data_dir):
 
 def main():
     print("=" * 60)
-    print("OccWorld Integration Test")
+    print("VeryLargeWeebModel Integration Test")
     print("=" * 60)
 
     results = {}

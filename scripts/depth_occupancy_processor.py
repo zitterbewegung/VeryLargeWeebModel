@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Depth-to-Occupancy Processor for OccWorld Integration
+Depth-to-Occupancy Processor for VeryLargeWeebModel Integration
 
 This module converts RGBD depth images from Gazebo simulation into voxelized
-occupancy grids compatible with OccWorld's training pipeline.
+occupancy grids compatible with VeryLargeWeebModel's training pipeline.
 
 Depth Occupancy Tiling Algorithm:
 1. Unproject depth pixels to 3D points using camera intrinsics
@@ -12,7 +12,7 @@ Depth Occupancy Tiling Algorithm:
 4. Apply ray-tracing for free-space carving
 5. Generate semantic labels (if available)
 
-Parameters matching OccWorld expectations:
+Parameters matching VeryLargeWeebModel expectations:
 - Voxel size: [0.4, 0.4, 0.4] meters (XYZ)
 - Point cloud range: [-40, -40, -2, 40, 40, 150] meters (extended Z for drones)
 - Occupancy classes: 0=empty, 1=occupied (binary), or semantic labels
@@ -32,7 +32,7 @@ import cv2
 class DepthOccupancyConfig:
     """Configuration for depth-to-occupancy conversion."""
 
-    # Voxel grid parameters (OccWorld defaults)
+    # Voxel grid parameters (VeryLargeWeebModel defaults)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 0.4)
 
     # Point cloud range [xmin, ymin, zmin, xmax, ymax, zmax]
@@ -74,7 +74,7 @@ class DepthOccupancyConfig:
 
 class DepthOccupancyProcessor:
     """
-    Converts depth images to 3D occupancy grids for OccWorld training.
+    Converts depth images to 3D occupancy grids for VeryLargeWeebModel training.
 
     The processor handles:
     - Depth unprojection to 3D points
@@ -346,15 +346,15 @@ class DepthOccupancyProcessor:
         return fused_occupancy
 
 
-class OccWorldDepthAdapter:
+class VeryLargeWeebModelDepthAdapter:
     """
-    Adapter to format depth-derived occupancy for OccWorld training.
+    Adapter to format depth-derived occupancy for VeryLargeWeebModel training.
 
-    Ensures output format matches OccWorld's expected tensor shapes and
+    Ensures output format matches VeryLargeWeebModel's expected tensor shapes and
     semantic label conventions.
     """
 
-    # OccWorld semantic class mapping
+    # VeryLargeWeebModel semantic class mapping
     SEMANTIC_CLASSES = {
         0: 'empty',
         1: 'barrier',
@@ -385,14 +385,14 @@ class OccWorldDepthAdapter:
         semantic_labels: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
         """
-        Convert occupancy grid to OccWorld training format.
+        Convert occupancy grid to VeryLargeWeebModel training format.
 
         Args:
             occupancy: [X, Y, Z] binary occupancy grid
             semantic_labels: Optional [X, Y, Z] semantic labels
 
         Returns:
-            dict compatible with OccWorld DataLoader
+            dict compatible with VeryLargeWeebModel DataLoader
         """
         cfg = self.processor.config
 
@@ -400,7 +400,7 @@ class OccWorldDepthAdapter:
         if semantic_labels is None:
             semantic_labels = self._height_based_semantics(occupancy)
 
-        # Convert to OccWorld tensor format [Z, Y, X] (channel-first style)
+        # Convert to VeryLargeWeebModel tensor format [Z, Y, X] (channel-first style)
         occupancy_tensor = np.transpose(occupancy, (2, 1, 0))
         semantic_tensor = np.transpose(semantic_labels, (2, 1, 0))
 
@@ -454,7 +454,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=str, default='occupancy.npz', help='Output file')
     args = parser.parse_args()
 
-    # Default configuration for OccWorld
+    # Default configuration for VeryLargeWeebModel
     config = DepthOccupancyConfig(
         voxel_size=(0.4, 0.4, 1.25),  # Coarser Z for extended range
         point_cloud_range=(-40.0, -40.0, -2.0, 40.0, 40.0, 150.0),
@@ -463,7 +463,7 @@ if __name__ == '__main__':
     )
 
     processor = DepthOccupancyProcessor(config)
-    adapter = OccWorldDepthAdapter(processor)
+    adapter = VeryLargeWeebModelDepthAdapter(processor)
 
     print(f"Grid size: {config.grid_size}")
     print(f"Voxel size: {config.voxel_size}")

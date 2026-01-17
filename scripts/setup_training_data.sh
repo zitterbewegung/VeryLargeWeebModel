@@ -2,7 +2,7 @@
 # =============================================================================
 # Setup Training Data: nuScenes + Gazebo Simulation
 # =============================================================================
-# This script sets up both data sources for OccWorld training:
+# This script sets up both data sources for VeryLargeWeebModel training:
 #   1. nuScenes mini dataset (quick start, proven to work)
 #   2. Gazebo simulation with Tokyo PLATEAU models (custom data)
 #
@@ -107,12 +107,12 @@ occ3d/
 ```
 EOF
 
-    # Create nuScenes dataset adapter for OccWorld
+    # Create nuScenes dataset adapter for VeryLargeWeebModel
     log_info "Creating nuScenes dataset adapter..."
     cat << 'PYTHON' > "${PROJECT_ROOT}/dataset/nuscenes_occworld_dataset.py"
 #!/usr/bin/env python3
 """
-nuScenes dataset adapter for OccWorld training.
+nuScenes dataset adapter for VeryLargeWeebModel training.
 
 Loads nuScenes data in format compatible with our training pipeline.
 """
@@ -148,8 +148,8 @@ class NuScenesConfig:
     occ3d_path: Optional[str] = None
 
 
-class NuScenesOccWorldDataset(Dataset):
-    """nuScenes dataset for OccWorld training."""
+class NuScenesVeryLargeWeebModelDataset(Dataset):
+    """nuScenes dataset for VeryLargeWeebModel training."""
 
     def __init__(self, data_root: str, config: NuScenesConfig):
         if not HAS_NUSCENES:
@@ -315,7 +315,7 @@ if __name__ == '__main__':
         split='train',
     )
 
-    dataset = NuScenesOccWorldDataset(data_root, config)
+    dataset = NuScenesVeryLargeWeebModelDataset(data_root, config)
     print(f"Dataset size: {len(dataset)}")
 
     sample = dataset[0]
@@ -392,7 +392,7 @@ setup_gazebo() {
     cat << 'PYTHON' > "${PROJECT_ROOT}/scripts/gazebo_data_collector.py"
 #!/usr/bin/env python3
 """
-Gazebo simulation data collector for OccWorld training.
+Gazebo simulation data collector for VeryLargeWeebModel training.
 
 Launches Gazebo with Tokyo PLATEAU models and collects:
 - Camera images (6 surround views)
@@ -616,7 +616,7 @@ create_nuscenes_config() {
 
     cat << 'PYTHON' > "${PROJECT_ROOT}/config/finetune_nuscenes.py"
 """
-OccWorld Fine-tuning Configuration for nuScenes Dataset
+VeryLargeWeebModel Fine-tuning Configuration for nuScenes Dataset
 
 This config uses the nuScenes mini dataset for training.
 """
@@ -680,7 +680,7 @@ PYTHON
 main() {
     echo ""
     echo "=============================================="
-    echo "  OccWorld Training Data Setup"
+    echo "  VeryLargeWeebModel Training Data Setup"
     echo "=============================================="
     echo ""
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PLATEAU Mesh to OccWorld Training Data Converter
+PLATEAU Mesh to VeryLargeWeebModel Training Data Converter
 
-Converts Tokyo PLATEAU 3D city models directly into OccWorld training format
+Converts Tokyo PLATEAU 3D city models directly into VeryLargeWeebModel training format
 by voxelizing meshes and generating synthetic trajectories.
 
 This bypasses the need for Gazebo simulation by:
@@ -35,7 +35,7 @@ except ImportError:
 
 @dataclass
 class VoxelConfig:
-    """Voxelization configuration matching OccWorld expectations."""
+    """Voxelization configuration matching VeryLargeWeebModel expectations."""
     # Point cloud range [xmin, ymin, zmin, xmax, ymax, zmax]
     point_cloud_range: Tuple[float, ...] = (-40.0, -40.0, -2.0, 40.0, 40.0, 150.0)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 1.25)
@@ -411,7 +411,7 @@ def save_image(img: np.ndarray, path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert PLATEAU meshes to OccWorld training data')
+    parser = argparse.ArgumentParser(description='Convert PLATEAU meshes to VeryLargeWeebModel training data')
     parser.add_argument('--input', '-i', required=True, help='Input mesh directory')
     parser.add_argument('--output', '-o', default='data/tokyo_gazebo', help='Output data directory')
     parser.add_argument('--frames', '-f', type=int, default=100, help='Frames per session')
@@ -427,7 +427,7 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("PLATEAU to OccWorld Converter")
+    print("PLATEAU to VeryLargeWeebModel Converter")
     print("=" * 60)
 
     # Initialize voxelizer

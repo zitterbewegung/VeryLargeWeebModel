@@ -51,7 +51,7 @@ def create_sdf_model(name: str, mesh_path: str, output_dir: str) -> str:
   <version>1.0</version>
   <sdf version="1.9">model.sdf</sdf>
   <author>
-    <name>PLATEAU/OccWorld</name>
+    <name>PLATEAU/VeryLargeWeebModel</name>
   </author>
   <description>Tokyo PLATEAU building model for Gazebo simulation.</description>
 </model>

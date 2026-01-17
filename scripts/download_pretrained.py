@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download OccWorld pretrained models from Tsinghua Cloud (Seafile).
+Download VeryLargeWeebModel pretrained models from Tsinghua Cloud (Seafile).
 
 This script uses the Seafile API to download files from shared links,
 bypassing the need for a web browser.
@@ -280,7 +280,7 @@ def download_with_selenium(output_dir: str) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Download OccWorld pretrained models')
+    parser = argparse.ArgumentParser(description='Download VeryLargeWeebModel pretrained models')
     parser.add_argument('--output', '-o', default='pretrained', help='Output directory')
     parser.add_argument('--use-selenium', action='store_true', help='Use Selenium browser automation')
     args = parser.parse_args()
@@ -289,7 +289,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     print("=" * 60)
-    print("OccWorld Pretrained Model Downloader")
+    print("VeryLargeWeebModel Pretrained Model Downloader")
     print("=" * 60)
     print(f"Output directory: {os.path.abspath(output_dir)}")
 
@@ -297,7 +297,7 @@ def main():
 
     files_to_download = [
         ("/vqvae/epoch_125.pth", "vqvae/epoch_125.pth", "VQVAE checkpoint (~500MB)"),
-        ("/occworld/latest.pth", "occworld/latest.pth", "OccWorld checkpoint (~200MB)"),
+        ("/occworld/latest.pth", "occworld/latest.pth", "VeryLargeWeebModel checkpoint (~200MB)"),
     ]
 
     success = True

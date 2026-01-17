@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Deploy OccWorld Training to Lambda Cloud
+# Deploy VeryLargeWeebModel Training to Lambda Cloud
 # =============================================================================
 # Run this script from your LOCAL machine to deploy to a Lambda instance.
 #
@@ -76,7 +76,7 @@ RSYNC_CMD="rsync -avz --progress -e 'ssh -i $SSH_KEY -o StrictHostKeyChecking=no
 
 echo ""
 echo "=============================================="
-echo "    Deploy OccWorld to Lambda Cloud          "
+echo "    Deploy VeryLargeWeebModel to Lambda Cloud          "
 echo "=============================================="
 echo ""
 log_info "Instance IP: $INSTANCE_IP"
@@ -140,11 +140,11 @@ if [ "$UPLOAD_MODELS" = true ]; then
         log_success "Uploaded VQVAE checkpoint"
     fi
 
-    # OccWorld
+    # VeryLargeWeebModel
     if [ -f "$PROJECT_DIR/pretrained/occworld/latest.pth" ]; then
         $SCP_CMD "$PROJECT_DIR/pretrained/occworld/latest.pth" \
             "ubuntu@$INSTANCE_IP:~/VeryLargeWeebModel/pretrained/occworld/"
-        log_success "Uploaded OccWorld checkpoint"
+        log_success "Uploaded VeryLargeWeebModel checkpoint"
     fi
 fi
 
