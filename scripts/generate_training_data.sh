@@ -26,21 +26,30 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 TOTAL_FRAMES=21000
 OUTPUT_DIR="data/tokyo_gazebo"
 FRAMES_PER_SESSION=300
+NUM_WORKERS=""  # Empty = auto-detect CPU count
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case $1 in
         --frames|-f)    TOTAL_FRAMES="$2"; shift 2 ;;
         --output|-o)    OUTPUT_DIR="$2"; shift 2 ;;
+        --workers|-w)   NUM_WORKERS="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo "  --frames, -f   Total frames to generate (default: 21000)"
             echo "  --output, -o   Output directory (default: data/tokyo_gazebo)"
+            echo "  --workers, -w  Parallel workers (default: CPU count)"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Build workers arg
+WORKERS_ARG=""
+if [ -n "$NUM_WORKERS" ]; then
+    WORKERS_ARG="--workers $NUM_WORKERS"
+fi
 
 # Calculate sessions per pattern (60% random, 20% survey, 20% orbit)
 TOTAL_SESSIONS=$((TOTAL_FRAMES / FRAMES_PER_SESSION))
@@ -73,7 +82,8 @@ if [ $RANDOM_SESSIONS -gt 0 ]; then
         --output "$OUTPUT_DIR" \
         --frames $FRAMES_PER_SESSION \
         --sessions $RANDOM_SESSIONS \
-        --pattern random
+        --pattern random \
+        $WORKERS_ARG
 fi
 
 # Generate survey pattern sessions
@@ -83,7 +93,8 @@ if [ $SURVEY_SESSIONS -gt 0 ]; then
         --output "$OUTPUT_DIR" \
         --frames $FRAMES_PER_SESSION \
         --sessions $SURVEY_SESSIONS \
-        --pattern survey
+        --pattern survey \
+        $WORKERS_ARG
 fi
 
 # Generate orbit pattern sessions
@@ -93,7 +104,8 @@ if [ $ORBIT_SESSIONS -gt 0 ]; then
         --output "$OUTPUT_DIR" \
         --frames $FRAMES_PER_SESSION \
         --sessions $ORBIT_SESSIONS \
-        --pattern orbit
+        --pattern orbit \
+        $WORKERS_ARG
 fi
 
 # Count actual frames generated

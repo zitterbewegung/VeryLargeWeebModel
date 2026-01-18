@@ -10,6 +10,7 @@ Generates synthetic training data with:
 Usage:
     python scripts/gazebo_data_collector.py --output data/tokyo_gazebo --frames 1000
     python scripts/gazebo_data_collector.py -o data/tokyo_gazebo -f 300 -s 70 -p random
+    python scripts/gazebo_data_collector.py -o data/tokyo_gazebo -f 300 -s 70 -p random --workers 8
 """
 import os
 import sys
@@ -19,6 +20,8 @@ import argparse
 import numpy as np
 from datetime import datetime
 from pathlib import Path
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 try:
     import cv2
@@ -266,14 +269,22 @@ def simulate_lidar(position: dict, occupancy: np.ndarray, num_points: int = 5000
     return lidar_data
 
 
+def collect_session_worker(args):
+    """Worker function for multiprocessing."""
+    session_id, output_dir, num_frames, pattern = args
+    return collect_data(output_dir, num_frames, pattern, session_id)
+
+
 def collect_data(output_dir: str, num_frames: int, pattern: str = 'random', session_id: int = 0):
     """Main data collection loop for one session."""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    session_name = f'{pattern}_{session_id:03d}_{timestamp}'
+    # Add random suffix to avoid collisions in parallel execution
+    rand_suffix = np.random.randint(1000, 9999)
+    session_name = f'{pattern}_{session_id:03d}_{timestamp}_{rand_suffix}'
     dirs = create_session_dirs(output_dir, session_name)
 
-    print(f"  Session: {session_name}")
-    print(f"  Frames: {num_frames}, Pattern: {pattern}")
+    print(f"  [Worker {session_id}] Session: {session_name}")
+    print(f"  [Worker {session_id}] Frames: {num_frames}, Pattern: {pattern}")
 
     # Generate trajectory
     waypoints = generate_trajectory(num_frames, pattern)
@@ -321,7 +332,13 @@ def main():
     parser.add_argument('--pattern', '-p', choices=['survey', 'orbit', 'random'], default='random',
                        help='Flight pattern')
     parser.add_argument('--sessions', '-s', type=int, default=1, help='Number of sessions')
+    parser.add_argument('--workers', '-w', type=int, default=None,
+                       help='Number of parallel workers (default: CPU count)')
     args = parser.parse_args()
+
+    # Determine number of workers
+    num_workers = args.workers if args.workers else min(cpu_count(), args.sessions)
+    num_workers = max(1, min(num_workers, args.sessions))  # Clamp to valid range
 
     print("=" * 50)
     print("OccWorld Training Data Generator")
@@ -331,18 +348,39 @@ def main():
     print(f"Frames/session: {args.frames}")
     print(f"Pattern: {args.pattern}")
     print(f"Total frames: {args.sessions * args.frames}")
+    print(f"Workers: {num_workers} (parallel)")
     print("=" * 50)
 
     os.makedirs(args.output, exist_ok=True)
 
-    for s in range(args.sessions):
-        print(f"\n[{s+1}/{args.sessions}]")
-        collect_data(args.output, args.frames, args.pattern, session_id=s)
+    # Prepare work items
+    work_items = [
+        (s, args.output, args.frames, args.pattern)
+        for s in range(args.sessions)
+    ]
+
+    start_time = time.time()
+
+    if num_workers == 1:
+        # Sequential execution
+        for s in range(args.sessions):
+            print(f"\n[{s+1}/{args.sessions}]")
+            collect_data(args.output, args.frames, args.pattern, session_id=s)
+    else:
+        # Parallel execution
+        print(f"\nStarting {num_workers} parallel workers...")
+        with Pool(processes=num_workers) as pool:
+            results = pool.map(collect_session_worker, work_items)
+        print(f"\nAll {len(results)} sessions complete.")
+
+    elapsed = time.time() - start_time
 
     print("\n" + "=" * 50)
     print("Data generation complete!")
     print(f"Total frames: {args.sessions * args.frames}")
     print(f"Output: {args.output}")
+    print(f"Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"Speed: {args.sessions * args.frames / elapsed:.1f} frames/sec")
     print("=" * 50)
 
 
