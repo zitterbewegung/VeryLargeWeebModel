@@ -77,3 +77,65 @@ OccupancyLoss(
 - Grid size: 200×200×121 (4.84M voxels)
 - Occupancy rate: ~0.83%
 - Learning rate: 1e-4 with cosine annealing
+
+---
+
+## Weights & Biases Integration
+
+### Setup
+```bash
+pip install wandb
+wandb login
+```
+
+### Usage
+```bash
+# Basic usage
+python train.py --config config/finetune_tokyo.py --wandb
+
+# With custom project/run name
+python train.py --config config/finetune_tokyo.py \
+    --wandb \
+    --wandb-project occworld-tokyo \
+    --wandb-run-name experiment-v1 \
+    --wandb-tags focal-loss baseline
+```
+
+### CLI Arguments
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--wandb` | False | Enable W&B logging |
+| `--wandb-project` | `occworld-tokyo` | W&B project name |
+| `--wandb-entity` | None | W&B team/username |
+| `--wandb-run-name` | auto | Run name (auto-generated if not provided) |
+| `--wandb-tags` | [] | Tags for the run |
+
+### What Gets Logged
+
+**Metrics (per step):**
+- `train/loss` - Training loss
+- `pred/mean`, `pred/min`, `pred/max` - Prediction statistics
+- `pred/occupancy_rate` - Target occupancy rate
+
+**Metrics (per epoch):**
+- `epoch/train_loss`, `epoch/val_loss` - Epoch losses
+- `epoch/lr` - Learning rate
+- `epoch/time_seconds` - Epoch duration
+
+**Config:**
+- Dataset parameters (grid size, voxel size, etc.)
+- Model architecture and parameter count
+- Training hyperparameters (lr, batch size, etc.)
+- Loss function settings
+
+**Artifacts:**
+- `model-checkpoint-epochN` - Periodic checkpoints
+- `model-best` - Best model (lowest val loss)
+
+### Monitoring Training Health
+
+Watch for loss collapse in the W&B dashboard:
+- **Healthy**: `pred/mean` stays around 0.008-0.02 (matching target occupancy)
+- **Collapsing**: `pred/mean` drops toward 0.0001
+
+The mean-matching regularization should prevent collapse, but monitor the `pred/*` metrics to verify.

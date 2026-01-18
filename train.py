@@ -39,6 +39,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+# Optional wandb integration
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -100,6 +107,18 @@ def parse_args():
                         help='Run evaluation only')
     parser.add_argument('--use-occworld', action='store_true',
                         help='Use OccWorld library if installed')
+
+    # Weights & Biases
+    parser.add_argument('--wandb', action='store_true',
+                        help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb-project', type=str, default='occworld-tokyo',
+                        help='W&B project name')
+    parser.add_argument('--wandb-entity', type=str, default=None,
+                        help='W&B entity (team/username)')
+    parser.add_argument('--wandb-run-name', type=str, default=None,
+                        help='W&B run name (auto-generated if not provided)')
+    parser.add_argument('--wandb-tags', type=str, nargs='+', default=[],
+                        help='W&B tags for the run')
 
     return parser.parse_args()
 
@@ -345,7 +364,7 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -374,6 +393,15 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
             pred_min = pred_occ.min().item()
             print(f"  DEBUG [{batch_idx}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
 
+            # Log prediction stats to wandb
+            if use_wandb:
+                wandb.log({
+                    'pred/mean': pred_mean,
+                    'pred/min': pred_min,
+                    'pred/max': pred_max,
+                    'pred/occupancy_rate': occ_rate,
+                }, commit=False)
+
         # Backward pass
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
@@ -389,6 +417,13 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
         # TensorBoard
         global_step = epoch * len(dataloader) + batch_idx
         writer.add_scalar('Train/Loss', loss.item(), global_step)
+
+        # Weights & Biases
+        if use_wandb:
+            wandb.log({
+                'train/loss': loss.item(),
+                'train/global_step': global_step,
+            })
 
     avg_loss = total_loss / num_batches
     return avg_loss
@@ -585,6 +620,54 @@ def main():
     # TensorBoard
     writer = SummaryWriter(log_dir=str(work_dir / 'logs'))
 
+    # Weights & Biases
+    use_wandb = args.wandb and HAS_WANDB
+    if args.wandb and not HAS_WANDB:
+        print("WARNING: --wandb specified but wandb not installed. Run: pip install wandb")
+
+    if use_wandb:
+        wandb_config = {
+            # Data
+            'data_root': data_root,
+            'dataset_type': dataset_type,
+            'batch_size': batch_size,
+            'history_frames': getattr(config, 'history_frames', 4),
+            'future_frames': getattr(config, 'future_frames', 6),
+            'grid_size': getattr(config, 'grid_size', [200, 200, 121]),
+            'point_cloud_range': getattr(config, 'point_cloud_range', None),
+            'voxel_size': getattr(config, 'voxel_size', None),
+            # Model
+            'model_type': 'SimpleOccupancyModel' if not (use_occworld and args.use_occworld) else 'TransVQVAE',
+            'num_params': num_params,
+            # Training
+            'lr': lr,
+            'weight_decay': weight_decay,
+            'max_epochs': max_epochs,
+            'optimizer': 'AdamW',
+            'scheduler': 'CosineAnnealingLR',
+            # Loss
+            'loss_type': 'Focal+Dice+MeanMatch',
+            'focal_alpha': 0.99,
+            'focal_gamma': 2.0,
+            'dice_weight': 1.0,
+            'mean_weight': 10.0,
+            # Hardware
+            'device': str(device),
+            'gpu_ids': args.gpu_ids,
+        }
+
+        run_name = args.wandb_run_name or f"occworld_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            config=wandb_config,
+            tags=args.wandb_tags + [dataset_type, 'focal-loss'],
+            dir=str(work_dir),
+        )
+        wandb.watch(model, log='gradients', log_freq=100)
+        print(f"W&B run: {wandb.run.url}")
+
     # Resume optimizer/scheduler state if resuming from checkpoint
     start_epoch = 0
     best_val_loss = float('inf')
@@ -613,7 +696,7 @@ def main():
 
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
-                                  device, epoch, writer)
+                                  device, epoch, writer, use_wandb)
 
         # Validate
         val_loss = validate(model, val_loader, criterion, device)
@@ -623,13 +706,24 @@ def main():
 
         # Log
         epoch_time = time.time() - epoch_start
+        current_lr = scheduler.get_last_lr()[0]
         print(f"Epoch {epoch}/{max_epochs} - "
               f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-              f"LR: {scheduler.get_last_lr()[0]:.6f}, Time: {epoch_time:.1f}s")
+              f"LR: {current_lr:.6f}, Time: {epoch_time:.1f}s")
 
         writer.add_scalar('Train/EpochLoss', train_loss, epoch)
         writer.add_scalar('Val/Loss', val_loss, epoch)
-        writer.add_scalar('Train/LR', scheduler.get_last_lr()[0], epoch)
+        writer.add_scalar('Train/LR', current_lr, epoch)
+
+        # Weights & Biases epoch logging
+        if use_wandb:
+            wandb.log({
+                'epoch': epoch,
+                'epoch/train_loss': train_loss,
+                'epoch/val_loss': val_loss,
+                'epoch/lr': current_lr,
+                'epoch/time_seconds': epoch_time,
+            })
 
         # Save checkpoint
         if (epoch + 1) % 5 == 0 or epoch == max_epochs - 1:
@@ -644,6 +738,16 @@ def main():
             }, ckpt_path)
             print(f"  Saved checkpoint: {ckpt_path}")
 
+            # Log checkpoint as wandb artifact
+            if use_wandb:
+                artifact = wandb.Artifact(
+                    f'model-checkpoint-epoch{epoch+1}',
+                    type='model',
+                    metadata={'epoch': epoch + 1, 'train_loss': train_loss, 'val_loss': val_loss}
+                )
+                artifact.add_file(str(ckpt_path))
+                wandb.log_artifact(artifact)
+
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -655,7 +759,22 @@ def main():
             }, best_path)
             print(f"  New best model! Val Loss: {val_loss:.4f}")
 
+            # Log best model as wandb artifact
+            if use_wandb:
+                best_artifact = wandb.Artifact(
+                    'model-best',
+                    type='model',
+                    metadata={'epoch': epoch + 1, 'val_loss': val_loss}
+                )
+                best_artifact.add_file(str(best_path))
+                wandb.log_artifact(best_artifact)
+
     writer.close()
+
+    # Finish wandb run
+    if use_wandb:
+        wandb.finish()
+
     print("=" * 60)
     print("Training complete!")
     print(f"Best validation loss: {best_val_loss:.4f}")
