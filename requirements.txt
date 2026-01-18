@@ -1,0 +1,36 @@
+# OccWorld Tokyo Training - Minimal Requirements
+# Install with: pip install -r requirements.txt
+#
+# For full environment (nuScenes, Open3D, etc.): pip install -r requirements-full.txt
+
+# Core ML (install PyTorch separately for your CUDA version)
+# See: https://pytorch.org/get-started/locally/
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Model dependencies
+einops>=0.6.0
+timm>=0.9.0
+
+# Data processing
+numpy>=1.24.0,<2.0.0  # NumPy 2.x has compatibility issues with some packages
+scipy>=1.10.0
+h5py>=3.8.0
+trimesh>=4.0.0
+
+# Computer vision
+opencv-python>=4.8.0
+pillow>=9.0.0
+
+# Visualization & Experiment Tracking
+matplotlib>=3.7.0
+tensorboard>=2.12.0
+wandb>=0.15.0  # Optional: pip install wandb && wandb login
+
+# Utilities
+tqdm>=4.65.0
+pyyaml>=6.0
+rich>=13.0.0
+
+# Quaternion handling (for 6DoF poses)
+pyquaternion>=0.9.9
