@@ -44,7 +44,7 @@ def test_imports():
         errors.append(f"cv2: {e}")
 
     try:
-        from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
+        from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
         print("  dataset loader: OK")
     except ImportError as e:
         errors.append(f"dataset loader: {e}")
@@ -76,8 +76,12 @@ def create_test_data(data_dir, num_frames=15):
     for i in range(num_frames):
         frame_id = f'{i:06d}'
 
-        # Occupancy grid
-        occ = np.random.randint(0, 2, (200, 200, 121), dtype=np.uint8)
+        # Occupancy grid - realistic sparse occupancy (~0.1% occupied)
+        occ = np.zeros((200, 200, 121), dtype=np.uint8)
+        # Randomly place ~0.1% occupied voxels (4840 out of 4.84M)
+        num_occupied = int(200 * 200 * 121 * 0.001)
+        occupied_indices = np.random.choice(200 * 200 * 121, num_occupied, replace=False)
+        occ.flat[occupied_indices] = 1
         np.savez_compressed(
             os.path.join(session, 'occupancy', f'{frame_id}_occupancy.npz'),
             occupancy=occ
@@ -119,7 +123,7 @@ def test_dataset_loader(data_dir):
     """Test that dataset loader can read the data."""
     print("\n[TEST] Testing dataset loader...")
 
-    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
+    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
 
     config = DatasetConfig(
         history_frames=4,
@@ -130,7 +134,7 @@ def test_dataset_loader(data_dir):
     )
 
     try:
-        dataset = GazeboVeryLargeWeebModelDataset(data_dir, config)
+        dataset = GazeboOccWorldDataset(data_dir, config)
         print(f"  Dataset size: {len(dataset)}")
 
         if len(dataset) == 0:
@@ -143,6 +147,11 @@ def test_dataset_loader(data_dir):
         print(f"  history_occupancy shape: {sample['history_occupancy'].shape}")
         print(f"  future_occupancy shape: {sample['future_occupancy'].shape}")
         print(f"  history_poses shape: {sample['history_poses'].shape}")
+
+        # Check occupancy sparsity
+        future_occ = sample['future_occupancy']
+        occ_rate = (future_occ > 0).float().mean().item() * 100
+        print(f"  Occupancy rate: {occ_rate:.4f}% (expect ~0.1% for realistic data)")
 
         return True
     except Exception as e:
@@ -210,15 +219,14 @@ def test_model_creation():
 
 
 def test_training_step(data_dir):
-    """Test one training step."""
+    """Test one training step with debug output."""
     print("\n[TEST] Testing training step...")
 
     import torch
-    import torch.nn as nn
     import torch.optim as optim
     from torch.utils.data import DataLoader
-    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig, collate_fn
-    from train import SimpleOccupancyModel, load_config
+    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig, collate_fn
+    from train import SimpleOccupancyModel, OccupancyLoss, load_config
 
     try:
         # Load config
@@ -232,7 +240,7 @@ def test_training_step(data_dir):
             val_ratio=0.0,
             test_ratio=0.0,
         )
-        dataset = GazeboVeryLargeWeebModelDataset(data_dir, dataset_cfg)
+        dataset = GazeboOccWorldDataset(data_dir, dataset_cfg)
 
         if len(dataset) == 0:
             print("  ERROR: Empty dataset")
@@ -243,7 +251,7 @@ def test_training_step(data_dir):
         # Create model
         model = SimpleOccupancyModel(config)
         optimizer = optim.Adam(model.parameters(), lr=1e-4)
-        criterion = nn.BCELoss()
+        criterion = OccupancyLoss(bce_weight=1.0, dice_weight=1.0, pos_weight=10.0)
 
         # One training step
         model.train()
@@ -255,10 +263,22 @@ def test_training_step(data_dir):
         optimizer.zero_grad()
         pred = model(history_occ)
         loss = criterion(pred, future_occ)
+
+        # Debug output - same as in train.py
+        occ_rate = (future_occ > 0).float().mean().item() * 100
+        pred_mean = pred.mean().item()
+        pred_max = pred.max().item()
+        print(f"  DEBUG: Occupancy rate: {occ_rate:.4f}%, Pred mean: {pred_mean:.6f}, Pred max: {pred_max:.4f}")
+
         loss.backward()
         optimizer.step()
 
         print(f"  Loss: {loss.item():.4f}")
+
+        # Warn if loss is suspiciously low with sparse data
+        if loss.item() < 0.01 and occ_rate < 1.0:
+            print("  WARNING: Loss is very low with sparse occupancy - potential collapse!")
+
         print("  Training step completed successfully!")
 
         return True
