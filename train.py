@@ -320,6 +320,13 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
         # Compute loss
         loss = criterion(pred_occ, future_occ.float())
 
+        # Debug: Check occupancy rate and prediction distribution
+        if batch_idx == 0:
+            occ_rate = (future_occ > 0).float().mean().item() * 100
+            pred_mean = pred_occ.mean().item()
+            pred_max = pred_occ.max().item()
+            print(f"  DEBUG: Occupancy rate: {occ_rate:.4f}%, Pred mean: {pred_mean:.6f}, Pred max: {pred_max:.4f}")
+
         # Backward pass
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
