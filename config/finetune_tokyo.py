@@ -59,11 +59,11 @@ dataset_config = dict(
 )
 
 # Data pipeline
-# For A100-40GB: samples_per_gpu=4-6
-# For A100-80GB: samples_per_gpu=8-12
+# For A100-40GB: samples_per_gpu=3-4
+# For A100-80GB: samples_per_gpu=6-8
 # For smaller GPUs (24GB): samples_per_gpu=1-2
 data = dict(
-    samples_per_gpu=8,  # Batch size per GPU (optimized for A100)
+    samples_per_gpu=3,  # Batch size per GPU (optimized for A100-40GB)
     workers_per_gpu=8,  # Match or exceed batch size
     train=dict(
         type='GazeboOccWorldDataset',
