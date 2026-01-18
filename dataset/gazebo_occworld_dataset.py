@@ -38,11 +38,25 @@ import json
 from glob import glob
 from typing import Dict, List, Optional, Tuple, Callable, Any
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
 
 import numpy as np
 import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+# Thread pool for parallel I/O (shared across dataset instances)
+_IO_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+def _get_io_executor(max_workers: int = None) -> ThreadPoolExecutor:
+    """Get or create shared I/O thread pool."""
+    global _IO_EXECUTOR
+    if _IO_EXECUTOR is None:
+        workers = max_workers or min(8, cpu_count())
+        _IO_EXECUTOR = ThreadPoolExecutor(max_workers=workers)
+    return _IO_EXECUTOR
 
 
 @dataclass
@@ -253,6 +267,8 @@ class GazeboOccWorldDataset(Dataset):
         """
         Load and return a training sample.
 
+        Uses parallel I/O to load all frame data concurrently for better performance.
+
         Args:
             idx: Sample index
 
@@ -269,39 +285,45 @@ class GazeboOccWorldDataset(Dataset):
         history_frames = frames[:n_history]
         future_frames = frames[n_history:]
 
-        # Load history data
-        history_images = []
-        history_lidar = []
-        history_poses = []
-        history_occupancy = []
+        executor = _get_io_executor()
 
-        for fid in history_frames:
-            # Load camera images
-            frame_images = self._load_images(session_dir, fid)
-            history_images.append(frame_images)
+        # Submit all I/O operations in parallel
+        # History: images, lidar, poses, occupancy
+        history_image_futures = [
+            executor.submit(self._load_images, session_dir, fid)
+            for fid in history_frames
+        ]
+        history_lidar_futures = [
+            executor.submit(self._load_lidar, session_dir, fid)
+            for fid in history_frames
+        ]
+        history_pose_futures = [
+            executor.submit(self._load_pose, session_dir, fid)
+            for fid in history_frames
+        ]
+        history_occ_futures = [
+            executor.submit(self._load_occupancy, session_dir, fid)
+            for fid in history_frames
+        ]
 
-            # Load LiDAR
-            lidar = self._load_lidar(session_dir, fid)
-            history_lidar.append(lidar)
+        # Future: poses and occupancy only
+        future_pose_futures = [
+            executor.submit(self._load_pose, session_dir, fid)
+            for fid in future_frames
+        ]
+        future_occ_futures = [
+            executor.submit(self._load_occupancy, session_dir, fid)
+            for fid in future_frames
+        ]
 
-            # Load pose
-            pose = self._load_pose(session_dir, fid)
-            history_poses.append(pose)
+        # Collect results (maintains order)
+        history_images = [f.result() for f in history_image_futures]
+        history_lidar = [f.result() for f in history_lidar_futures]
+        history_poses = [f.result() for f in history_pose_futures]
+        history_occupancy = [f.result() for f in history_occ_futures]
 
-            # Load occupancy
-            occ = self._load_occupancy(session_dir, fid)
-            history_occupancy.append(occ)
-
-        # Load future data (occupancy and poses only)
-        future_occupancy = []
-        future_poses = []
-
-        for fid in future_frames:
-            occ = self._load_occupancy(session_dir, fid)
-            future_occupancy.append(occ)
-
-            pose = self._load_pose(session_dir, fid)
-            future_poses.append(pose)
+        future_poses = [f.result() for f in future_pose_futures]
+        future_occupancy = [f.result() for f in future_occ_futures]
 
         # Build sample dict
         sample = {
@@ -321,35 +343,41 @@ class GazeboOccWorldDataset(Dataset):
 
         return sample
 
-    def _load_images(self, session_dir: str, frame_id: str) -> Dict[str, torch.Tensor]:
-        """Load all camera images for a frame."""
-        images = {}
+    def _load_single_image(self, img_path: str, cam_name: str) -> Tuple[str, torch.Tensor]:
+        """Load a single camera image (for parallel execution)."""
+        if os.path.exists(img_path):
+            img = cv2.imread(img_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+            if img.shape[:2] != self.config.image_size:
+                img = cv2.resize(img, (self.config.image_size[1], self.config.image_size[0]))
+
+            img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+
+            if self.config.normalize_images:
+                img_tensor = img_tensor / 255.0
+
+            return cam_name, img_tensor
+        else:
+            return cam_name, torch.zeros(
+                3, self.config.image_size[0], self.config.image_size[1]
+            )
+
+    def _load_images(self, session_dir: str, frame_id: str) -> Dict[str, torch.Tensor]:
+        """Load all camera images for a frame (parallel across 6 cameras)."""
+        executor = _get_io_executor()
+
+        # Submit all camera loads in parallel
+        futures = []
         for cam_name in self.CAMERA_NAMES:
             img_path = os.path.join(session_dir, 'images', f'{frame_id}_{cam_name}.jpg')
+            futures.append(executor.submit(self._load_single_image, img_path, cam_name))
 
-            if os.path.exists(img_path):
-                # Load image
-                img = cv2.imread(img_path)
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-                # Resize if needed
-                if img.shape[:2] != self.config.image_size:
-                    img = cv2.resize(img, (self.config.image_size[1], self.config.image_size[0]))
-
-                # Convert to tensor [C, H, W]
-                img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
-
-                # Normalize to [0, 1]
-                if self.config.normalize_images:
-                    img_tensor = img_tensor / 255.0
-
-                images[cam_name] = img_tensor
-            else:
-                # Return zeros for missing cameras
-                images[cam_name] = torch.zeros(
-                    3, self.config.image_size[0], self.config.image_size[1]
-                )
+        # Collect results
+        images = {}
+        for future in futures:
+            cam_name, img_tensor = future.result()
+            images[cam_name] = img_tensor
 
         return images
 
@@ -443,7 +471,7 @@ def create_dataloader(
     data_root: str,
     config: Optional[DatasetConfig] = None,
     batch_size: int = 4,
-    num_workers: int = 4,
+    num_workers: int = None,
     shuffle: bool = True,
 ) -> DataLoader:
     """
@@ -453,13 +481,17 @@ def create_dataloader(
         data_root: Path to data directory
         config: Dataset configuration
         batch_size: Batch size
-        num_workers: Number of data loading workers
+        num_workers: Number of data loading workers (auto-detect if None)
         shuffle: Whether to shuffle data
 
     Returns:
         DataLoader instance
     """
     dataset = GazeboOccWorldDataset(data_root, config)
+
+    # Auto-detect workers if not specified
+    if num_workers is None:
+        num_workers = max(4, cpu_count() - 2)
 
     return DataLoader(
         dataset,
@@ -469,6 +501,8 @@ def create_dataloader(
         collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
 

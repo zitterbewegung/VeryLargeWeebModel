@@ -31,6 +31,7 @@ import argparse
 import time
 from datetime import datetime
 from pathlib import Path
+from multiprocessing import cpu_count
 
 import torch
 import torch.nn as nn
@@ -105,6 +106,8 @@ def parse_args():
     # Overrides
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override batch size')
+    parser.add_argument('--num-workers', type=int, default=None,
+                        help='Data loading workers (default: auto-detect CPU count)')
     parser.add_argument('--lr', type=float, default=None,
                         help='Override learning rate')
     parser.add_argument('--epochs', type=int, default=None,
@@ -602,23 +605,31 @@ def main():
     # Create dataloaders
     batch_size = args.batch_size or getattr(config, 'data', {}).get('samples_per_gpu', 1)
 
+    # Auto-detect optimal number of workers (leave some cores for GPU/main process)
+    num_workers = args.num_workers if args.num_workers is not None else max(4, cpu_count() - 2)
+    print(f"Using {num_workers} data loading workers (CPU count: {cpu_count()})")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=dataset_collate_fn,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=num_workers > 0,  # Keep workers alive between epochs
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch batches
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=dataset_collate_fn,
         pin_memory=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     print(f"Train samples: {len(train_dataset)}")

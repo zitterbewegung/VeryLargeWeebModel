@@ -35,3 +35,6 @@ rich>=13.0.0
 
 # Quaternion handling (for 6DoF poses)
 pyquaternion>=0.9.9
+
+# Performance optimization (optional but recommended)
+numba>=0.57.0  # JIT compilation for voxelization speedup
