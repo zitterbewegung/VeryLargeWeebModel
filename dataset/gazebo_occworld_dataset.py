@@ -231,17 +231,15 @@ class GazeboOccWorldDataset(Dataset):
     def _validate_sequence(self, session_dir: str, frame_ids: List[str]) -> bool:
         """Check if all data exists for a sequence of frames."""
         for fid in frame_ids:
-            # Check occupancy
+            # Check occupancy (required)
             if not os.path.exists(os.path.join(session_dir, 'occupancy', f'{fid}_occupancy.npz')):
                 return False
 
-            # Check pose
+            # Check pose (required)
             if not os.path.exists(os.path.join(session_dir, 'poses', f'{fid}.json')):
                 return False
 
-            # Check at least front camera (others optional)
-            if not os.path.exists(os.path.join(session_dir, 'images', f'{fid}_CAM_FRONT.jpg')):
-                return False
+            # Images are optional - synthetic data may not have them
 
         return True
 
