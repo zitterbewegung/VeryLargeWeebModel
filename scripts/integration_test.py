@@ -251,7 +251,7 @@ def test_training_step(data_dir):
         # Create model
         model = SimpleOccupancyModel(config)
         optimizer = optim.Adam(model.parameters(), lr=1e-4)
-        criterion = OccupancyLoss(focal_alpha=0.95, focal_gamma=2.0, dice_weight=1.0)
+        criterion = OccupancyLoss(focal_alpha=0.99, focal_gamma=2.0, dice_weight=1.0, mean_weight=10.0)
 
         # One training step
         model.train()

@@ -301,21 +301,26 @@ class FocalLoss(nn.Module):
 
 class OccupancyLoss(nn.Module):
     """
-    Combined Focal + Dice loss for sparse occupancy prediction.
+    Combined Focal + Dice + Mean-matching loss for sparse occupancy prediction.
 
-    Uses Focal Loss (handles extreme imbalance) + Dice Loss (optimizes overlap).
+    Uses:
+    - Focal Loss: handles extreme class imbalance
+    - Dice Loss: optimizes for overlap
+    - Mean-matching: prevents collapse to all-zeros by ensuring pred mean ≈ target mean
 
     Args:
-        focal_alpha: Weight for occupied class in focal loss (0.95 = 95% weight on occupied)
-        focal_gamma: Focusing parameter for focal loss (2.0 = standard)
-        dice_weight: Weight for Dice loss component
+        focal_alpha: Weight for occupied class (0.99 for ~1% occupancy)
+        focal_gamma: Focusing parameter (2.0 = standard)
+        dice_weight: Weight for Dice loss
+        mean_weight: Weight for mean-matching regularization
         smooth: Smoothing factor for Dice loss
     """
 
-    def __init__(self, focal_alpha=0.95, focal_gamma=2.0, dice_weight=1.0, smooth=1.0):
+    def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dice_weight=1.0, mean_weight=10.0, smooth=1.0):
         super().__init__()
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         self.dice_weight = dice_weight
+        self.mean_weight = mean_weight
         self.smooth = smooth
 
     def forward(self, pred, target):
@@ -330,7 +335,13 @@ class OccupancyLoss(nn.Module):
             pred_flat.sum() + target_flat.sum() + self.smooth
         )
 
-        total_loss = focal + self.dice_weight * dice_loss
+        # Mean-matching regularization: prevents collapse to all-zeros
+        # Forces model to predict same average occupancy as target
+        pred_mean = pred.mean()
+        target_mean = target.mean()
+        mean_loss = F.mse_loss(pred_mean, target_mean)
+
+        total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
         return total_loss
 
 
@@ -355,11 +366,13 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer):
         loss = criterion(pred_occ, future_occ.float())
 
         # Debug: Check occupancy rate and prediction distribution
-        if batch_idx == 0:
+        # Log at start and every 100 batches to track potential collapse
+        if batch_idx % 100 == 0:
             occ_rate = (future_occ > 0).float().mean().item() * 100
             pred_mean = pred_occ.mean().item()
             pred_max = pred_occ.max().item()
-            print(f"  DEBUG: Occupancy rate: {occ_rate:.4f}%, Pred mean: {pred_mean:.6f}, Pred max: {pred_max:.4f}")
+            pred_min = pred_occ.min().item()
+            print(f"  DEBUG [{batch_idx}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
 
         # Backward pass
         loss.backward()
@@ -560,12 +573,13 @@ def main():
     max_epochs = args.epochs or getattr(config, 'max_epochs', 50)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
 
-    # Loss function - Focal + Dice for sparse occupancy grids
-    # focal_alpha=0.95 gives 95% weight to occupied voxels (handles ~1% occupancy)
+    # Loss function - Focal + Dice + Mean-matching for sparse occupancy grids
+    # focal_alpha=0.99 for ~1% occupancy, mean_weight=10 prevents all-zero collapse
     criterion = OccupancyLoss(
-        focal_alpha=0.95,
+        focal_alpha=0.99,
         focal_gamma=2.0,
         dice_weight=1.0,
+        mean_weight=10.0,
     )
 
     # TensorBoard
