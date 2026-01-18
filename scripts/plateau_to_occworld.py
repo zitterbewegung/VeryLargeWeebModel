@@ -24,6 +24,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing
 
 try:
     import trimesh
@@ -57,8 +59,8 @@ class PLATEAUVoxelizer:
         self.meshes = []
         self.combined_mesh = None
 
-    def load_meshes(self, input_path: str, max_meshes: int = 50) -> int:
-        """Load mesh files from directory."""
+    def load_meshes(self, input_path: str, max_meshes: int = 50, num_workers: int = None) -> int:
+        """Load mesh files from directory using parallel I/O."""
         input_path = Path(input_path)
 
         # Find mesh files
@@ -71,15 +73,31 @@ class PLATEAUVoxelizer:
         if max_meshes > 0:
             mesh_files = mesh_files[:max_meshes]
 
-        loaded = 0
-        for mesh_file in mesh_files:
+        if num_workers is None:
+            num_workers = min(8, multiprocessing.cpu_count())
+
+        def load_single_mesh(mesh_file):
+            """Load a single mesh file."""
             try:
                 mesh = trimesh.load(str(mesh_file), force='mesh')
                 if hasattr(mesh, 'vertices') and len(mesh.vertices) > 0:
+                    return mesh, None
+            except Exception as e:
+                return None, f"  Skipped {mesh_file.name}: {e}"
+            return None, None
+
+        # Load meshes in parallel using ThreadPoolExecutor (I/O bound)
+        print(f"Loading meshes with {num_workers} workers...")
+        loaded = 0
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(load_single_mesh, f): f for f in mesh_files}
+            for future in as_completed(futures):
+                mesh, error = future.result()
+                if mesh is not None:
                     self.meshes.append(mesh)
                     loaded += 1
-            except Exception as e:
-                print(f"  Skipped {mesh_file.name}: {e}")
+                elif error:
+                    print(error)
 
         print(f"Loaded {loaded} meshes")
         return loaded
@@ -456,6 +474,98 @@ def save_image(img: np.ndarray, path: str):
             np.save(path.replace('.jpg', '.npy'), img)
 
 
+def process_single_frame(args):
+    """
+    Process a single frame - designed for parallel execution.
+
+    Args:
+        args: tuple of (frame_idx, waypoint, session_dir, voxelizer, config)
+
+    Returns:
+        tuple of (frame_idx, occupied_voxel_count)
+    """
+    frame_idx, waypoint, session_dir, combined_mesh_data, config = args
+
+    # Reconstruct minimal voxelizer state for this frame
+    frame_id = f'{frame_idx:06d}'
+    pos = waypoint['position']
+    ori = waypoint['orientation']
+
+    position = np.array([pos['x'], pos['y'], pos['z']])
+    yaw = 2 * np.arctan2(ori['z'], ori['w'])
+
+    # Create occupancy grid inline (avoiding shared state issues)
+    cfg = config
+    grid_size = cfg.grid_size
+
+    range_min = np.array([
+        position[0] + cfg.point_cloud_range[0],
+        position[1] + cfg.point_cloud_range[1],
+        position[2] + cfg.point_cloud_range[2],
+    ])
+    range_max = np.array([
+        position[0] + cfg.point_cloud_range[3],
+        position[1] + cfg.point_cloud_range[4],
+        position[2] + cfg.point_cloud_range[5],
+    ])
+
+    # Use pre-computed mesh vertices from combined_mesh_data
+    vertices = combined_mesh_data
+    in_range = np.all((vertices >= range_min) & (vertices < range_max), axis=1)
+
+    if not np.any(in_range):
+        occupancy = np.zeros(grid_size, dtype=np.uint8)
+        ground_z = int((0 - cfg.point_cloud_range[2]) / cfg.voxel_size[2])
+        if 0 <= ground_z < grid_size[2]:
+            occupancy[:, :, ground_z] = 1
+    else:
+        vertices_local = vertices[in_range] - np.array([position[0], position[1], 0])
+
+        if yaw != 0:
+            cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
+            rot_matrix = np.array([
+                [cos_yaw, -sin_yaw, 0],
+                [sin_yaw, cos_yaw, 0],
+                [0, 0, 1]
+            ])
+            vertices_local = (rot_matrix @ vertices_local.T).T
+
+        voxel_size = np.array(cfg.voxel_size)
+        voxel_origin = np.array(cfg.point_cloud_range[:3])
+        voxel_indices = np.floor((vertices_local - voxel_origin) / voxel_size).astype(np.int32)
+
+        valid = np.all((voxel_indices >= 0) & (voxel_indices < grid_size), axis=1)
+        voxel_indices = voxel_indices[valid]
+
+        occupancy = np.zeros(grid_size, dtype=np.uint8)
+        if len(voxel_indices) > 0:
+            occupancy[voxel_indices[:, 0], voxel_indices[:, 1], voxel_indices[:, 2]] = 1
+
+        ground_z = int((0 - cfg.point_cloud_range[2]) / cfg.voxel_size[2])
+        if 0 <= ground_z < grid_size[2]:
+            occupancy[:, :, ground_z] = np.maximum(occupancy[:, :, ground_z], 1)
+
+    # Save occupancy
+    np.savez_compressed(
+        os.path.join(session_dir, 'occupancy', f'{frame_id}_occupancy.npz'),
+        occupancy=occupancy
+    )
+
+    # Save pose
+    with open(os.path.join(session_dir, 'poses', f'{frame_id}.json'), 'w') as f:
+        json.dump(waypoint, f, indent=2)
+
+    # Generate LiDAR
+    lidar_points = generate_lidar_from_occupancy(occupancy, position, config)
+    np.save(os.path.join(session_dir, 'lidar', f'{frame_id}_LIDAR.npy'), lidar_points)
+
+    # Generate placeholder image
+    img = create_dummy_image(frame_idx, pos)
+    save_image(img, os.path.join(session_dir, 'images', f'{frame_id}_CAM_FRONT.jpg'))
+
+    return frame_idx, np.sum(occupancy > 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Convert PLATEAU meshes to VeryLargeWeebModel training data')
     parser.add_argument('--input', '-i', required=True, help='Input mesh directory')
@@ -470,7 +580,14 @@ def main():
                         help='Allow synthetic building generation if no real meshes found (for testing only)')
     parser.add_argument('--synthetic-buildings', type=int, default=100,
                         help='Number of synthetic buildings to generate (only with --allow-synthetic)')
+    parser.add_argument('--workers', '-w', type=int, default=None,
+                        help='Number of parallel workers (default: auto-detect CPU cores)')
     args = parser.parse_args()
+
+    # Set number of workers
+    if args.workers is None:
+        args.workers = min(8, multiprocessing.cpu_count())
+    print(f"Using {args.workers} parallel workers")
 
     if not HAS_TRIMESH:
         print("Error: trimesh is required. Install with: pip install trimesh")
@@ -593,37 +710,25 @@ def main():
             else:
                 waypoints = traj_gen.generate_random_walk(args.frames, agent_type='drone')
 
-        # Generate data for each frame
-        for frame_idx, waypoint in enumerate(waypoints):
-            frame_id = f'{frame_idx:06d}'
-            pos = waypoint['position']
-            ori = waypoint['orientation']
+        # Get mesh vertices once for parallel processing
+        combined_vertices = voxelizer.combined_mesh.vertices.copy()
 
-            position = np.array([pos['x'], pos['y'], pos['z']])
-            yaw = 2 * np.arctan2(ori['z'], ori['w'])
+        # Prepare frame processing arguments
+        frame_args = [
+            (frame_idx, waypoint, session_dir, combined_vertices, config)
+            for frame_idx, waypoint in enumerate(waypoints)
+        ]
 
-            # Generate occupancy
-            occupancy = voxelizer.voxelize_at_position(position, yaw)
-            np.savez_compressed(
-                os.path.join(session_dir, 'occupancy', f'{frame_id}_occupancy.npz'),
-                occupancy=occupancy
-            )
-
-            # Save pose
-            with open(os.path.join(session_dir, 'poses', f'{frame_id}.json'), 'w') as f:
-                json.dump(waypoint, f, indent=2)
-
-            # Generate LiDAR
-            lidar_points = generate_lidar_from_occupancy(occupancy, position, config)
-            np.save(os.path.join(session_dir, 'lidar', f'{frame_id}_LIDAR.npy'), lidar_points)
-
-            # Generate placeholder image
-            img = create_dummy_image(frame_idx, pos)
-            save_image(img, os.path.join(session_dir, 'images', f'{frame_id}_CAM_FRONT.jpg'))
-
-            if (frame_idx + 1) % 50 == 0:
-                occ_count = np.sum(occupancy > 0)
-                print(f"  Frame {frame_idx + 1}/{args.frames} | Occupied voxels: {occ_count}")
+        # Process frames in parallel
+        print(f"  Processing {len(waypoints)} frames with {args.workers} workers...")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(process_single_frame, arg): arg[0] for arg in frame_args}
+            for future in as_completed(futures):
+                frame_idx, occ_count = future.result()
+                completed += 1
+                if completed % 50 == 0 or completed == len(waypoints):
+                    print(f"  Processed {completed}/{len(waypoints)} frames | Last: {occ_count} occupied voxels")
 
         print(f"  Completed: {args.frames} frames")
 
