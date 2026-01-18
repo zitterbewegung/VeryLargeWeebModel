@@ -312,3 +312,90 @@ export PATH=$HOME/ardupilot/Tools/autotest:$PATH
 | MAVLink (Instance 1) | UDP | 14560-14565 | Bidirectional |
 | GCS/MavProxy | TCP | 5760 | Bidirectional |
 | ROS 2 DDS | UDP | 7400-7500 | Multicast |
+
+---
+
+## 7. Loss Function Architecture
+
+### 7.1 The Sparse Occupancy Challenge
+
+Urban aerial occupancy grids are extremely sparse:
+- Grid size: 200×200×121 = 4.84 million voxels
+- Typical occupancy rate: ~0.83% (99.17% empty)
+- Challenge: Models can minimize loss by predicting "all empty"
+
+### 7.2 Loss Collapse Problem
+
+Standard BCE loss fails for sparse occupancy:
+```
+Before fix: Loss drops from 1.8 → 0.0001 in 500 batches
+Model learns: predict zeros everywhere → low loss, useless predictions
+```
+
+### 7.3 Solution: Focal + Dice + Mean-Matching Loss
+
+We implement a three-component loss function:
+
+```python
+L_total = L_focal + λ_dice * L_dice + λ_mean * L_mean
+```
+
+**Component 1: Focal Loss**
+Down-weights easy examples (empty voxels), focuses on hard examples:
+```
+L_focal = -α_t * (1 - p_t)^γ * log(p_t)
+```
+- α = 0.99 (99% weight on occupied voxels)
+- γ = 2.0 (focusing parameter)
+
+**Component 2: Dice Loss**
+Optimizes overlap between predictions and targets:
+```
+L_dice = 1 - (2 * intersection + smooth) / (pred_sum + target_sum + smooth)
+```
+
+**Component 3: Mean-Matching Regularization**
+Prevents all-zero collapse by enforcing density matching:
+```
+L_mean = MSE(pred.mean(), target.mean())
+```
+- λ_mean = 10.0
+- Forces model to predict ~0.8% occupancy (matching targets)
+
+### 7.4 Monitoring Training Health
+
+Key metrics to track:
+```
+DEBUG [batch]: Occ: 0.83%, Pred mean: 0.0084, min: 0.0000, max: 0.9989
+```
+
+| Metric | Healthy | Collapsing |
+|--------|---------|------------|
+| Pred mean | ~0.008 (matches target) | → 0.0001 |
+| Pred max | > 0.9 (confident positives) | → 0.01 |
+| Loss | Gradual decrease | Rapid drop to 0.0001 |
+
+---
+
+## 8. Experiment Tracking with Weights & Biases
+
+### 8.1 Integration
+
+Training supports optional wandb integration:
+```bash
+python train.py --config config/finetune_tokyo.py --wandb --wandb-project occworld-tokyo
+```
+
+### 8.2 Logged Metrics
+
+**Per-step:**
+- `train/loss` - Training loss
+- `pred/mean`, `pred/min`, `pred/max` - Prediction statistics
+
+**Per-epoch:**
+- `epoch/train_loss`, `epoch/val_loss`
+- `epoch/lr` - Learning rate
+
+**Artifacts:**
+- Model checkpoints as downloadable artifacts
+- Best model tracking

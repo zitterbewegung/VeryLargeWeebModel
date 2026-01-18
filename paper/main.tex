@@ -161,6 +161,37 @@ with causal attention ensuring predictions only attend to past observations.
     \hat{O}_{t+k} = \text{Dec}_{3D}(\text{VQ}^{-1}(\hat{z}_{t+k}))
 \end{equation}
 
+\subsection{Loss Function for Sparse Occupancy}
+
+A critical challenge in aerial occupancy prediction is extreme class imbalance: only $\sim$0.83\% of voxels are occupied (buildings, terrain), while 99.17\% represent empty airspace. Standard binary cross-entropy loss fails catastrophically---models learn to predict ``all empty'' as this trivially minimizes loss while producing useless predictions.
+
+We address this with a three-component loss function:
+
+\paragraph{Focal Loss.} We adapt focal loss~\cite{focalloss} to down-weight easy examples (empty voxels) and focus learning on hard examples (occupied voxels):
+\begin{equation}
+    \mathcal{L}_{\text{focal}} = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+\end{equation}
+where $\alpha = 0.99$ assigns 99\% weight to the occupied class and $\gamma = 2.0$ is the focusing parameter.
+
+\paragraph{Dice Loss.} To optimize spatial overlap:
+\begin{equation}
+    \mathcal{L}_{\text{dice}} = 1 - \frac{2 \sum_i p_i g_i + \epsilon}{\sum_i p_i + \sum_i g_i + \epsilon}
+\end{equation}
+where $p_i$ are predictions, $g_i$ are ground truth labels, and $\epsilon = 1$ provides numerical stability.
+
+\paragraph{Mean-Matching Regularization.} To prevent collapse to all-zeros, we enforce that predicted occupancy density matches target density:
+\begin{equation}
+    \mathcal{L}_{\text{mean}} = \left( \frac{1}{N}\sum_i p_i - \frac{1}{N}\sum_i g_i \right)^2
+\end{equation}
+
+The total loss combines these components:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{focal}} + \lambda_{\text{dice}} \mathcal{L}_{\text{dice}} + \lambda_{\text{mean}} \mathcal{L}_{\text{mean}}
+\end{equation}
+with $\lambda_{\text{dice}} = 1.0$ and $\lambda_{\text{mean}} = 10.0$.
+
+This formulation ensures the model cannot take shortcuts: the mean-matching term forces prediction of $\sim$0.8\% occupied voxels, while focal loss ensures those predictions are placed correctly rather than randomly distributed.
+
 \subsection{Data Generation Pipeline}
 
 A key contribution is our pipeline for generating training data from 3D city models:
@@ -251,11 +282,14 @@ For aerial-specific supervision:
 \begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
     \item \textbf{History frames}: 4
     \item \textbf{Future frames}: 6
-    \item \textbf{Batch size}: 1 per GPU
+    \item \textbf{Batch size}: 3 per GPU (A100-40GB)
     \item \textbf{Optimizer}: AdamW, lr=$10^{-4}$, weight decay=0.01
-    \item \textbf{Schedule}: Cosine annealing, warmup=100 iterations
+    \item \textbf{Schedule}: Cosine annealing to $10^{-6}$
+    \item \textbf{Gradient clipping}: max norm = 35
     \item \textbf{Epochs}: 50
-    \item \textbf{Hardware}: NVIDIA GPU with 24GB+ VRAM
+    \item \textbf{Hardware}: NVIDIA A100-40GB
+    \item \textbf{Loss}: Focal ($\alpha$=0.99, $\gamma$=2) + Dice + Mean-matching ($\lambda$=10)
+    \item \textbf{Tracking}: Weights \& Biases for experiment management
 \end{itemize}
 
 \subsection{Evaluation Metrics}
@@ -291,6 +325,16 @@ Copy-Last & 45.2 & 32.4 & -- \\
 Results pending full training completion. Preliminary experiments show the model successfully learns urban structure representations, with loss converging appropriately when sufficient data diversity is provided.
 
 \subsection{Ablation Studies}
+
+\paragraph{Loss Function Design.} The choice of loss function is critical for sparse occupancy:
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
+    \item \textbf{BCE only}: Model collapses to all-zeros within 500 batches (loss $\rightarrow$ 0.0001)
+    \item \textbf{Weighted BCE} (pos\_weight=10): Still collapses, insufficient for 99\% imbalance
+    \item \textbf{Focal + Dice}: Slower collapse, but eventually degrades
+    \item \textbf{Focal + Dice + Mean-matching}: Stable training, pred\_mean $\approx$ target\_mean
+\end{itemize}
+
+The mean-matching term is essential: it forces the model to predict approximately 0.8\% occupied voxels, preventing the trivial all-zeros solution.
 
 \paragraph{Data Diversity.} Training with limited synthetic data (10 sessions, $\sim$1,000 frames) results in rapid overfitting (loss $\rightarrow$ 0 by epoch 8). Expanding to 70 sessions with mixed trajectory patterns prevents this degenerate solution.
 
@@ -409,6 +453,16 @@ Past, present, and future of simultaneous localization and mapping.
 \bibitem{trimesh}
 Trimesh: Python library for loading and using triangular meshes.
 \url{https://trimsh.org/}.
+
+\bibitem{focalloss}
+Lin, T.Y., Goyal, P., Girshick, R., He, K., \& Dollár, P. (2017).
+Focal loss for dense object detection.
+\textit{ICCV}.
+
+\bibitem{wandb}
+Biewald, L. (2020).
+Experiment Tracking with Weights and Biases.
+\url{https://www.wandb.com/}.
 
 \end{thebibliography}
 
