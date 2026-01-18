@@ -53,10 +53,10 @@ if HAS_NUMBA:
     ) -> np.ndarray:
         """Numba-optimized voxelization kernel (5-10x faster)."""
         for i in prange(vertices.shape[0]):
-            # Calculate voxel indices
-            vx = int((vertices[i, 0] - voxel_origin[0]) / voxel_size[0])
-            vy = int((vertices[i, 1] - voxel_origin[1]) / voxel_size[1])
-            vz = int((vertices[i, 2] - voxel_origin[2]) / voxel_size[2])
+            # Calculate voxel indices (use floor to match numpy behavior)
+            vx = int(np.floor((vertices[i, 0] - voxel_origin[0]) / voxel_size[0]))
+            vy = int(np.floor((vertices[i, 1] - voxel_origin[1]) / voxel_size[1]))
+            vz = int(np.floor((vertices[i, 2] - voxel_origin[2]) / voxel_size[2]))
 
             # Bounds check and set
             if 0 <= vx < grid_size[0] and 0 <= vy < grid_size[1] and 0 <= vz < grid_size[2]:
