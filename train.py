@@ -58,6 +58,14 @@ from dataset.gazebo_occworld_dataset import (
     create_dataloader,
 )
 
+# Import 6DoF model
+from models import (
+    OccWorld6DoF,
+    OccWorld6DoFConfig,
+    OccWorld6DoFLoss,
+    count_parameters,
+)
+
 # Try to import nuScenes dataset
 try:
     from dataset.nuscenes_occworld_dataset import (
@@ -107,6 +115,13 @@ def parse_args():
                         help='Run evaluation only')
     parser.add_argument('--use-occworld', action='store_true',
                         help='Use OccWorld library if installed')
+
+    # Model type
+    parser.add_argument('--model-type', type=str, default='simple',
+                        choices=['simple', '6dof'],
+                        help='Model type: simple (occupancy only) or 6dof (full 6DoF prediction)')
+    parser.add_argument('--use-transformer', action='store_true',
+                        help='Use Transformer instead of LSTM for temporal modeling (6dof only)')
 
     # Weights & Biases
     parser.add_argument('--wandb', action='store_true',
@@ -364,7 +379,7 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False):
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -379,10 +394,27 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Forward pass
         optimizer.zero_grad()
-        pred_occ = model(history_occ, history_poses, future_poses)
 
-        # Compute loss
-        loss = criterion(pred_occ, future_occ.float())
+        if is_6dof:
+            # 6DoF model returns dict of outputs
+            outputs = model(history_occ, history_poses, future_poses)
+            pred_occ = outputs['future_occupancy']
+
+            # 6DoF loss expects outputs and targets dicts
+            targets = {
+                'future_occupancy': future_occ.float(),
+                'future_poses': future_poses,
+            }
+            losses = criterion(outputs, targets)
+            loss = losses['total']
+
+            # Get debug metrics from loss function
+            debug_metrics = criterion.get_debug_metrics()
+        else:
+            # Simple model returns just occupancy
+            pred_occ = model(history_occ, history_poses, future_poses)
+            loss = criterion(pred_occ, future_occ.float())
+            debug_metrics = {}
 
         # Debug: Check occupancy rate and prediction distribution
         # Log at start and every 100 batches to track potential collapse
@@ -393,14 +425,30 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             pred_min = pred_occ.min().item()
             print(f"  DEBUG [{batch_idx}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
 
+            # 6DoF specific debug info
+            if is_6dof and debug_metrics:
+                print(f"    6DoF: pose_std={debug_metrics.get('pose_pos_std', 0):.4f}, "
+                      f"unc_mean={debug_metrics.get('uncertainty_mean', 0):.4f}, "
+                      f"emb_std={debug_metrics.get('embedding_std', 0):.4f}")
+
             # Log prediction stats to wandb
             if use_wandb:
-                wandb.log({
+                log_dict = {
                     'pred/mean': pred_mean,
                     'pred/min': pred_min,
                     'pred/max': pred_max,
                     'pred/occupancy_rate': occ_rate,
-                }, commit=False)
+                }
+                # Add 6DoF metrics
+                if is_6dof:
+                    for k, v in debug_metrics.items():
+                        log_dict[f'6dof/{k}'] = v
+                    # Log individual loss components
+                    for k, v in losses.items():
+                        if k != 'total':
+                            log_dict[f'loss/{k}'] = v.item()
+
+                wandb.log(log_dict, commit=False)
 
         # Backward pass
         loss.backward()
@@ -412,11 +460,18 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Log
         if batch_idx % 10 == 0:
-            print(f"  Epoch {epoch} [{batch_idx}/{len(dataloader)}] Loss: {loss.item():.4f}")
+            loss_str = f"Loss: {loss.item():.4f}"
+            if is_6dof:
+                loss_str += f" (occ={losses['occ'].item():.3f}, pose={losses['pose'].item():.3f})"
+            print(f"  Epoch {epoch} [{batch_idx}/{len(dataloader)}] {loss_str}")
 
         # TensorBoard
         global_step = epoch * len(dataloader) + batch_idx
         writer.add_scalar('Train/Loss', loss.item(), global_step)
+        if is_6dof:
+            for k, v in losses.items():
+                if k != 'total':
+                    writer.add_scalar(f'Train/Loss_{k}', v.item(), global_step)
 
         # Weights & Biases
         if use_wandb:
@@ -429,7 +484,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     return avg_loss
 
 
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, is_6dof=False):
     """Validate model."""
     model.eval()
     total_loss = 0
@@ -442,8 +497,17 @@ def validate(model, dataloader, criterion, device):
             history_poses = batch['history_poses'].to(device)
             future_poses = batch['future_poses'].to(device)
 
-            pred_occ = model(history_occ, history_poses, future_poses)
-            loss = criterion(pred_occ, future_occ.float())
+            if is_6dof:
+                outputs = model(history_occ, history_poses, future_poses)
+                targets = {
+                    'future_occupancy': future_occ.float(),
+                    'future_poses': future_poses,
+                }
+                losses = criterion(outputs, targets)
+                loss = losses['total']
+            else:
+                pred_occ = model(history_occ, history_poses, future_poses)
+                loss = criterion(pred_occ, future_occ.float())
 
             total_loss += loss.item()
             num_batches += 1
@@ -561,13 +625,28 @@ def main():
     print(f"Val samples: {len(val_dataset)}")
 
     # Create model
-    print("Creating model...")
+    print(f"Creating model (type: {args.model_type})...")
     if use_occworld and args.use_occworld:
         # Use OccWorld model
         model_cfg = getattr(config, 'model', {})
         model = OccWorldModel(**model_cfg)
+    elif args.model_type == '6dof':
+        # Use 6DoF model with full pose prediction
+        grid_size = tuple(getattr(config, 'grid_size', [200, 200, 121]))
+        model_config = OccWorld6DoFConfig(
+            grid_size=grid_size,
+            history_frames=getattr(config, 'history_frames', 4),
+            future_frames=getattr(config, 'future_frames', 6),
+            use_transformer=args.use_transformer,
+            pose_dim=13,  # x,y,z + quat(4) + lin_vel(3) + ang_vel(3)
+            enable_uncertainty=True,
+            enable_relocalization=True,
+            enable_place_recognition=True,
+        )
+        model = OccWorld6DoF(model_config)
+        print(f"  6DoF Config: grid={grid_size}, transformer={args.use_transformer}")
     else:
-        # Use simple standalone model
+        # Use simple standalone model (occupancy only)
         model = SimpleOccupancyModel(config)
 
     model = model.to(device)
@@ -608,14 +687,32 @@ def main():
     max_epochs = args.epochs or getattr(config, 'max_epochs', 50)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
 
-    # Loss function - Focal + Dice + Mean-matching for sparse occupancy grids
-    # focal_alpha=0.99 for ~1% occupancy, mean_weight=10 prevents all-zero collapse
-    criterion = OccupancyLoss(
-        focal_alpha=0.99,
-        focal_gamma=2.0,
-        dice_weight=1.0,
-        mean_weight=10.0,
-    )
+    # Loss function - depends on model type
+    if args.model_type == '6dof':
+        # 6DoF loss with anti-collapse safeguards
+        criterion = OccWorld6DoFLoss(
+            occ_weight=1.0,
+            pose_weight=0.5,
+            uncertainty_weight=0.1,
+            reloc_weight=0.2,
+            place_weight=0.1,
+            focal_alpha=0.99,
+            focal_gamma=2.0,
+            dice_weight=1.0,
+            mean_weight=10.0,
+            pose_variance_weight=1.0,
+            min_pose_std=0.01,
+        )
+        print("  Using OccWorld6DoFLoss with anti-collapse safeguards")
+    else:
+        # Simple occupancy loss - Focal + Dice + Mean-matching
+        # focal_alpha=0.99 for ~1% occupancy, mean_weight=10 prevents all-zero collapse
+        criterion = OccupancyLoss(
+            focal_alpha=0.99,
+            focal_gamma=2.0,
+            dice_weight=1.0,
+            mean_weight=10.0,
+        )
 
     # TensorBoard
     writer = SummaryWriter(log_dir=str(work_dir / 'logs'))
@@ -637,8 +734,11 @@ def main():
             'point_cloud_range': getattr(config, 'point_cloud_range', None),
             'voxel_size': getattr(config, 'voxel_size', None),
             # Model
-            'model_type': 'SimpleOccupancyModel' if not (use_occworld and args.use_occworld) else 'TransVQVAE',
+            'model_type': 'OccWorld6DoF' if args.model_type == '6dof' else (
+                'TransVQVAE' if (use_occworld and args.use_occworld) else 'SimpleOccupancyModel'
+            ),
             'num_params': num_params,
+            'use_transformer': args.use_transformer if args.model_type == '6dof' else False,
             # Training
             'lr': lr,
             'weight_decay': weight_decay,
@@ -646,7 +746,7 @@ def main():
             'optimizer': 'AdamW',
             'scheduler': 'CosineAnnealingLR',
             # Loss
-            'loss_type': 'Focal+Dice+MeanMatch',
+            'loss_type': 'OccWorld6DoFLoss' if args.model_type == '6dof' else 'Focal+Dice+MeanMatch',
             'focal_alpha': 0.99,
             'focal_gamma': 2.0,
             'dice_weight': 1.0,
@@ -691,15 +791,17 @@ def main():
     print(f"Starting training for {max_epochs} epochs (from epoch {start_epoch})")
     print("=" * 60)
 
+    is_6dof = args.model_type == '6dof'
+
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
 
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
-                                  device, epoch, writer, use_wandb)
+                                  device, epoch, writer, use_wandb, is_6dof)
 
         # Validate
-        val_loss = validate(model, val_loader, criterion, device)
+        val_loss = validate(model, val_loader, criterion, device, is_6dof)
 
         # Update scheduler
         scheduler.step()
