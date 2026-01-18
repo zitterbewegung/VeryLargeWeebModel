@@ -625,15 +625,15 @@ class FocalLoss(nn.Module):
 class OccWorld6DoFLoss(nn.Module):
     """
     Combined loss for OccWorld 6DoF training.
-    
+
     Includes:
     - Focal + Dice + Mean-matching for occupancy (handles sparse grids)
-    - Smooth L1 for pose prediction
-    - NLL for uncertainty-aware pose loss
+    - Smooth L1 for pose prediction + variance regularization (prevents constant output)
+    - NLL for uncertainty-aware pose loss + bounds (prevents sigma collapse)
     - L2 for relocalization
-    - Triplet/contrastive for place recognition
+    - Triplet loss for place recognition (prevents embedding collapse)
     """
-    
+
     def __init__(
         self,
         occ_weight: float = 1.0,
@@ -645,19 +645,35 @@ class OccWorld6DoFLoss(nn.Module):
         focal_gamma: float = 2.0,
         dice_weight: float = 1.0,
         mean_weight: float = 10.0,
+        # Anti-collapse parameters
+        pose_variance_weight: float = 1.0,  # Penalize low variance in pose predictions
+        min_pose_std: float = 0.01,  # Minimum expected std for poses
+        uncertainty_min: float = 0.001,  # Clamp sigma lower bound
+        uncertainty_max: float = 10.0,  # Clamp sigma upper bound
+        triplet_margin: float = 0.2,  # Margin for triplet loss
     ):
         super().__init__()
-        
+
         self.occ_weight = occ_weight
         self.pose_weight = pose_weight
         self.uncertainty_weight = uncertainty_weight
         self.reloc_weight = reloc_weight
         self.place_weight = place_weight
-        
+
         # Focal loss for occupancy
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
+
+        # Anti-collapse parameters
+        self.pose_variance_weight = pose_variance_weight
+        self.min_pose_std = min_pose_std
+        self.uncertainty_min = uncertainty_min
+        self.uncertainty_max = uncertainty_max
+        self.triplet_margin = triplet_margin
+
+        # For tracking training health
+        self.debug_metrics = {}
     
     def forward(
         self,
@@ -718,40 +734,146 @@ class OccWorld6DoFLoss(nn.Module):
         vel_loss = F.smooth_l1_loss(pred_vel, target_vel)
         
         pose_loss = pos_loss + quat_loss + 0.5 * vel_loss
+
+        # === ANTI-COLLAPSE: Pose variance regularization ===
+        # Penalize if predictions have very low variance (constant output collapse)
+        pred_pos_std = pred_pos.std()
+        pred_vel_std = pred_vel.std()
+
+        # If std drops below threshold, add penalty
+        variance_penalty = torch.tensor(0.0, device=pred_poses.device)
+        if pred_pos_std < self.min_pose_std:
+            variance_penalty = variance_penalty + (self.min_pose_std - pred_pos_std) ** 2
+        if pred_vel_std < self.min_pose_std:
+            variance_penalty = variance_penalty + (self.min_pose_std - pred_vel_std) ** 2
+
+        pose_loss = pose_loss + self.pose_variance_weight * variance_penalty
         losses['pose'] = pose_loss * self.pose_weight
-        
+
+        # Track debug metrics
+        self.debug_metrics['pose_pos_std'] = pred_pos_std.item()
+        self.debug_metrics['pose_vel_std'] = pred_vel_std.item()
+        self.debug_metrics['pose_variance_penalty'] = variance_penalty.item()
+
         # Uncertainty loss (if available)
         if 'uncertainty' in outputs and self.uncertainty_weight > 0:
             uncertainty = outputs['uncertainty']
-            
+
+            # === ANTI-COLLAPSE: Clamp uncertainty to bounds ===
+            uncertainty_clamped = uncertainty.clamp(
+                min=self.uncertainty_min,
+                max=self.uncertainty_max
+            )
+
             # Negative log-likelihood with learned uncertainty
             # L = 0.5 * (error^2 / sigma^2 + log(sigma^2))
             pos_error = (pred_pos - target_pos) ** 2
-            pos_sigma = uncertainty[..., :3]
-            pos_nll = 0.5 * (pos_error / (pos_sigma + 1e-6) + torch.log(pos_sigma + 1e-6))
-            
-            losses['uncertainty'] = pos_nll.mean() * self.uncertainty_weight
-        
+            pos_sigma = uncertainty_clamped[..., :3]
+            pos_nll = 0.5 * (pos_error / pos_sigma + torch.log(pos_sigma))
+
+            # Regularize uncertainty to stay in reasonable range (not too large or small)
+            uncertainty_reg = ((uncertainty - 1.0) ** 2).mean() * 0.01
+
+            losses['uncertainty'] = (pos_nll.mean() + uncertainty_reg) * self.uncertainty_weight
+
+            # Track debug metrics
+            self.debug_metrics['uncertainty_mean'] = uncertainty.mean().item()
+            self.debug_metrics['uncertainty_min'] = uncertainty.min().item()
+            self.debug_metrics['uncertainty_max'] = uncertainty.max().item()
+
         # Relocalization loss (if available)
         if 'global_pose' in outputs and 'global_pose' in targets and self.reloc_weight > 0:
             pred_global = outputs['global_pose']
             target_global = targets['global_pose']
-            
+
             reloc_loss = F.smooth_l1_loss(pred_global, target_global)
             losses['reloc'] = reloc_loss * self.reloc_weight
-        
+
         # Place recognition loss (if available)
         if 'place_embedding' in outputs and self.place_weight > 0:
-            # Simple embedding regularization (real training would use triplet loss)
-            embeddings = outputs['place_embedding']
-            # Encourage normalized embeddings (already done in head, but regularize)
+            embeddings = outputs['place_embedding']  # [B, D]
+
+            # === ANTI-COLLAPSE: Triplet loss for embeddings ===
+            # Require batch size >= 2 for triplet loss
+            if embeddings.shape[0] >= 2:
+                # In-batch hard negative mining
+                # Treat sequential samples as positives (nearby in time/space)
+                # and distant samples as negatives
+                triplet_loss = self._compute_triplet_loss(embeddings)
+            else:
+                triplet_loss = torch.tensor(0.0, device=embeddings.device)
+
+            # Also keep norm regularization
             norm_loss = (embeddings.norm(dim=-1) - 1).pow(2).mean()
-            losses['place'] = norm_loss * self.place_weight
-        
+
+            losses['place'] = (triplet_loss + 0.1 * norm_loss) * self.place_weight
+
+            # Track debug metrics
+            self.debug_metrics['embedding_std'] = embeddings.std().item()
+            self.debug_metrics['embedding_mean_norm'] = embeddings.norm(dim=-1).mean().item()
+
         # Total loss
         losses['total'] = sum(v for v in losses.values())
-        
+
         return losses
+
+    def _compute_triplet_loss(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """
+        Compute triplet loss with in-batch hard negative mining.
+
+        For each anchor, the positive is an adjacent sample (assuming temporal
+        ordering in batch), and the negative is the hardest non-adjacent sample.
+        """
+        B, D = embeddings.shape
+        if B < 3:
+            # Need at least 3 samples for triplet
+            return torch.tensor(0.0, device=embeddings.device)
+
+        # Compute pairwise distances
+        distances = torch.cdist(embeddings, embeddings, p=2)  # [B, B]
+
+        total_loss = torch.tensor(0.0, device=embeddings.device)
+        num_triplets = 0
+
+        for i in range(B):
+            # Anchor
+            anchor_idx = i
+
+            # Positive: adjacent sample (circular)
+            pos_idx = (i + 1) % B
+
+            # Negative: hardest non-adjacent sample
+            # Mask out anchor and positive
+            neg_mask = torch.ones(B, dtype=torch.bool, device=embeddings.device)
+            neg_mask[anchor_idx] = False
+            neg_mask[pos_idx] = False
+            if (i - 1) >= 0:
+                neg_mask[i - 1] = False  # Also exclude other adjacent
+
+            if neg_mask.sum() == 0:
+                continue
+
+            # Hard negative: closest non-adjacent sample
+            neg_distances = distances[anchor_idx].clone()
+            neg_distances[~neg_mask] = float('inf')
+            neg_idx = neg_distances.argmin()
+
+            # Triplet loss: max(0, d(a,p) - d(a,n) + margin)
+            d_ap = distances[anchor_idx, pos_idx]
+            d_an = distances[anchor_idx, neg_idx]
+
+            triplet = F.relu(d_ap - d_an + self.triplet_margin)
+            total_loss = total_loss + triplet
+            num_triplets += 1
+
+        if num_triplets > 0:
+            total_loss = total_loss / num_triplets
+
+        return total_loss
+
+    def get_debug_metrics(self) -> Dict[str, float]:
+        """Return current debug metrics for logging."""
+        return self.debug_metrics.copy()
 
 
 def count_parameters(model: nn.Module) -> Dict[str, int]:
