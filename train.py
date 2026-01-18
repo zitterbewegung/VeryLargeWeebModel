@@ -262,33 +262,67 @@ class SimpleOccupancyModel(nn.Module):
         return torch.sigmoid(future_occ)
 
 
-class OccupancyLoss(nn.Module):
+class FocalLoss(nn.Module):
     """
-    Combined loss for sparse occupancy prediction.
+    Focal Loss for extremely imbalanced binary classification.
 
-    Uses weighted BCE + Dice loss to handle highly imbalanced occupancy grids
-    where most voxels are empty (unoccupied).
+    Focal loss down-weights easy examples (empty voxels) and focuses on hard examples
+    (occupied voxels). Much better than weighted BCE for sparse occupancy grids.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
 
     Args:
-        bce_weight: Weight for BCE loss component
-        dice_weight: Weight for Dice loss component
-        pos_weight: Weight multiplier for occupied voxels in BCE (higher = more penalty for missing occupied)
-        smooth: Smoothing factor for Dice loss to avoid division by zero
+        alpha: Weight for positive class (occupied). Set high for sparse data (e.g., 0.95 for 1% occupancy)
+        gamma: Focusing parameter. Higher = more focus on hard examples. Default 2.0 works well.
     """
 
-    def __init__(self, bce_weight=1.0, dice_weight=1.0, pos_weight=10.0, smooth=1.0):
+    def __init__(self, alpha=0.95, gamma=2.0):
         super().__init__()
-        self.bce_weight = bce_weight
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, pred, target):
+        # Clamp predictions to avoid log(0)
+        pred = pred.clamp(min=1e-7, max=1 - 1e-7)
+
+        # Binary cross entropy per element
+        bce = -target * torch.log(pred) - (1 - target) * torch.log(1 - pred)
+
+        # Focal weight: (1 - p_t)^gamma
+        p_t = torch.where(target == 1, pred, 1 - pred)
+        focal_weight = (1 - p_t) ** self.gamma
+
+        # Alpha weight: alpha for positive, (1-alpha) for negative
+        alpha_weight = torch.where(target == 1, self.alpha, 1 - self.alpha)
+
+        focal_loss = alpha_weight * focal_weight * bce
+        return focal_loss.mean()
+
+
+class OccupancyLoss(nn.Module):
+    """
+    Combined Focal + Dice loss for sparse occupancy prediction.
+
+    Uses Focal Loss (handles extreme imbalance) + Dice Loss (optimizes overlap).
+
+    Args:
+        focal_alpha: Weight for occupied class in focal loss (0.95 = 95% weight on occupied)
+        focal_gamma: Focusing parameter for focal loss (2.0 = standard)
+        dice_weight: Weight for Dice loss component
+        smooth: Smoothing factor for Dice loss
+    """
+
+    def __init__(self, focal_alpha=0.95, focal_gamma=2.0, dice_weight=1.0, smooth=1.0):
+        super().__init__()
+        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         self.dice_weight = dice_weight
-        self.pos_weight = pos_weight
         self.smooth = smooth
 
     def forward(self, pred, target):
-        # Weighted BCE: occupied voxels get pos_weight, empty voxels get 1.0
-        weight = target * (self.pos_weight - 1) + 1  # pos_weight for occupied, 1 for empty
-        bce_loss = F.binary_cross_entropy(pred, target, weight=weight, reduction='mean')
+        # Focal loss: handles class imbalance, focuses on hard examples
+        focal = self.focal_loss(pred, target)
 
-        # Dice loss: better handles class imbalance
+        # Dice loss: optimizes for overlap, complements focal loss
         pred_flat = pred.view(-1)
         target_flat = target.view(-1)
         intersection = (pred_flat * target_flat).sum()
@@ -296,7 +330,7 @@ class OccupancyLoss(nn.Module):
             pred_flat.sum() + target_flat.sum() + self.smooth
         )
 
-        total_loss = self.bce_weight * bce_loss + self.dice_weight * dice_loss
+        total_loss = focal + self.dice_weight * dice_loss
         return total_loss
 
 
@@ -526,11 +560,12 @@ def main():
     max_epochs = args.epochs or getattr(config, 'max_epochs', 50)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
 
-    # Loss function - weighted BCE + Dice for sparse occupancy grids
+    # Loss function - Focal + Dice for sparse occupancy grids
+    # focal_alpha=0.95 gives 95% weight to occupied voxels (handles ~1% occupancy)
     criterion = OccupancyLoss(
-        bce_weight=1.0,
+        focal_alpha=0.95,
+        focal_gamma=2.0,
         dice_weight=1.0,
-        pos_weight=10.0,  # 10x penalty for missing occupied voxels
     )
 
     # TensorBoard
