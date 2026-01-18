@@ -25,7 +25,8 @@ pillow>=9.0.0
 # Visualization & Experiment Tracking
 matplotlib>=3.7.0
 tensorboard>=2.12.0
-wandb>=0.15.0  # Optional: pip install wandb && wandb login
+wandb>=0.15.0
+weave>=0.50.0  # W&B tracing/debugging for ML pipelines
 
 # Utilities
 tqdm>=4.65.0
