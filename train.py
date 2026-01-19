@@ -688,31 +688,31 @@ def main():
     # Create dataloaders
     batch_size = args.batch_size or getattr(config, 'data', {}).get('samples_per_gpu', 1)
 
-    # Number of data loading workers (0 = single-threaded, safer for debugging)
-    num_workers = args.num_workers
-    print(f"Using {num_workers} data loading workers (CPU count: {cpu_count()})")
+    # FORCE single-threaded: num_workers=0, no multiprocessing
+    num_workers = 0  # Hardcoded to avoid any multiprocessing issues
+    print(f"Using {num_workers} data loading workers (FORCED single-threaded)")
+
+    # Also limit PyTorch threads
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=0,  # FORCED: no multiprocessing
         collate_fn=dataset_collate_fn,
-        pin_memory=True,
+        pin_memory=False,  # Disabled for single-threaded
         drop_last=True,
-        persistent_workers=num_workers > 0,  # Keep workers alive between epochs
-        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch batches
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=0,  # FORCED: no multiprocessing
         collate_fn=dataset_collate_fn,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None,
+        pin_memory=False,  # Disabled for single-threaded
     )
 
     print(f"Train samples: {len(train_dataset)}")
