@@ -38,7 +38,6 @@ import json
 from glob import glob
 from typing import Dict, List, Optional, Tuple, Callable, Any
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
 
 import numpy as np
@@ -46,19 +45,6 @@ import cv2
 cv2.setNumThreads(0)  # Disable OpenCV threading to avoid thread spawn errors
 import torch
 from torch.utils.data import Dataset, DataLoader
-
-# Thread pool for parallel I/O (shared across dataset instances)
-_IO_EXECUTOR: Optional[ThreadPoolExecutor] = None
-
-
-def _get_io_executor(max_workers: int = None) -> ThreadPoolExecutor:
-    """Get or create shared I/O thread pool."""
-    global _IO_EXECUTOR
-    if _IO_EXECUTOR is None:
-        # Default to 1 worker (single-threaded) for easier debugging
-        workers = max_workers or 1
-        _IO_EXECUTOR = ThreadPoolExecutor(max_workers=workers)
-    return _IO_EXECUTOR
 
 
 @dataclass
@@ -267,7 +253,7 @@ class GazeboOccWorldDataset(Dataset):
         """
         Load and return a training sample.
 
-        Uses parallel I/O to load all frame data concurrently for better performance.
+        Loads data sequentially to avoid thread spawning issues.
 
         Args:
             idx: Sample index
@@ -285,45 +271,16 @@ class GazeboOccWorldDataset(Dataset):
         history_frames = frames[:n_history]
         future_frames = frames[n_history:]
 
-        executor = _get_io_executor()
-
-        # Submit all I/O operations in parallel
+        # Load all data sequentially (no threading to avoid deadlocks)
         # History: images, lidar, poses, occupancy
-        history_image_futures = [
-            executor.submit(self._load_images, session_dir, fid)
-            for fid in history_frames
-        ]
-        history_lidar_futures = [
-            executor.submit(self._load_lidar, session_dir, fid)
-            for fid in history_frames
-        ]
-        history_pose_futures = [
-            executor.submit(self._load_pose, session_dir, fid)
-            for fid in history_frames
-        ]
-        history_occ_futures = [
-            executor.submit(self._load_occupancy, session_dir, fid)
-            for fid in history_frames
-        ]
+        history_images = [self._load_images(session_dir, fid) for fid in history_frames]
+        history_lidar = [self._load_lidar(session_dir, fid) for fid in history_frames]
+        history_poses = [self._load_pose(session_dir, fid) for fid in history_frames]
+        history_occupancy = [self._load_occupancy(session_dir, fid) for fid in history_frames]
 
         # Future: poses and occupancy only
-        future_pose_futures = [
-            executor.submit(self._load_pose, session_dir, fid)
-            for fid in future_frames
-        ]
-        future_occ_futures = [
-            executor.submit(self._load_occupancy, session_dir, fid)
-            for fid in future_frames
-        ]
-
-        # Collect results (maintains order)
-        history_images = [f.result() for f in history_image_futures]
-        history_lidar = [f.result() for f in history_lidar_futures]
-        history_poses = [f.result() for f in history_pose_futures]
-        history_occupancy = [f.result() for f in history_occ_futures]
-
-        future_poses = [f.result() for f in future_pose_futures]
-        future_occupancy = [f.result() for f in future_occ_futures]
+        future_poses = [self._load_pose(session_dir, fid) for fid in future_frames]
+        future_occupancy = [self._load_occupancy(session_dir, fid) for fid in future_frames]
 
         # Build sample dict
         sample = {
@@ -364,19 +321,11 @@ class GazeboOccWorldDataset(Dataset):
             )
 
     def _load_images(self, session_dir: str, frame_id: str) -> Dict[str, torch.Tensor]:
-        """Load all camera images for a frame (parallel across 6 cameras)."""
-        executor = _get_io_executor()
-
-        # Submit all camera loads in parallel
-        futures = []
+        """Load all camera images for a frame (sequential to avoid threading issues)."""
+        images = {}
         for cam_name in self.CAMERA_NAMES:
             img_path = os.path.join(session_dir, 'images', f'{frame_id}_{cam_name}.jpg')
-            futures.append(executor.submit(self._load_single_image, img_path, cam_name))
-
-        # Collect results
-        images = {}
-        for future in futures:
-            cam_name, img_tensor = future.result()
+            _, img_tensor = self._load_single_image(img_path, cam_name)
             images[cam_name] = img_tensor
 
         return images
