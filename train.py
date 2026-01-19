@@ -200,10 +200,13 @@ def try_import_occworld():
 
 class SimpleOccupancyModel(nn.Module):
     """
-    Simplified occupancy prediction model for standalone training.
+    3DoF Occupancy prediction model for ground vehicles.
 
-    This is a basic encoder-decoder model for occupancy prediction.
-    For full OccWorld functionality, install the OccWorld library.
+    Predicts:
+    - Future occupancy grids
+    - Future 3DoF poses (x, y, yaw) for ground vehicles
+
+    For full 6DoF (aerial vehicles), use OccWorld6DoF model instead.
     """
 
     def __init__(self, config):
@@ -216,7 +219,13 @@ class SimpleOccupancyModel(nn.Module):
         grid_size = getattr(config, 'grid_size', [200, 200, 121])
         self.grid_x, self.grid_y, self.grid_z = grid_size
 
-        # Simple 3D encoder
+        # 3DoF: x, y, yaw (for ground vehicles)
+        # vs 6DoF: x, y, z, qx, qy, qz, qw
+        self.pose_dim = 13  # Input pose dim (full format for compatibility)
+        self.output_pose_dim = 13  # Output all pose components
+        self.latent_dim = 256
+
+        # Simple 3D encoder for occupancy
         self.encoder = nn.Sequential(
             nn.Conv3d(self.history_frames, 64, kernel_size=3, padding=1),
             nn.BatchNorm3d(64),
@@ -229,16 +238,38 @@ class SimpleOccupancyModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Temporal modeling (simple LSTM)
+        # Adaptive pooling for fixed-size output
+        self.adaptive_pool = nn.AdaptiveAvgPool3d((4, 4, 4))
+
+        # Pose encoder - processes history poses
+        self.pose_encoder = nn.Sequential(
+            nn.Linear(self.pose_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.latent_dim),
+        )
+
+        # Fusion layer - combines spatial and pose features
+        spatial_features = 256 * 4 * 4 * 4
+        self.spatial_proj = nn.Linear(spatial_features, self.latent_dim)
+        self.fusion = nn.Sequential(
+            nn.Linear(self.latent_dim * 2, self.latent_dim),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # Temporal modeling (LSTM)
         self.temporal = nn.LSTM(
-            input_size=256,
-            hidden_size=256,
+            input_size=self.latent_dim,
+            hidden_size=self.latent_dim,
             num_layers=2,
             batch_first=True,
             dropout=0.1,
         )
 
-        # Decoder
+        # Decoder for future occupancy
+        self.to_spatial = nn.Linear(self.latent_dim, 256 * 4 * 4 * 4)
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(256, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(128),
@@ -249,13 +280,9 @@ class SimpleOccupancyModel(nn.Module):
             nn.Conv3d(64, self.future_frames, kernel_size=3, padding=1),
         )
 
-        # Pose encoder
-        self.pose_encoder = nn.Sequential(
-            nn.Linear(13, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-        )
+        # Pose decoder - predicts future poses autoregressively
+        self.pose_gru = nn.GRUCell(self.pose_dim + self.latent_dim, self.latent_dim)
+        self.pose_out = nn.Linear(self.latent_dim, self.output_pose_dim)
 
     def forward(self, history_occupancy, history_poses=None, future_poses=None):
         """
@@ -263,48 +290,88 @@ class SimpleOccupancyModel(nn.Module):
 
         Args:
             history_occupancy: [B, T_h, X, Y, Z] - Past occupancy grids
-            history_poses: [B, T_h, 13] - Past poses (optional)
-            future_poses: [B, T_f, 13] - Future poses (optional)
+            history_poses: [B, T_h, 13] - Past poses
+            future_poses: [B, T_f, 13] - Future poses (for teacher forcing, optional)
 
         Returns:
-            future_occupancy: [B, T_f, X, Y, Z] - Predicted future occupancy
+            Dict with:
+                - future_occupancy: [B, T_f, X, Y, Z]
+                - future_poses: [B, T_f, 13] (if history_poses provided)
         """
         batch_size = history_occupancy.shape[0]
+        device = history_occupancy.device
         target_shape = history_occupancy.shape[2:]  # [X, Y, Z]
 
-        # Encode history
-        # Input: [B, T_h, X, Y, Z] -> [B, T_h, X, Y, Z] (treat T_h as channels)
+        # Encode spatial features from occupancy
         x = history_occupancy.float()
-
-        # Encode spatial features
         encoded = self.encoder(x)  # [B, 256, X/4, Y/4, Z/4]
+        pooled = self.adaptive_pool(encoded)  # [B, 256, 4, 4, 4]
+        spatial_flat = pooled.view(batch_size, -1)  # [B, 256*4*4*4]
+        spatial_proj = self.spatial_proj(spatial_flat)  # [B, latent_dim]
 
-        # Global average pool for temporal modeling
-        pooled = encoded.mean(dim=[2, 3, 4])  # [B, 256]
+        # Encode poses if available
+        if history_poses is not None:
+            # Encode each pose in history
+            B, T, D = history_poses.shape
+            poses_flat = history_poses.view(B * T, D)
+            pose_features = self.pose_encoder(poses_flat).view(B, T, -1)  # [B, T, latent_dim]
+            last_pose_feat = pose_features[:, -1, :]  # [B, latent_dim]
 
-        # Temporal modeling (simplified)
-        temporal_out, _ = self.temporal(pooled.unsqueeze(1))  # [B, 1, 256]
-        temporal_features = temporal_out.squeeze(1)  # [B, 256]
+            # Fuse spatial and pose features
+            fused = torch.cat([spatial_proj, last_pose_feat], dim=-1)
+            fused = self.fusion(fused)  # [B, latent_dim]
+        else:
+            fused = spatial_proj
 
-        # Decode to future occupancy
-        decoded_input = temporal_features.view(batch_size, 256, 1, 1, 1)
-        decoded_input = decoded_input.expand(-1, -1,
-                                              encoded.shape[2],
-                                              encoded.shape[3],
-                                              encoded.shape[4])
+        # Temporal modeling
+        temporal_out, (h_n, c_n) = self.temporal(fused.unsqueeze(1))
+        context = h_n[-1]  # [B, latent_dim]
 
-        future_occ = self.decoder(decoded_input)  # [B, T_f, X', Y', Z']
+        # Decode future occupancy
+        spatial_for_decode = self.to_spatial(context)  # [B, 256*4*4*4]
+        spatial_for_decode = spatial_for_decode.view(batch_size, 256, 4, 4, 4)
+        future_occ_logits = self.decoder(spatial_for_decode)  # [B, T_f, X', Y', Z']
 
-        # Resize to match target dimensions (handles non-divisible grid sizes)
-        if future_occ.shape[2:] != target_shape:
-            future_occ = torch.nn.functional.interpolate(
-                future_occ,
+        # Resize to match target dimensions
+        if future_occ_logits.shape[2:] != target_shape:
+            future_occ_logits = F.interpolate(
+                future_occ_logits,
                 size=target_shape,
                 mode='trilinear',
                 align_corners=False
             )
 
-        return torch.sigmoid(future_occ)
+        future_occupancy = torch.sigmoid(future_occ_logits)
+
+        # Predict future poses if history poses are available
+        predicted_poses = None
+        if history_poses is not None:
+            predicted_poses = []
+            last_pose = history_poses[:, -1, :]  # [B, 13]
+            hidden = context  # Use context as initial hidden state
+
+            for t in range(self.future_frames):
+                # Combine last pose with context
+                inp = torch.cat([last_pose, context], dim=-1)
+                hidden = self.pose_gru(inp, hidden)
+                pose_delta = self.pose_out(hidden)
+
+                # Residual prediction
+                current_pose = last_pose + pose_delta
+                predicted_poses.append(current_pose)
+                last_pose = current_pose
+
+            predicted_poses = torch.stack(predicted_poses, dim=1)  # [B, T_f, 13]
+
+        # Return dict for consistency with 6DoF model
+        if predicted_poses is not None:
+            return {
+                'future_occupancy': future_occupancy,
+                'future_poses': predicted_poses,
+            }
+        else:
+            # For backwards compatibility, return just occupancy
+            return future_occupancy
 
 
 class FocalLoss(nn.Module):
@@ -454,9 +521,28 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             # Get debug metrics from loss function
             debug_metrics = criterion.get_debug_metrics()
         else:
-            # Simple model returns just occupancy
-            pred_occ = model(history_occ, history_poses, future_poses)
-            loss = criterion(pred_occ, future_occ.float())
+            # Simple model - can return dict or tensor depending on pose availability
+            output = model(history_occ, history_poses, future_poses)
+
+            if isinstance(output, dict):
+                # Model returned occupancy and poses
+                pred_occ = output['future_occupancy']
+                pred_poses = output.get('future_poses')
+
+                # Occupancy loss
+                occ_loss = criterion(pred_occ, future_occ.float())
+
+                # Add pose loss if poses predicted
+                if pred_poses is not None:
+                    pose_loss = F.smooth_l1_loss(pred_poses, future_poses)
+                    loss = occ_loss + 0.1 * pose_loss
+                else:
+                    loss = occ_loss
+            else:
+                # Legacy: model returned just occupancy tensor
+                pred_occ = output
+                loss = criterion(pred_occ, future_occ.float())
+
             debug_metrics = {}
 
         # Debug: Check occupancy rate and prediction distribution
@@ -592,8 +678,20 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
                 losses = criterion(outputs, targets)
                 loss = losses['total']
             else:
-                pred_occ = model(history_occ, history_poses, future_poses)
-                loss = criterion(pred_occ, future_occ.float())
+                output = model(history_occ, history_poses, future_poses)
+
+                if isinstance(output, dict):
+                    pred_occ = output['future_occupancy']
+                    pred_poses = output.get('future_poses')
+                    occ_loss = criterion(pred_occ, future_occ.float())
+                    if pred_poses is not None:
+                        pose_loss = F.smooth_l1_loss(pred_poses, future_poses)
+                        loss = occ_loss + 0.1 * pose_loss
+                    else:
+                        loss = occ_loss
+                else:
+                    pred_occ = output
+                    loss = criterion(pred_occ, future_occ.float())
 
             total_loss += loss.item()
             num_batches += 1
