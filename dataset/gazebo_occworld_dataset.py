@@ -43,6 +43,7 @@ from multiprocessing import cpu_count
 
 import numpy as np
 import cv2
+cv2.setNumThreads(0)  # Disable OpenCV threading to avoid thread spawn errors
 import torch
 from torch.utils.data import Dataset, DataLoader
 

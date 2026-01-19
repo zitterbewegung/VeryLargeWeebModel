@@ -33,6 +33,14 @@ from datetime import datetime
 from pathlib import Path
 from multiprocessing import cpu_count
 
+# Disable OpenCV threading (must be before cv2 import)
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OPENCV_THREAD_COUNT'] = '0'
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
