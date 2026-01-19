@@ -359,8 +359,18 @@ class OccupancyLoss(nn.Module):
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
         self.smooth = smooth
+        self._debug_counter = 0
 
     def forward(self, pred, target):
+        # Debug: Print data stats every 100 batches
+        self._debug_counter += 1
+        if self._debug_counter % 100 == 1:
+            print(f"  [LOSS DEBUG] pred shape: {pred.shape}, target shape: {target.shape}")
+            print(f"  [LOSS DEBUG] pred dtype: {pred.dtype}, target dtype: {target.dtype}")
+            print(f"  [LOSS DEBUG] pred range: [{pred.min().item():.6f}, {pred.max().item():.6f}]")
+            print(f"  [LOSS DEBUG] target range: [{target.min().item():.6f}, {target.max().item():.6f}]")
+            print(f"  [LOSS DEBUG] target unique values: {torch.unique(target).tolist()[:10]}")
+
         # Focal loss: handles class imbalance, focuses on hard examples
         focal = self.focal_loss(pred, target)
 
@@ -379,6 +389,12 @@ class OccupancyLoss(nn.Module):
         mean_loss = F.mse_loss(pred_mean, target_mean)
 
         total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
+
+        # Debug: Print loss components every 100 batches
+        if self._debug_counter % 100 == 1:
+            print(f"  [LOSS DEBUG] focal: {focal.item():.6f}, dice: {dice_loss.item():.6f}, mean: {mean_loss.item():.6f}")
+            print(f"  [LOSS DEBUG] total: {total_loss.item():.6f}")
+
         return total_loss
 
 
@@ -427,6 +443,18 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             pred_max = pred_occ.max().item()
             pred_min = pred_occ.min().item()
             print(f"  DEBUG [{batch_idx}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
+            # Check if pred and target accidentally share memory
+            print(f"  DEBUG [{batch_idx}]: pred_occ.data_ptr={pred_occ.data_ptr()}, future_occ.data_ptr={future_occ.data_ptr()}")
+            # Check if predictions are accidentally equal to targets
+            target_float = future_occ.float()
+            match_rate = (torch.abs(pred_occ - target_float) < 0.01).float().mean().item()
+            exact_match = torch.allclose(pred_occ, target_float)
+            print(f"  DEBUG [{batch_idx}]: match_rate (<0.01 diff): {match_rate*100:.2f}%, exact_match: {exact_match}")
+            # Check if history and future occupancy are identical (static scene issue)
+            hist_mean = history_occ.float().mean().item()
+            fut_mean = future_occ.float().mean().item()
+            hist_fut_match = torch.allclose(history_occ[:, -1].float(), future_occ[:, 0].float())
+            print(f"  DEBUG [{batch_idx}]: hist_mean={hist_mean:.4f}, fut_mean={fut_mean:.4f}, last_hist==first_fut: {hist_fut_match}")
 
             # 6DoF specific debug info
             if is_6dof and debug_metrics:
@@ -455,6 +483,19 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Backward pass
         loss.backward()
+
+        # Debug: Check if gradients exist and are non-zero
+        if batch_idx % 100 == 0:
+            total_grad_norm = 0
+            num_params_with_grad = 0
+            for p in model.parameters():
+                if p.grad is not None:
+                    total_grad_norm += p.grad.norm().item() ** 2
+                    num_params_with_grad += 1
+            total_grad_norm = total_grad_norm ** 0.5
+            print(f"  DEBUG [{batch_idx}]: grad_norm={total_grad_norm:.6f}, params_with_grad={num_params_with_grad}")
+            print(f"  DEBUG [{batch_idx}]: loss.requires_grad={loss.requires_grad}, loss.grad_fn={loss.grad_fn}")
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
         optimizer.step()
 
@@ -463,7 +504,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Log
         if batch_idx % 10 == 0:
-            loss_str = f"Loss: {loss.item():.4f}"
+            loss_val = loss.item()
+            loss_str = f"Loss: {loss_val:.6f}"  # More precision to see small losses
             if is_6dof:
                 loss_str += f" (occ={losses['occ'].item():.3f}, pose={losses['pose'].item():.3f})"
             print(f"  Epoch {epoch} [{batch_idx}/{len(dataloader)}] {loss_str}")
