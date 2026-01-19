@@ -360,6 +360,12 @@ class OccupancyLoss(nn.Module):
         self.mean_weight = mean_weight
         self.smooth = smooth
         self._debug_counter = 0
+        # Store last loss components for logging
+        self._last_components = {}
+
+    def get_loss_components(self):
+        """Return the last computed loss components for logging."""
+        return self._last_components
 
     def forward(self, pred, target):
         # Debug: Print data stats every 100 batches
@@ -389,6 +395,16 @@ class OccupancyLoss(nn.Module):
         mean_loss = F.mse_loss(pred_mean, target_mean)
 
         total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
+
+        # Store components for wandb logging
+        self._last_components = {
+            'focal': focal.item(),
+            'dice': dice_loss.item(),
+            'mean_match': mean_loss.item(),
+            'intersection': intersection.item(),
+            'pred_sum': pred_flat.sum().item(),
+            'target_sum': target_flat.sum().item(),
+        }
 
         # Debug: Print loss components every 100 batches
         if self._debug_counter % 100 == 1:
@@ -465,11 +481,21 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             # Log prediction stats to wandb
             if use_wandb:
                 log_dict = {
-                    'pred/mean': pred_mean,
-                    'pred/min': pred_min,
-                    'pred/max': pred_max,
-                    'pred/occupancy_rate': occ_rate,
+                    'debug/pred_mean': pred_mean,
+                    'debug/pred_min': pred_min,
+                    'debug/pred_max': pred_max,
+                    'debug/occupancy_rate': occ_rate,
+                    'debug/match_rate': match_rate,
+                    'debug/exact_match': 1.0 if exact_match else 0.0,
+                    'debug/hist_mean': hist_mean,
+                    'debug/fut_mean': fut_mean,
+                    'debug/hist_fut_match': 1.0 if hist_fut_match else 0.0,
                 }
+                # Add loss components from criterion
+                if hasattr(criterion, 'get_loss_components'):
+                    loss_components = criterion.get_loss_components()
+                    for k, v in loss_components.items():
+                        log_dict[f'loss_components/{k}'] = v
                 # Add 6DoF metrics
                 if is_6dof:
                     for k, v in debug_metrics.items():
@@ -495,6 +521,13 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             total_grad_norm = total_grad_norm ** 0.5
             print(f"  DEBUG [{batch_idx}]: grad_norm={total_grad_norm:.6f}, params_with_grad={num_params_with_grad}")
             print(f"  DEBUG [{batch_idx}]: loss.requires_grad={loss.requires_grad}, loss.grad_fn={loss.grad_fn}")
+
+            # Log gradient info to wandb
+            if use_wandb:
+                wandb.log({
+                    'debug/grad_norm': total_grad_norm,
+                    'debug/params_with_grad': num_params_with_grad,
+                }, commit=False)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
         optimizer.step()
