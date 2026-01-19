@@ -86,6 +86,17 @@ try:
 except ImportError:
     HAS_NUSCENES = False
 
+# Try to import nuScenes 6DoF dataset (with geometric augmentation)
+try:
+    from dataset.nuscenes_6dof_dataset import (
+        NuScenes6DoFDataset,
+        NuScenes6DoFConfig,
+        collate_fn as nuscenes_6dof_collate_fn,
+    )
+    HAS_NUSCENES_6DOF = True
+except ImportError:
+    HAS_NUSCENES_6DOF = False
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OccWorld Training for Tokyo Gazebo')
@@ -731,14 +742,63 @@ def main():
     dataset_type = getattr(config, 'dataset_type', None)
     if dataset_type is None:
         # Auto-detect from config path or data_root
-        if 'nuscenes' in str(args.config).lower() or 'nuscenes' in str(data_root).lower():
+        if 'nuscenes_6dof' in str(args.config).lower():
+            dataset_type = 'nuscenes_6dof'
+        elif 'nuscenes' in str(args.config).lower() or 'nuscenes' in str(data_root).lower():
             dataset_type = 'nuscenes'
         else:
             dataset_type = 'gazebo'
 
     print(f"Dataset type: {dataset_type}")
 
-    if dataset_type == 'nuscenes':
+    if dataset_type == 'nuscenes_6dof':
+        # nuScenes with 6DoF augmentation (for aerial world model training)
+        if not HAS_NUSCENES_6DOF:
+            raise ImportError(
+                "nuScenes 6DoF dataset requested but nuscenes_6dof_dataset.py not found.\n"
+                "Install: pip install nuscenes-devkit pyquaternion"
+            )
+
+        # Get config from file or use defaults
+        ds_cfg = getattr(config, 'dataset_config', {})
+
+        nuscenes_6dof_cfg = NuScenes6DoFConfig(
+            version=ds_cfg.get('version', 'v1.0-mini'),
+            history_frames=getattr(config, 'history_frames', 4),
+            future_frames=getattr(config, 'future_frames', 6),
+            frame_skip=ds_cfg.get('frame_skip', 1),
+            point_cloud_range=tuple(getattr(config, 'point_cloud_range', (-40, -40, -1, 40, 40, 5.4))),
+            voxel_size=tuple(getattr(config, 'voxel_size', (0.4, 0.4, 0.4))),
+            # 6DoF augmentation settings
+            augment_6dof=ds_cfg.get('augment_6dof', True),
+            max_pitch_deg=ds_cfg.get('max_pitch_deg', 30.0),
+            max_roll_deg=ds_cfg.get('max_roll_deg', 45.0),
+            max_yaw_deg=ds_cfg.get('max_yaw_deg', 180.0),
+            altitude_shift_range=ds_cfg.get('altitude_shift_range', (-2.0, 10.0)),
+            consistent_augmentation=ds_cfg.get('consistent_augmentation', True),
+            augmentation_prob=ds_cfg.get('augmentation_prob', 0.8),
+            split='train',
+        )
+        train_dataset = NuScenes6DoFDataset(data_root, nuscenes_6dof_cfg)
+
+        # Validation: no augmentation for fair evaluation
+        val_6dof_cfg = NuScenes6DoFConfig(
+            version=nuscenes_6dof_cfg.version,
+            history_frames=nuscenes_6dof_cfg.history_frames,
+            future_frames=nuscenes_6dof_cfg.future_frames,
+            frame_skip=nuscenes_6dof_cfg.frame_skip,
+            point_cloud_range=nuscenes_6dof_cfg.point_cloud_range,
+            voxel_size=nuscenes_6dof_cfg.voxel_size,
+            augment_6dof=False,  # No augmentation for validation
+            split='val',
+        )
+        val_dataset = NuScenes6DoFDataset(data_root, val_6dof_cfg)
+        dataset_collate_fn = nuscenes_6dof_collate_fn
+
+        print(f"6DoF augmentation: pitch=±{nuscenes_6dof_cfg.max_pitch_deg}°, "
+              f"roll=±{nuscenes_6dof_cfg.max_roll_deg}°")
+
+    elif dataset_type == 'nuscenes':
         if not HAS_NUSCENES:
             raise ImportError("nuScenes dataset requested but nuscenes_occworld_dataset.py not found. "
                             "Run ./scripts/setup_training_data.sh --nuscenes first.")
