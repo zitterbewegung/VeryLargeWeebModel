@@ -38,3 +38,14 @@ pyquaternion>=0.9.9
 
 # Performance optimization (optional but recommended)
 numba>=0.57.0  # JIT compilation for voxelization speedup
+
+# Open3D for point cloud processing (recommended)
+open3d>=0.18.0  # 3D data processing, voxelization
+
+# For Open3D-ML semantic features (optional, requires separate install):
+# pip install open3d-ml-torch  # For PyTorch
+# pip install open3d-ml-tf     # For TensorFlow
+# See: https://github.com/isl-org/Open3D-ML
+
+# HTTP downloads (for PLATEAU data)
+requests>=2.28.0

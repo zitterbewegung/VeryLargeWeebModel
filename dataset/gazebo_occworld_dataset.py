@@ -75,6 +75,12 @@ class DatasetConfig:
     point_cloud_range: Tuple[float, ...] = (-40, -40, -2, 40, 40, 150)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 1.25)
 
+    # Data quality validation
+    validate_motion: bool = True     # Check for static sequences
+    min_pose_delta: float = 0.1      # Minimum position change between frames (meters)
+    min_occ_change: float = 0.001    # Minimum occupancy change ratio between frames
+    filter_static: bool = True       # Filter out static sequences
+
 
 class GazeboOccWorldDataset(Dataset):
     """
@@ -233,6 +239,14 @@ class GazeboOccWorldDataset(Dataset):
 
     def _apply_split(self):
         """Apply train/val/test split to the frame index."""
+        # Filter static sequences if enabled
+        if self.config.filter_static and self.config.validate_motion:
+            original_count = len(self.frame_index)
+            self.frame_index = self._filter_static_sequences()
+            filtered_count = original_count - len(self.frame_index)
+            if filtered_count > 0:
+                print(f"Filtered {filtered_count} static sequences ({filtered_count/original_count*100:.1f}%)")
+
         n = len(self.frame_index)
         val_size = int(n * self.config.val_ratio)
         test_size = int(n * self.config.test_ratio)
@@ -245,6 +259,119 @@ class GazeboOccWorldDataset(Dataset):
             self.frame_index = self.frame_index[train_size:train_size + val_size]
         elif self.config.split == 'test':
             self.frame_index = self.frame_index[train_size + val_size:]
+
+    def _filter_static_sequences(self) -> List[Dict]:
+        """Filter out sequences with no motion between frames."""
+        valid_sequences = []
+
+        for item in self.frame_index:
+            session_dir = item['session']
+            frames = item['frames']
+
+            # Check pose changes across the sequence
+            poses = []
+            for fid in frames:
+                pose_path = os.path.join(session_dir, 'poses', f'{fid}.json')
+                try:
+                    with open(pose_path, 'r') as f:
+                        pose_data = json.load(f)
+                    pos = pose_data['position']
+                    poses.append(np.array([pos['x'], pos['y'], pos['z']]))
+                except Exception:
+                    poses.append(None)
+
+            # Check if we have valid poses
+            valid_poses = [p for p in poses if p is not None]
+            if len(valid_poses) < 2:
+                continue
+
+            # Calculate total motion
+            positions = np.array(valid_poses)
+            deltas = np.diff(positions, axis=0)
+            distances = np.linalg.norm(deltas, axis=1)
+            total_motion = np.sum(distances)
+            mean_motion = np.mean(distances)
+
+            # Check if sequence has sufficient motion
+            min_total = self.config.min_pose_delta * (len(frames) - 1) * 0.5
+            if total_motion >= min_total and mean_motion >= self.config.min_pose_delta * 0.5:
+                valid_sequences.append(item)
+
+        return valid_sequences
+
+    def validate_dataset(self) -> Dict:
+        """
+        Validate the dataset for common issues.
+
+        Returns statistics about data quality including:
+        - Motion statistics
+        - Occupancy rates
+        - Static frame detection
+        """
+        stats = {
+            'total_sequences': len(self.frame_index),
+            'static_sequences': 0,
+            'low_occupancy_sequences': 0,
+            'motion_stats': {'min': float('inf'), 'max': 0, 'mean': 0},
+            'occupancy_stats': {'min': float('inf'), 'max': 0, 'mean': 0},
+        }
+
+        motion_values = []
+        occupancy_values = []
+
+        for idx, item in enumerate(self.frame_index[:min(100, len(self.frame_index))]):
+            session_dir = item['session']
+            frames = item['frames']
+
+            # Check poses
+            poses = []
+            for fid in frames:
+                pose_path = os.path.join(session_dir, 'poses', f'{fid}.json')
+                try:
+                    with open(pose_path, 'r') as f:
+                        pose_data = json.load(f)
+                    pos = pose_data['position']
+                    poses.append(np.array([pos['x'], pos['y'], pos['z']]))
+                except Exception:
+                    continue
+
+            if len(poses) >= 2:
+                positions = np.array(poses)
+                total_motion = np.sum(np.linalg.norm(np.diff(positions, axis=0), axis=1))
+                motion_values.append(total_motion)
+
+                if total_motion < self.config.min_pose_delta:
+                    stats['static_sequences'] += 1
+
+            # Check occupancy of first frame
+            occ_path = os.path.join(session_dir, 'occupancy', f'{frames[0]}_occupancy.npz')
+            try:
+                data = np.load(occ_path)
+                occ = data['occupancy']
+                occ_rate = np.mean(occ > 0)
+                occupancy_values.append(occ_rate)
+
+                if occ_rate < 0.001:
+                    stats['low_occupancy_sequences'] += 1
+            except Exception:
+                continue
+
+        # Compute statistics
+        if motion_values:
+            stats['motion_stats'] = {
+                'min': float(np.min(motion_values)),
+                'max': float(np.max(motion_values)),
+                'mean': float(np.mean(motion_values)),
+            }
+
+        if occupancy_values:
+            stats['occupancy_stats'] = {
+                'min': float(np.min(occupancy_values)),
+                'max': float(np.max(occupancy_values)),
+                'mean': float(np.mean(occupancy_values)),
+            }
+
+        return stats
 
     def __len__(self) -> int:
         return len(self.frame_index)
