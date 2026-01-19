@@ -97,6 +97,17 @@ try:
 except ImportError:
     HAS_NUSCENES_6DOF = False
 
+# Try to import UAVScenes dataset (real aerial 6DoF data)
+try:
+    from dataset.uavscenes_dataset import (
+        UAVScenesDataset,
+        UAVScenesConfig,
+        collate_fn as uavscenes_collate_fn,
+    )
+    HAS_UAVSCENES = True
+except ImportError:
+    HAS_UAVSCENES = False
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OccWorld Training for Tokyo Gazebo')
@@ -742,7 +753,9 @@ def main():
     dataset_type = getattr(config, 'dataset_type', None)
     if dataset_type is None:
         # Auto-detect from config path or data_root
-        if 'nuscenes_6dof' in str(args.config).lower():
+        if 'uavscenes' in str(args.config).lower():
+            dataset_type = 'uavscenes'
+        elif 'nuscenes_6dof' in str(args.config).lower():
             dataset_type = 'nuscenes_6dof'
         elif 'nuscenes' in str(args.config).lower() or 'nuscenes' in str(data_root).lower():
             dataset_type = 'nuscenes'
@@ -751,7 +764,48 @@ def main():
 
     print(f"Dataset type: {dataset_type}")
 
-    if dataset_type == 'nuscenes_6dof':
+    if dataset_type == 'uavscenes':
+        # UAVScenes - Real aerial 6DoF data from UAV platform
+        if not HAS_UAVSCENES:
+            raise ImportError(
+                "UAVScenes dataset requested but uavscenes_dataset.py not found.\n"
+                "Install: pip install pyquaternion open3d"
+            )
+
+        ds_cfg = getattr(config, 'dataset_config', {})
+
+        uavscenes_cfg = UAVScenesConfig(
+            scenes=ds_cfg.get('scenes', ['AMtown', 'AMvalley', 'HKairport', 'HKisland']),
+            interval=ds_cfg.get('interval', 1),
+            history_frames=getattr(config, 'history_frames', 4),
+            future_frames=getattr(config, 'future_frames', 6),
+            frame_skip=ds_cfg.get('frame_skip', 1),
+            point_cloud_range=tuple(getattr(config, 'point_cloud_range', (-40, -40, -10, 40, 40, 50))),
+            voxel_size=tuple(getattr(config, 'voxel_size', (0.4, 0.4, 0.5))),
+            val_ratio=ds_cfg.get('val_ratio', 0.1),
+            test_ratio=ds_cfg.get('test_ratio', 0.1),
+            split='train',
+        )
+        train_dataset = UAVScenesDataset(data_root, uavscenes_cfg)
+
+        val_uavscenes_cfg = UAVScenesConfig(
+            scenes=uavscenes_cfg.scenes,
+            interval=uavscenes_cfg.interval,
+            history_frames=uavscenes_cfg.history_frames,
+            future_frames=uavscenes_cfg.future_frames,
+            frame_skip=uavscenes_cfg.frame_skip,
+            point_cloud_range=uavscenes_cfg.point_cloud_range,
+            voxel_size=uavscenes_cfg.voxel_size,
+            val_ratio=uavscenes_cfg.val_ratio,
+            test_ratio=uavscenes_cfg.test_ratio,
+            split='val',
+        )
+        val_dataset = UAVScenesDataset(data_root, val_uavscenes_cfg)
+        dataset_collate_fn = uavscenes_collate_fn
+
+        print(f"UAVScenes scenes: {uavscenes_cfg.scenes}")
+
+    elif dataset_type == 'nuscenes_6dof':
         # nuScenes with 6DoF augmentation (for aerial world model training)
         if not HAS_NUSCENES_6DOF:
             raise ImportError(

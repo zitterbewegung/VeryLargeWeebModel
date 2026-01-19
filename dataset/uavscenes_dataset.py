@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+"""
+UAVScenes Dataset Loader for 6DoF World Model Training
+
+UAVScenes is an ICCV 2025 benchmark built on MARS-LVIG providing:
+- Multi-modal UAV data (LiDAR + Camera)
+- 6-DoF poses from aerial platform
+- 120k labeled semantic pairs
+- 4 diverse scenes: AMtown, AMvalley, HKairport, HKisland
+
+This is REAL aerial 6DoF data, unlike nuScenes (ground vehicles with augmentation).
+
+Dataset structure:
+    data_root/
+    ├── AMtown/
+    │   ├── interval1_CAM_LIDAR/
+    │   │   ├── run01/
+    │   │   │   ├── images/
+    │   │   │   ├── lidar/
+    │   │   │   └── poses/
+    │   │   └── run02/
+    │   ├── interval1_CAM_label/
+    │   └── interval1_LIDAR_label/
+    ├── AMvalley/
+    ├── HKairport/
+    └── HKisland/
+
+Download from: https://github.com/sijieaaa/UAVScenes
+
+Usage:
+    from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+
+    config = UAVScenesConfig(scenes=['AMtown', 'AMvalley'])
+    dataset = UAVScenesDataset('data/uavscenes', config)
+"""
+
+import os
+import json
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+import glob
+
+try:
+    from pyquaternion import Quaternion
+    HAS_QUATERNION = True
+except ImportError:
+    HAS_QUATERNION = False
+    Quaternion = None
+
+
+@dataclass
+class UAVScenesConfig:
+    """Configuration for UAVScenes dataset."""
+
+    # Scene selection
+    scenes: List[str] = field(default_factory=lambda: ['AMtown', 'AMvalley', 'HKairport', 'HKisland'])
+
+    # Run selection (None = all runs)
+    runs: Optional[List[str]] = None  # e.g., ['run01', 'run02']
+
+    # Interval: 1 = full data, 5 = keyframes only
+    interval: int = 1
+
+    # Temporal settings
+    history_frames: int = 4
+    future_frames: int = 6
+    frame_skip: int = 1
+
+    # Split (no official splits, we create our own)
+    split: str = 'train'
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
+
+    # Occupancy grid settings (aerial-friendly range)
+    point_cloud_range: Tuple[float, ...] = (-40.0, -40.0, -10.0, 40.0, 40.0, 50.0)
+    voxel_size: Tuple[float, float, float] = (0.4, 0.4, 0.5)
+
+    # Pose format: 13D = position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
+    pose_dim: int = 13
+
+    # LiDAR settings
+    max_points: int = 100000
+    use_intensity: bool = True
+
+    # Load semantic labels
+    use_semantic_labels: bool = False
+
+    @property
+    def grid_size(self) -> Tuple[int, int, int]:
+        """Calculate grid size from range and voxel size."""
+        pc_range = np.array(self.point_cloud_range)
+        voxel_sz = np.array(self.voxel_size)
+        return tuple(((pc_range[3:] - pc_range[:3]) / voxel_sz).astype(int))
+
+
+class UAVScenesDataset(Dataset):
+    """
+    UAVScenes dataset for 6DoF aerial world model training.
+
+    Provides real aerial LiDAR with 6DoF poses from UAV platform.
+    """
+
+    def __init__(self, data_root: str, config: UAVScenesConfig):
+        self.data_root = Path(data_root)
+        self.config = config
+
+        # Validate data exists
+        if not self.data_root.exists():
+            raise FileNotFoundError(
+                f"UAVScenes data not found at: {data_root}\n"
+                f"Download from: https://github.com/sijieaaa/UAVScenes"
+            )
+
+        # Build sample index
+        self.samples = self._build_sample_index()
+
+        # Apply split
+        self._apply_split()
+
+        print(f"UAVScenes {config.split}: {len(self.samples)} samples")
+        print(f"  Scenes: {config.scenes}")
+        print(f"  Grid size: {config.grid_size}")
+
+    def _build_sample_index(self) -> List[Dict]:
+        """Build index of all valid temporal windows."""
+        samples = []
+
+        for scene in self.config.scenes:
+            scene_path = self.data_root / scene / f'interval{self.config.interval}_CAM_LIDAR'
+
+            if not scene_path.exists():
+                print(f"Warning: Scene not found: {scene_path}")
+                continue
+
+            # Find all runs
+            runs = self.config.runs or [d.name for d in scene_path.iterdir() if d.is_dir()]
+
+            for run in runs:
+                run_path = scene_path / run
+
+                # Find all frames (assuming sequential numbering)
+                lidar_path = run_path / 'lidar'
+                if not lidar_path.exists():
+                    # Try alternative structure
+                    lidar_files = sorted(run_path.glob('*.pcd')) or sorted(run_path.glob('*.bin'))
+                else:
+                    lidar_files = sorted(lidar_path.glob('*.pcd')) or sorted(lidar_path.glob('*.bin'))
+
+                if not lidar_files:
+                    print(f"Warning: No LiDAR files in {run_path}")
+                    continue
+
+                # Get frame IDs from filenames
+                frame_ids = []
+                for f in lidar_files:
+                    try:
+                        frame_id = int(f.stem.split('_')[0])
+                        frame_ids.append((frame_id, f))
+                    except (ValueError, IndexError):
+                        frame_ids.append((len(frame_ids), f))
+
+                frame_ids.sort(key=lambda x: x[0])
+
+                # Apply frame skip
+                if self.config.frame_skip > 1:
+                    frame_ids = frame_ids[::self.config.frame_skip]
+
+                # Create sliding windows
+                total_frames = self.config.history_frames + self.config.future_frames
+                for i in range(len(frame_ids) - total_frames + 1):
+                    window = frame_ids[i:i + total_frames]
+                    samples.append({
+                        'scene': scene,
+                        'run': run,
+                        'frames': window,
+                        'history_frames': window[:self.config.history_frames],
+                        'future_frames': window[self.config.history_frames:],
+                    })
+
+        return samples
+
+    def _apply_split(self):
+        """Apply train/val/test split."""
+        np.random.seed(42)  # Reproducible split
+
+        n_samples = len(self.samples)
+        indices = np.random.permutation(n_samples)
+
+        n_val = int(n_samples * self.config.val_ratio)
+        n_test = int(n_samples * self.config.test_ratio)
+        n_train = n_samples - n_val - n_test
+
+        if self.config.split == 'train':
+            keep_indices = indices[:n_train]
+        elif self.config.split == 'val':
+            keep_indices = indices[n_train:n_train + n_val]
+        else:  # test
+            keep_indices = indices[n_train + n_val:]
+
+        self.samples = [self.samples[i] for i in keep_indices]
+
+    def _load_lidar(self, lidar_path: Path) -> np.ndarray:
+        """Load LiDAR point cloud."""
+        if lidar_path.suffix == '.pcd':
+            return self._load_pcd(lidar_path)
+        elif lidar_path.suffix == '.bin':
+            return self._load_bin(lidar_path)
+        elif lidar_path.suffix == '.npy':
+            return np.load(lidar_path)
+        else:
+            raise ValueError(f"Unknown LiDAR format: {lidar_path.suffix}")
+
+    def _load_pcd(self, path: Path) -> np.ndarray:
+        """Load PCD file (simple ASCII/binary PCD parser)."""
+        try:
+            import open3d as o3d
+            pcd = o3d.io.read_point_cloud(str(path))
+            points = np.asarray(pcd.points).astype(np.float32)
+            return points
+        except ImportError:
+            # Fallback: simple PCD parser
+            with open(path, 'rb') as f:
+                header = []
+                while True:
+                    line = f.readline().decode('utf-8', errors='ignore').strip()
+                    header.append(line)
+                    if line.startswith('DATA'):
+                        break
+
+                # Parse header
+                num_points = 0
+                data_format = 'ascii'
+                for h in header:
+                    if h.startswith('POINTS'):
+                        num_points = int(h.split()[1])
+                    if h.startswith('DATA'):
+                        data_format = h.split()[1]
+
+                if data_format == 'binary':
+                    # Binary PCD
+                    data = np.frombuffer(f.read(), dtype=np.float32)
+                    points = data.reshape(-1, 4)[:, :3]  # Assume XYZI
+                else:
+                    # ASCII PCD
+                    lines = f.read().decode('utf-8', errors='ignore').strip().split('\n')
+                    points = np.array([[float(x) for x in line.split()[:3]] for line in lines])
+
+                return points.astype(np.float32)
+
+    def _load_bin(self, path: Path) -> np.ndarray:
+        """Load binary point cloud file."""
+        points = np.fromfile(str(path), dtype=np.float32)
+        # Try common formats
+        for cols in [4, 5, 3]:
+            if len(points) % cols == 0:
+                points = points.reshape(-1, cols)
+                break
+        return points[:, :3].astype(np.float32)
+
+    def _load_pose(self, scene: str, run: str, frame_id: int) -> np.ndarray:
+        """
+        Load 6DoF pose from pose file.
+
+        Returns 13D pose: position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
+        """
+        # Try different pose file locations and formats
+        scene_path = self.data_root / scene / f'interval{self.config.interval}_CAM_LIDAR' / run
+
+        # Option 1: Individual pose JSON files
+        pose_file = scene_path / 'poses' / f'{frame_id:06d}.json'
+        if pose_file.exists():
+            with open(pose_file) as f:
+                pose_data = json.load(f)
+                return self._parse_pose_json(pose_data)
+
+        # Option 2: Aggregated poses file
+        poses_file = scene_path / 'poses.txt'
+        if poses_file.exists():
+            return self._load_pose_from_txt(poses_file, frame_id)
+
+        # Option 3: sampleinfos_interpolated.json
+        sampleinfos = self.data_root / scene / 'sampleinfos_interpolated.json'
+        if sampleinfos.exists():
+            return self._load_pose_from_sampleinfos(sampleinfos, run, frame_id)
+
+        # Fallback: return zero pose
+        print(f"Warning: No pose found for {scene}/{run}/{frame_id}")
+        return np.zeros(13, dtype=np.float32)
+
+    def _parse_pose_json(self, pose_data: Dict) -> np.ndarray:
+        """Parse pose from JSON format."""
+        # Handle different JSON formats
+        if 'position' in pose_data:
+            pos = np.array([pose_data['position']['x'],
+                          pose_data['position']['y'],
+                          pose_data['position']['z']])
+        elif 'translation' in pose_data:
+            pos = np.array(pose_data['translation'])
+        else:
+            pos = np.zeros(3)
+
+        if 'orientation' in pose_data:
+            quat = np.array([pose_data['orientation']['w'],
+                           pose_data['orientation']['x'],
+                           pose_data['orientation']['y'],
+                           pose_data['orientation']['z']])
+        elif 'rotation' in pose_data:
+            quat = np.array(pose_data['rotation'])
+        else:
+            quat = np.array([1, 0, 0, 0])
+
+        # Velocities (if available)
+        if 'velocity' in pose_data:
+            lin_vel = np.array([pose_data['velocity']['linear']['x'],
+                               pose_data['velocity']['linear']['y'],
+                               pose_data['velocity']['linear']['z']])
+            ang_vel = np.array([pose_data['velocity']['angular']['x'],
+                               pose_data['velocity']['angular']['y'],
+                               pose_data['velocity']['angular']['z']])
+        else:
+            lin_vel = np.zeros(3)
+            ang_vel = np.zeros(3)
+
+        return np.concatenate([pos, quat, lin_vel, ang_vel]).astype(np.float32)
+
+    def _load_pose_from_txt(self, poses_file: Path, frame_id: int) -> np.ndarray:
+        """Load pose from TUM-style poses.txt file."""
+        # Format: timestamp tx ty tz qx qy qz qw
+        with open(poses_file) as f:
+            lines = f.readlines()
+
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 8:
+                ts = int(float(parts[0]))
+                if ts == frame_id:
+                    tx, ty, tz = float(parts[1]), float(parts[2]), float(parts[3])
+                    qx, qy, qz, qw = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    return np.array([tx, ty, tz, qw, qx, qy, qz, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+
+        return np.zeros(13, dtype=np.float32)
+
+    def _load_pose_from_sampleinfos(self, sampleinfos_path: Path, run: str, frame_id: int) -> np.ndarray:
+        """Load pose from UAVScenes sampleinfos_interpolated.json."""
+        with open(sampleinfos_path) as f:
+            data = json.load(f)
+
+        # Navigate to correct run and frame
+        if run in data:
+            frames = data[run]
+            frame_key = str(frame_id)
+            if frame_key in frames:
+                return self._parse_pose_json(frames[frame_key])
+
+        return np.zeros(13, dtype=np.float32)
+
+    def _points_to_occupancy(self, points: np.ndarray) -> np.ndarray:
+        """Convert point cloud to occupancy grid."""
+        pc_range = np.array(self.config.point_cloud_range)
+        voxel_size = np.array(self.config.voxel_size)
+        grid_size = np.array(self.config.grid_size)
+
+        # Filter points in range
+        xyz = points[:, :3]
+        mask = (
+            (xyz[:, 0] >= pc_range[0]) & (xyz[:, 0] < pc_range[3]) &
+            (xyz[:, 1] >= pc_range[1]) & (xyz[:, 1] < pc_range[4]) &
+            (xyz[:, 2] >= pc_range[2]) & (xyz[:, 2] < pc_range[5])
+        )
+        xyz = xyz[mask]
+
+        if len(xyz) == 0:
+            return np.zeros(grid_size, dtype=np.uint8)
+
+        # Convert to voxel indices
+        voxel_coords = ((xyz - pc_range[:3]) / voxel_size).astype(np.int32)
+        voxel_coords = np.clip(voxel_coords, 0, grid_size - 1)
+
+        # Create occupancy grid
+        occupancy = np.zeros(grid_size, dtype=np.uint8)
+        occupancy[voxel_coords[:, 0], voxel_coords[:, 1], voxel_coords[:, 2]] = 1
+
+        return occupancy
+
+    def _compute_velocity(self, pose_curr: np.ndarray, pose_prev: np.ndarray, dt: float = 0.1) -> np.ndarray:
+        """Compute velocities from pose difference."""
+        if dt <= 0:
+            return pose_curr
+
+        # Linear velocity
+        lin_vel = (pose_curr[:3] - pose_prev[:3]) / dt
+
+        # Angular velocity from quaternion difference
+        if HAS_QUATERNION:
+            q_curr = Quaternion(pose_curr[3], pose_curr[4], pose_curr[5], pose_curr[6])
+            q_prev = Quaternion(pose_prev[3], pose_prev[4], pose_prev[5], pose_prev[6])
+            q_diff = q_curr * q_prev.inverse
+            angle = 2 * np.arccos(np.clip(q_diff.w, -1, 1))
+            if angle > 0.001:
+                axis = np.array([q_diff.x, q_diff.y, q_diff.z]) / np.sin(angle / 2)
+                ang_vel = axis * angle / dt
+            else:
+                ang_vel = np.zeros(3)
+        else:
+            ang_vel = np.zeros(3)
+
+        # Update pose with computed velocities
+        pose_curr[7:10] = lin_vel
+        pose_curr[10:13] = ang_vel
+
+        return pose_curr
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        sample_info = self.samples[idx]
+        scene = sample_info['scene']
+        run = sample_info['run']
+
+        # Load history frames
+        history_occ = []
+        history_poses = []
+        prev_pose = None
+
+        for frame_id, lidar_path in sample_info['history_frames']:
+            # Load LiDAR
+            points = self._load_lidar(lidar_path)
+            occ = self._points_to_occupancy(points)
+
+            # Load pose
+            pose = self._load_pose(scene, run, frame_id)
+
+            # Compute velocities if not provided
+            if prev_pose is not None and np.allclose(pose[7:], 0):
+                pose = self._compute_velocity(pose, prev_pose)
+
+            history_occ.append(occ)
+            history_poses.append(pose)
+            prev_pose = pose.copy()
+
+        # Load future frames
+        future_occ = []
+        future_poses = []
+
+        for frame_id, lidar_path in sample_info['future_frames']:
+            points = self._load_lidar(lidar_path)
+            occ = self._points_to_occupancy(points)
+            pose = self._load_pose(scene, run, frame_id)
+
+            if prev_pose is not None and np.allclose(pose[7:], 0):
+                pose = self._compute_velocity(pose, prev_pose)
+
+            future_occ.append(occ)
+            future_poses.append(pose)
+            prev_pose = pose.copy()
+
+        return {
+            'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
+            'future_occupancy': torch.from_numpy(np.stack(future_occ)).float(),
+            'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
+            'future_poses': torch.from_numpy(np.stack(future_poses)).float(),
+            'agent_type': torch.tensor(1),  # 1 = aerial (real UAV data!)
+            'scene': scene,
+            'run': run,
+        }
+
+
+def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    """Collate function for DataLoader."""
+    return {
+        'history_occupancy': torch.stack([b['history_occupancy'] for b in batch]),
+        'future_occupancy': torch.stack([b['future_occupancy'] for b in batch]),
+        'history_poses': torch.stack([b['history_poses'] for b in batch]),
+        'future_poses': torch.stack([b['future_poses'] for b in batch]),
+        'agent_type': torch.stack([b['agent_type'] for b in batch]),
+    }
+
+
+def create_dataloader(
+    data_root: str,
+    config: UAVScenesConfig,
+    batch_size: int = 4,
+    num_workers: int = 4,
+    shuffle: bool = True,
+) -> DataLoader:
+    """Create DataLoader for UAVScenes dataset."""
+    dataset = UAVScenesDataset(data_root, config)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+
+# =============================================================================
+# Download Helper
+# =============================================================================
+
+def download_uavscenes(output_dir: str, scenes: List[str] = None, interval: int = 5):
+    """
+    Print download instructions for UAVScenes.
+
+    Full dataset is very large; interval=5 version is ~20% of the size.
+    """
+    print("=" * 70)
+    print("UAVScenes Download Instructions")
+    print("=" * 70)
+    print()
+    print("UAVScenes provides multi-modal UAV data with 6DoF poses.")
+    print("Paper: ICCV 2025 | GitHub: https://github.com/sijieaaa/UAVScenes")
+    print()
+    print("Available scenes: AMtown, AMvalley, HKairport, HKisland")
+    print()
+    print("Download options (choose one):")
+    print("  - OneDrive: See GitHub README")
+    print("  - Google Drive: See GitHub README")
+    print("  - HuggingFace: huggingface.co/datasets/sijieaaa/UAVScenes")
+    print("  - Baidu: See GitHub README")
+    print()
+    print(f"Recommended for testing: interval={interval} version (~20% size)")
+    print()
+    print("After download, extract to:")
+    print(f"  {output_dir}/")
+    print("  ├── AMtown/")
+    print("  ├── AMvalley/")
+    print("  ├── HKairport/")
+    print("  └── HKisland/")
+    print()
+
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+if __name__ == '__main__':
+    import sys
+
+    print("=" * 70)
+    print("UAVScenes Dataset - Real Aerial 6DoF Data")
+    print("=" * 70)
+    print()
+
+    data_root = sys.argv[1] if len(sys.argv) > 1 else 'data/uavscenes'
+
+    if not os.path.exists(data_root):
+        print(f"Data not found at: {data_root}")
+        download_uavscenes(data_root)
+        sys.exit(0)
+
+    print(f"Testing with data from: {data_root}")
+
+    config = UAVScenesConfig(
+        scenes=['AMtown'],
+        split='train',
+    )
+
+    try:
+        dataset = UAVScenesDataset(data_root, config)
+        print(f"Dataset size: {len(dataset)}")
+
+        if len(dataset) > 0:
+            sample = dataset[0]
+            print(f"History occupancy: {sample['history_occupancy'].shape}")
+            print(f"Future occupancy: {sample['future_occupancy'].shape}")
+            print(f"History poses: {sample['history_poses'].shape}")
+            print(f"Future poses: {sample['future_poses'].shape}")
+            print(f"Agent type: {sample['agent_type']} (1=aerial)")
+
+            # Check pose values
+            poses = sample['history_poses'].numpy()
+            print(f"Position range: [{poses[:, :3].min():.2f}, {poses[:, :3].max():.2f}]")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        download_uavscenes(data_root)
+
+    print()
+    print("=" * 70)
