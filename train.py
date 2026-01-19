@@ -106,8 +106,8 @@ def parse_args():
     # Overrides
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override batch size')
-    parser.add_argument('--num-workers', type=int, default=None,
-                        help='Data loading workers (default: auto-detect CPU count)')
+    parser.add_argument('--num-workers', type=int, default=0,
+                        help='Data loading workers (default: 0 = single-threaded)')
     parser.add_argument('--lr', type=float, default=None,
                         help='Override learning rate')
     parser.add_argument('--epochs', type=int, default=None,
@@ -680,8 +680,8 @@ def main():
     # Create dataloaders
     batch_size = args.batch_size or getattr(config, 'data', {}).get('samples_per_gpu', 1)
 
-    # Auto-detect optimal number of workers (leave some cores for GPU/main process)
-    num_workers = args.num_workers if args.num_workers is not None else max(4, cpu_count() - 2)
+    # Number of data loading workers (0 = single-threaded, safer for debugging)
+    num_workers = args.num_workers
     print(f"Using {num_workers} data loading workers (CPU count: {cpu_count()})")
 
     train_loader = DataLoader(
