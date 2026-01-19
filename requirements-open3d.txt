@@ -1,0 +1,99 @@
+# Open3D-ML Pipeline Requirements
+# Install with: pip install -r requirements-open3d.txt
+#
+# For GPU support, install PyTorch first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# Then install this file:
+#   pip install -r requirements-open3d.txt
+
+# =============================================================================
+# Core Dependencies
+# =============================================================================
+
+# Open3D - 3D data processing and visualization
+open3d>=0.18.0
+
+# PyTorch (install separately for your CUDA version if needed)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# NumPy (Open3D requires < 2.0)
+numpy>=1.24.0,<2.0.0
+
+# SciPy for interpolation (trajectory generation)
+scipy>=1.10.0
+
+# =============================================================================
+# Open3D-ML (Semantic Segmentation)
+# =============================================================================
+#
+# Open3D-ML provides pretrained models for point cloud segmentation:
+# - RandLA-Net: Efficient random sampling
+# - KPConv: Kernel point convolutions
+# - PointTransformer: Attention-based
+#
+# Install ONE of the following (PyTorch recommended):
+#
+# For PyTorch backend:
+#   pip install open3d-ml-torch
+#
+# For TensorFlow backend:
+#   pip install open3d-ml-tf
+#
+# Note: open3d-ml-torch may require specific PyTorch versions.
+# Check compatibility at: https://github.com/isl-org/Open3D-ML
+# =============================================================================
+
+# =============================================================================
+# Data Download & Processing
+# =============================================================================
+
+# HTTP requests (for PLATEAU download)
+requests>=2.28.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# =============================================================================
+# Point Cloud Processing
+# =============================================================================
+
+# Mesh loading (fallback if Open3D fails)
+trimesh>=4.0.0
+
+# Fast voxelization with JIT compilation
+numba>=0.57.0
+
+# =============================================================================
+# Image Processing
+# =============================================================================
+
+# OpenCV for image I/O
+opencv-python>=4.8.0
+
+# PIL fallback
+pillow>=9.0.0
+
+# =============================================================================
+# Experiment Tracking (Optional but Recommended)
+# =============================================================================
+
+# Weights & Biases
+wandb>=0.15.0
+
+# TensorBoard
+tensorboard>=2.12.0
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+# YAML config files
+pyyaml>=6.0
+
+# Rich console output
+rich>=13.0.0
+
+# Quaternion math (6DoF poses)
+pyquaternion>=0.9.9
