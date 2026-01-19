@@ -54,7 +54,8 @@ def _get_io_executor(max_workers: int = None) -> ThreadPoolExecutor:
     """Get or create shared I/O thread pool."""
     global _IO_EXECUTOR
     if _IO_EXECUTOR is None:
-        workers = max_workers or min(8, cpu_count())
+        # Default to 1 worker (single-threaded) for easier debugging
+        workers = max_workers or 1
         _IO_EXECUTOR = ThreadPoolExecutor(max_workers=workers)
     return _IO_EXECUTOR
 
