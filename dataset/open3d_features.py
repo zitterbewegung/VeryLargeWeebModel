@@ -49,6 +49,7 @@ except ImportError:
 # Check for Open3D-ML with PyTorch
 HAS_OPEN3D_ML = False
 HAS_TORCH = False
+OPEN3D_ML_ERROR = None
 
 try:
     import torch
@@ -61,8 +62,16 @@ if HAS_TORCH:
         import open3d.ml as _ml3d
         import open3d.ml.torch as ml3d
         HAS_OPEN3D_ML = True
-    except ImportError:
-        pass
+    except ImportError as e:
+        OPEN3D_ML_ERROR = f"ImportError: {e}"
+    except Exception as e:
+        # Catch version mismatch errors like:
+        # "Version mismatch: Open3D needs PyTorch version 2.2.*, but version 2.5.1+cu121 is installed!"
+        OPEN3D_ML_ERROR = str(e)
+        if "Version mismatch" in str(e):
+            print(f"Note: Open3D-ML disabled due to PyTorch version mismatch")
+            print(f"  {e}")
+            print(f"  Geometric features still available. Semantic features disabled.")
 
 
 # Pretrained model URLs from Open3D model zoo
@@ -227,10 +236,16 @@ class SemanticFeatureExtractor:
 
     def __init__(self, config: FeatureConfig):
         if not HAS_OPEN3D_ML:
-            raise ImportError(
-                "Open3D-ML required for semantic features.\n"
-                "Install with: pip install open3d-ml-torch"
-            )
+            error_msg = "Open3D-ML required for semantic features.\n"
+            if OPEN3D_ML_ERROR:
+                error_msg += f"  Error: {OPEN3D_ML_ERROR}\n"
+                if "Version mismatch" in OPEN3D_ML_ERROR:
+                    error_msg += "\nTo fix PyTorch version mismatch, either:\n"
+                    error_msg += "  1. Downgrade PyTorch: pip install torch==2.2.0 torchvision==0.17.0\n"
+                    error_msg += "  2. Or skip semantic features (geometric features still work)\n"
+            else:
+                error_msg += "Install with: pip install open3d-ml-torch"
+            raise ImportError(error_msg)
         if not HAS_TORCH:
             raise ImportError("PyTorch required. Install with: pip install torch")
 
@@ -625,6 +640,8 @@ if __name__ == '__main__':
     print(f"Open3D available: {HAS_OPEN3D} (version: {OPEN3D_VERSION})")
     print(f"PyTorch available: {HAS_TORCH}")
     print(f"Open3D-ML available: {HAS_OPEN3D_ML}")
+    if OPEN3D_ML_ERROR and not HAS_OPEN3D_ML:
+        print(f"Open3D-ML error: {OPEN3D_ML_ERROR}")
     print()
 
     if not HAS_OPEN3D:

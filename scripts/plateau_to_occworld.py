@@ -28,6 +28,13 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 import multiprocessing
 
 try:
+    from scipy.interpolate import CubicSpline
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    CubicSpline = None
+
+try:
     import trimesh
     HAS_TRIMESH = True
 except ImportError:
@@ -431,40 +438,82 @@ class TrajectoryGenerator:
         self,
         num_frames: int,
         altitude: float = 50.0,
-        speed: float = 5.0
+        speed: float = 5.0,
+        min_motion: float = 2.0  # Minimum motion per frame in meters
     ) -> List[Dict]:
-        """Generate grid survey pattern for drone."""
+        """
+        Generate grid survey pattern for drone with continuous motion.
+
+        Ensures each frame has at least min_motion movement from the previous.
+        """
         waypoints = []
 
         x_min, y_min, x_max, y_max = self.bounds
 
-        # Calculate grid dimensions
-        rows = int(np.sqrt(num_frames))
-        cols = num_frames // rows
+        # Generate continuous path through the scene
+        # Use smooth interpolation for continuous motion
 
-        x_spacing = (x_max - x_min) / cols
-        y_spacing = (y_max - y_min) / rows
+        # Create keypoints for lawn-mower pattern
+        rows = max(3, int(np.sqrt(num_frames / 10)))  # Fewer rows, more interpolation
+        keypoints = []
 
-        frame = 0
-        for row in range(rows):
-            y = y_min + (row + 0.5) * y_spacing
+        y_vals = np.linspace(y_min + 20, y_max - 20, rows)
+        for row, y in enumerate(y_vals):
+            if row % 2 == 0:
+                keypoints.append((x_min + 20, y))
+                keypoints.append((x_max - 20, y))
+            else:
+                keypoints.append((x_max - 20, y))
+                keypoints.append((x_min + 20, y))
 
-            # Alternate direction each row (lawn mower pattern)
-            col_range = range(cols) if row % 2 == 0 else range(cols - 1, -1, -1)
+        keypoints = np.array(keypoints)
 
-            for col in col_range:
-                if frame >= num_frames:
-                    break
+        # Calculate cumulative distance
+        distances = [0]
+        for i in range(1, len(keypoints)):
+            d = np.linalg.norm(keypoints[i] - keypoints[i-1])
+            distances.append(distances[-1] + d)
+        distances = np.array(distances)
+        total_distance = distances[-1]
 
-                x = x_min + (col + 0.5) * x_spacing
+        # Interpolate to get num_frames positions with guaranteed motion
+        t_keypoints = distances / total_distance
 
-                # Calculate yaw (heading direction)
-                yaw = 0 if row % 2 == 0 else np.pi
+        t_frames = np.linspace(0, 1, num_frames)
 
-                waypoints.append(self._create_waypoint(
-                    x, y, altitude, yaw, speed, 'drone'
-                ))
-                frame += 1
+        if HAS_SCIPY and CubicSpline is not None:
+            try:
+                cs_x = CubicSpline(t_keypoints, keypoints[:, 0])
+                cs_y = CubicSpline(t_keypoints, keypoints[:, 1])
+                x_interp = cs_x(t_frames)
+                y_interp = cs_y(t_frames)
+            except Exception:
+                # Fallback to linear interpolation
+                x_interp = np.interp(t_frames, t_keypoints, keypoints[:, 0])
+                y_interp = np.interp(t_frames, t_keypoints, keypoints[:, 1])
+        else:
+            # Linear interpolation fallback
+            x_interp = np.interp(t_frames, t_keypoints, keypoints[:, 0])
+            y_interp = np.interp(t_frames, t_keypoints, keypoints[:, 1])
+
+        # Vary altitude smoothly for 3D diversity
+        altitude_variation = 10.0  # +/- meters
+        z_noise = altitude + altitude_variation * np.sin(np.linspace(0, 4*np.pi, num_frames))
+
+        for i in range(num_frames):
+            x = float(x_interp[i])
+            y = float(y_interp[i])
+            z = float(z_noise[i])
+
+            # Calculate yaw from motion direction
+            if i < num_frames - 1:
+                dx = x_interp[i+1] - x_interp[i]
+                dy = y_interp[i+1] - y_interp[i]
+                yaw = np.arctan2(dy, dx)
+            else:
+                yaw = waypoints[-1]['orientation']['z'] * 2  # Use previous
+
+            waypoints.append(self._create_waypoint(x, y, z, yaw, speed, 'drone'))
 
         return waypoints
 
@@ -476,19 +525,36 @@ class TrajectoryGenerator:
         altitude: float = 80.0,
         speed: float = 5.0
     ) -> List[Dict]:
-        """Generate circular orbit pattern."""
+        """
+        Generate spiral orbit pattern with altitude variation.
+
+        Combines circular motion with radius and altitude changes for 3D diversity.
+        """
         waypoints = []
 
-        for i in range(num_frames):
-            angle = 2 * np.pi * i / num_frames
-            x = center[0] + radius * np.cos(angle)
-            y = center[1] + radius * np.sin(angle)
+        # Spiral parameters - vary radius and altitude over time
+        radius_variation = 30.0  # +/- meters
+        altitude_variation = 20.0  # +/- meters
 
-            # Face toward center
-            yaw = angle + np.pi
+        for i in range(num_frames):
+            # Multiple orbits with spiral
+            angle = 4 * np.pi * i / num_frames  # Two full orbits
+            progress = i / num_frames
+
+            # Vary radius (spiral in/out)
+            r = radius + radius_variation * np.sin(2 * np.pi * progress)
+
+            # Vary altitude (bobbing motion)
+            z = altitude + altitude_variation * np.sin(3 * np.pi * progress)
+
+            x = center[0] + r * np.cos(angle)
+            y = center[1] + r * np.sin(angle)
+
+            # Face toward center with some variation
+            yaw = angle + np.pi + 0.2 * np.sin(angle * 3)
 
             waypoints.append(self._create_waypoint(
-                x, y, altitude, yaw, speed, 'drone'
+                x, y, z, yaw, speed, 'drone'
             ))
 
         return waypoints
@@ -498,9 +564,14 @@ class TrajectoryGenerator:
         num_frames: int,
         altitude_range: Tuple[float, float] = (30.0, 100.0),
         speed: float = 3.0,
-        agent_type: str = 'drone'
+        agent_type: str = 'drone',
+        min_motion: float = 2.0  # Minimum motion per frame in meters
     ) -> List[Dict]:
-        """Generate random exploration trajectory."""
+        """
+        Generate random exploration trajectory with guaranteed motion.
+
+        Each frame is guaranteed to have at least min_motion movement.
+        """
         waypoints = []
 
         x_min, y_min, x_max, y_max = self.bounds
@@ -509,22 +580,40 @@ class TrajectoryGenerator:
         x = (x_min + x_max) / 2
         y = (y_min + y_max) / 2
         z = np.mean(altitude_range)
-        yaw = 0
+        yaw = np.random.uniform(0, 2 * np.pi)
 
         for i in range(num_frames):
-            # Random walk with momentum
-            dx = np.random.uniform(-5, 5)
-            dy = np.random.uniform(-5, 5)
-            dz = np.random.uniform(-2, 2) if agent_type == 'drone' else 0
-            dyaw = np.random.uniform(-0.2, 0.2)
+            # Ensure minimum motion with smooth steering
+            # Use Ornstein-Uhlenbeck-like process for smooth random walk
+            theta_target = yaw + np.random.uniform(-0.5, 0.5)  # Target heading
+            yaw = yaw + 0.3 * (theta_target - yaw) + np.random.uniform(-0.1, 0.1)
 
-            x = np.clip(x + dx, x_min, x_max)
-            y = np.clip(y + dy, y_min, y_max)
-            z = np.clip(z + dz, altitude_range[0], altitude_range[1])
-            yaw = yaw + dyaw
+            # Speed with minimum guarantee
+            current_speed = max(min_motion, speed * np.random.uniform(0.8, 1.2))
+
+            # Calculate motion
+            dx = current_speed * np.cos(yaw)
+            dy = current_speed * np.sin(yaw)
+            dz = np.random.uniform(-1, 1) if agent_type == 'drone' else 0
+
+            # Apply motion with boundary reflection
+            new_x = x + dx
+            new_y = y + dy
+            new_z = z + dz
+
+            # Reflect off boundaries
+            if new_x < x_min or new_x > x_max:
+                yaw = np.pi - yaw
+                new_x = np.clip(new_x, x_min + 5, x_max - 5)
+            if new_y < y_min or new_y > y_max:
+                yaw = -yaw
+                new_y = np.clip(new_y, y_min + 5, y_max - 5)
+
+            x, y = new_x, new_y
+            z = np.clip(new_z, altitude_range[0], altitude_range[1])
 
             waypoints.append(self._create_waypoint(
-                x, y, z, yaw, speed, agent_type
+                x, y, z, yaw, current_speed, agent_type
             ))
 
         return waypoints

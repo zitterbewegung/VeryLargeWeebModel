@@ -47,6 +47,12 @@ try:
     HAS_OPEN3D_ML = True
 except ImportError:
     HAS_OPEN3D_ML = False
+except Exception as e:
+    # Catch PyTorch version mismatch errors
+    HAS_OPEN3D_ML = False
+    if "Version mismatch" in str(e):
+        print(f"Note: Open3D-ML disabled: {e}")
+        print("  Geometric features still available. Semantic segmentation disabled.")
 
 try:
     import torch
