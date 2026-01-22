@@ -185,11 +185,41 @@ done
 # =============================================================================
 log_step "Detecting environment..."
 
-# Detect cloud provider
+# Detect cloud provider with enhanced Vast.ai detection
+CLOUD_ENV="generic"
+WORK_DIR="${HOME}"
+
+# Check for Vast.ai first (most common deployment target)
 if [ -d "/workspace" ]; then
     CLOUD_ENV="vastai"
     WORK_DIR="/workspace"
-    log_info "Detected: Vast.ai"
+    log_info "Detected: Vast.ai (found /workspace)"
+
+    # Detect Vast.ai template type
+    if [ -n "$VAST_CONTAINERLABEL" ]; then
+        log_info "Container: $VAST_CONTAINERLABEL"
+    fi
+
+    # Check for PyTorch template
+    if python3 -c "import torch; print(torch.__version__)" 2>/dev/null; then
+        VASTAI_TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
+        log_info "Vast.ai PyTorch template: $VASTAI_TORCH_VERSION"
+    fi
+
+    # Check Vast.ai disk space
+    VASTAI_DISK_FREE=$(df -BG /workspace 2>/dev/null | tail -1 | awk '{print $4}' | sed 's/G//')
+    if [ -n "$VASTAI_DISK_FREE" ]; then
+        log_info "Vast.ai disk free: ${VASTAI_DISK_FREE}GB"
+        if [ "$VASTAI_DISK_FREE" -lt 20 ]; then
+            log_warn "Low disk space! Consider cleaning up or using larger instance"
+        fi
+    fi
+
+elif [ -n "$VAST_CONTAINERLABEL" ] || [ -n "$VAST_TCP_PORT_22" ]; then
+    # Vast.ai without /workspace (rare but possible)
+    CLOUD_ENV="vastai"
+    WORK_DIR="${HOME}"
+    log_info "Detected: Vast.ai (environment variables)"
 elif [ -f "/etc/lambda-stack-version" ]; then
     CLOUD_ENV="lambda"
     WORK_DIR="/home/ubuntu"
@@ -198,11 +228,16 @@ elif [ -d "/root/workspace" ]; then
     CLOUD_ENV="runpod"
     WORK_DIR="/root/workspace"
     log_info "Detected: RunPod"
+elif [ -d "/content" ]; then
+    CLOUD_ENV="colab"
+    WORK_DIR="/content"
+    log_info "Detected: Google Colab"
 else
-    CLOUD_ENV="generic"
-    WORK_DIR="${HOME}"
     log_info "Detected: Generic Linux"
 fi
+
+# Log environment summary
+log_info "Cloud environment: $CLOUD_ENV"
 
 PROJECT_DIR="${WORK_DIR}/VeryLargeWeebModel"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${WORK_DIR}/checkpoints}"
@@ -807,13 +842,34 @@ if [ -n "$SHELL_CONFIG" ] && ! grep -q "# VeryLargeWeebModel Training Setup" "$S
 # ----------------------------------
 export PROJECT_DIR="$PROJECT_DIR"
 export CHECKPOINT_DIR="$CHECKPOINT_DIR"
+export DATA_DIR="${DATA_DIR}"
+export CLOUD_ENV="$CLOUD_ENV"
 
-# Aliases
+# Aliases - Training
 alias train='cd \$PROJECT_DIR && python train.py --config config/finetune_tokyo.py --work-dir \$CHECKPOINT_DIR'
+alias train-optimized='\$PROJECT_DIR/scripts/train_optimized.sh'
+alias resume='cd \$PROJECT_DIR && python train.py --config config/finetune_tokyo.py --work-dir \$CHECKPOINT_DIR --resume'
+
+# Aliases - Monitoring
 alias gpu='watch -n 1 nvidia-smi'
+alias gpumem='nvidia-smi --query-gpu=memory.used,memory.total --format=csv -l 1'
 alias tb='tensorboard --logdir \$CHECKPOINT_DIR --port 6006 --bind_all'
 alias logs='tail -f \$CHECKPOINT_DIR/*.log 2>/dev/null || echo "No logs found"'
-alias attach='screen -r training'
+alias attach='screen -r training 2>/dev/null || tmux attach -t training 2>/dev/null'
+
+# Aliases - Status
+alias status='echo "=== GPU ===" && nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv && echo "" && echo "=== Disk ===" && df -h /workspace 2>/dev/null || df -h ~ && echo "" && echo "=== Checkpoints ===" && ls -lhtr \$CHECKPOINT_DIR/*.pth 2>/dev/null | tail -5 || echo "No checkpoints"'
+alias ckpts='ls -lhtr \$CHECKPOINT_DIR/*.pth 2>/dev/null | tail -10'
+
+# Aliases - Navigation
+alias vlwm='cd \$PROJECT_DIR'
+alias data='cd \$DATA_DIR'
+alias ckpt='cd \$CHECKPOINT_DIR'
+
+# Vast.ai specific
+if [ "\$CLOUD_ENV" = "vastai" ]; then
+    alias cleanup='rm -rf /workspace/.cache/* /tmp/* 2>/dev/null; echo "Cache cleaned"'
+fi
 
 # Conda activation (if available)
 [ -f ~/miniconda3/etc/profile.d/conda.sh ] && source ~/miniconda3/etc/profile.d/conda.sh && conda activate vlwm 2>/dev/null

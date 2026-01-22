@@ -1,19 +1,37 @@
 #!/bin/bash
-# Optimized training script with GPU auto-detection and multi-GPU support
+# =============================================================================
+# Optimized Training Script for VeryLargeWeebModel
+# =============================================================================
+# GPU auto-detection, multi-GPU support, and cloud-aware defaults.
 #
 # Usage:
 #   ./scripts/train_optimized.sh [options]
 #
 # Options:
 #   --config FILE       Config file (default: config/finetune_tokyo.py)
-#   --work-dir DIR      Output directory (default: /workspace/checkpoints)
+#   --work-dir DIR      Output directory (auto-detected: /workspace/checkpoints)
 #   --epochs N          Number of epochs (default: 50)
-#   --batch-size N      Override batch size (auto-detected if not set)
+#   --batch-size N      Override batch size (auto-detected based on GPU)
 #   --gpus N            Number of GPUs to use (default: all available)
-#   --resume PATH       Resume from checkpoint
-#   --install-deps      Install optimized dependencies (flash-attn, etc.)
+#   --resume PATH       Resume from specific checkpoint
+#   --auto-resume       Auto-resume from latest checkpoint in work-dir
+#   --install-deps      Install optimized dependencies (flash-attn, xformers)
 #   --dry-run           Show config without training
 #   --help              Show this help
+#
+# Examples:
+#   # Basic training (auto-detects everything)
+#   ./scripts/train_optimized.sh
+#
+#   # Training with specific batch size
+#   ./scripts/train_optimized.sh --batch-size 4
+#
+#   # Resume from latest checkpoint
+#   ./scripts/train_optimized.sh --auto-resume
+#
+#   # Install optimizations and train
+#   ./scripts/train_optimized.sh --install-deps --epochs 100
+# =============================================================================
 
 set -e
 
@@ -30,15 +48,25 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Auto-detect work directory based on environment
+if [ -d "/workspace" ]; then
+    DEFAULT_WORK_DIR="/workspace/checkpoints"
+elif [ -d "/home/ubuntu" ]; then
+    DEFAULT_WORK_DIR="/home/ubuntu/checkpoints"
+else
+    DEFAULT_WORK_DIR="${HOME}/checkpoints"
+fi
+
 # Defaults
 CONFIG="config/finetune_tokyo.py"
-WORK_DIR="/workspace/checkpoints"
+WORK_DIR="${DEFAULT_WORK_DIR}"
 EPOCHS=""
 BATCH_SIZE=""
 NUM_GPUS=""
 RESUME=""
 INSTALL_DEPS=false
 DRY_RUN=false
+AUTO_RESUME=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -49,12 +77,22 @@ while [[ $# -gt 0 ]]; do
         --batch-size)   BATCH_SIZE="$2"; shift 2 ;;
         --gpus)         NUM_GPUS="$2"; shift 2 ;;
         --resume)       RESUME="$2"; shift 2 ;;
+        --auto-resume)  AUTO_RESUME=true; shift ;;
         --install-deps) INSTALL_DEPS=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --help|-h)      head -20 "$0" | tail -15; exit 0 ;;
         *)              log_warn "Unknown option: $1"; shift ;;
     esac
 done
+
+# Auto-resume: find latest checkpoint
+if [ "$AUTO_RESUME" = true ] && [ -z "$RESUME" ]; then
+    LATEST_CKPT=$(ls -t ${WORK_DIR}/*.pth 2>/dev/null | head -1)
+    if [ -n "$LATEST_CKPT" ]; then
+        RESUME="$LATEST_CKPT"
+        log_info "Auto-resume from: $RESUME"
+    fi
+fi
 
 echo "=============================================="
 echo "  AerialWorld Optimized Training"
