@@ -130,6 +130,8 @@ def parse_args():
     # Hardware
     parser.add_argument('--gpu-ids', type=str, default='0',
                         help='GPU IDs to use (comma-separated)')
+    parser.add_argument('--cpu', action='store_true',
+                        help='Force CPU mode (useful when MPS/CUDA ops are unsupported)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
 
@@ -193,9 +195,16 @@ def setup_environment(args):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    # Setup GPU
+    # Setup GPU/MPS
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_ids
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if args.cpu:
+        device = torch.device('cpu')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
 
     # Create work directory
     work_dir = Path(args.work_dir)
@@ -880,12 +889,15 @@ def main():
         dataset_collate_fn = nuscenes_collate_fn
     else:
         # Create Gazebo dataset
+        ds_config = getattr(config, 'dataset_config', {})
         dataset_cfg = DatasetConfig(
             history_frames=getattr(config, 'history_frames', 4),
             future_frames=getattr(config, 'future_frames', 6),
             frame_skip=getattr(config, 'frame_skip', 1),
-            agent_type=getattr(config, 'dataset_config', {}).get('agent_type', 'both'),
+            agent_type=ds_config.get('agent_type', 'both'),
             split='train',
+            val_ratio=ds_config.get('val_ratio', 0.1),
+            test_ratio=ds_config.get('test_ratio', 0.1),
             point_cloud_range=getattr(config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)),
             voxel_size=getattr(config, 'voxel_size', (0.4, 0.4, 1.25)),
         )

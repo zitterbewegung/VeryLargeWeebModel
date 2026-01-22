@@ -725,7 +725,10 @@ class OccWorld6DoFLoss(nn.Module):
         pos_loss = F.smooth_l1_loss(pred_pos, target_pos)
         
         # Quaternion loss (1 - |q1 . q2| to handle double-cover)
-        quat_dot = (pred_quat * target_quat).sum(dim=-1).abs()
+        # Normalize quaternions to unit length before computing dot product
+        pred_quat_norm = F.normalize(pred_quat, p=2, dim=-1)
+        target_quat_norm = F.normalize(target_quat, p=2, dim=-1)
+        quat_dot = (pred_quat_norm * target_quat_norm).sum(dim=-1).abs()
         quat_loss = (1 - quat_dot).mean()
         
         # Velocity loss
