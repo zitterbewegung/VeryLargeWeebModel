@@ -336,57 +336,106 @@ download_from_onedrive() {
 
     log_info "Downloading $scene from OneDrive..."
 
-    # Check if rclone is available (best option for OneDrive)
+    # Install rclone if not available
+    if ! command -v rclone &> /dev/null; then
+        log_info "Installing rclone..."
+        curl -s https://rclone.org/install.sh | sudo bash || {
+            log_warn "Failed to install rclone automatically"
+            # Try alternative install
+            if command -v apt-get &> /dev/null; then
+                sudo apt-get update && sudo apt-get install -y rclone
+            fi
+        }
+    fi
+
+    # Check if rclone is now available
     if command -v rclone &> /dev/null; then
         log_info "Using rclone for OneDrive download..."
 
-        # Check if rclone is configured for OneDrive
-        if rclone listremotes | grep -q "onedrive:"; then
-            log_info "Found existing OneDrive remote in rclone"
-            rclone copy "onedrive:UAVScenes/interval${INTERVAL}_${scene}01" "$DATA_DIR/interval${INTERVAL}_${scene}01" --progress
-        else
-            log_warn "rclone OneDrive remote not configured"
-            log_info "Run: rclone config"
-            log_info "Or use --gdrive for Google Drive instead"
-            return 1
-        fi
-    else
-        # Try using the OneDrive direct download approach
-        log_info "Attempting OneDrive direct download..."
-        log_warn "For best results, install rclone: curl https://rclone.org/install.sh | sudo bash"
+        # Create a temporary rclone config for the public OneDrive link
+        # This uses the :onedrive: backend with the shared link
+        mkdir -p "$DATA_DIR"
 
+        # OneDrive shared folder URL
+        ONEDRIVE_SHARE="$ONEDRIVE_URL"
+
+        # Try to download using rclone with the link
+        # Format: rclone copy ":onedrive,shared_url=URL:" dest
+        log_info "Attempting download from OneDrive shared link..."
+
+        # Method 1: Try rclone with onedrive backend and shared URL
+        if rclone copy ":onedrive:interval${INTERVAL}_${scene}01" "$DATA_DIR/" \
+            --onedrive-link-type="view" \
+            --onedrive-link-scope="anonymous" \
+            --progress 2>/dev/null; then
+            log_success "Downloaded $scene from OneDrive"
+            return 0
+        fi
+
+        # Method 2: Try using rclone http backend with OneDrive direct URL
+        log_info "Trying alternative download method..."
+
+        # Convert OneDrive share URL to downloadable format
         python3 << EOF
 import os
 import sys
+import subprocess
 import urllib.request
-import zipfile
-import re
+import urllib.parse
 
 scene = "$scene"
 data_dir = "$DATA_DIR"
 interval = $INTERVAL
 onedrive_url = "$ONEDRIVE_URL"
 
-print(f"OneDrive folder: {onedrive_url}")
-print("")
-print("OneDrive shared folders require manual download or rclone.")
-print("")
-print("Option 1 - Install rclone (recommended):")
-print("  curl https://rclone.org/install.sh | sudo bash")
-print("  rclone config  # Add OneDrive remote")
-print("  rclone copy onedrive:UAVScenes $data_dir --progress")
-print("")
-print("Option 2 - Manual download:")
-print(f"  1. Open: {onedrive_url}")
-print(f"  2. Download interval{interval}_{scene}01.zip")
-print(f"  3. Extract to: {data_dir}/")
-print("")
-print("Option 3 - Use Google Drive instead:")
-print("  ./scripts/setup_uavscenes.sh --gdrive --scene $scene")
-print("")
+# Convert OneDrive sharing URL to direct download URL
+# Format: https://...sharepoint.com/:f:/g/personal/USER/HASH?e=XXX
+# To: https://...sharepoint.com/personal/USER/_layouts/15/download.aspx?share=HASH
 
-sys.exit(1)
+print(f"Converting OneDrive URL for direct download...")
+
+# Extract components from the sharing URL
+import re
+
+# Try to construct a direct download URL
+try:
+    # Parse the URL
+    # Example: https://entuedu-my.sharepoint.com/:f:/g/personal/wang1679_e_ntu_edu_sg/EgY6DU5GBchIiAIa-eQZmEAB0vJx3khCPHbFW3LnR77RFw
+
+    match = re.match(r'https://([^/]+)/:f:/g/personal/([^/]+)/([^?]+)', onedrive_url)
+    if match:
+        host = match.group(1)
+        user = match.group(2)
+        share_id = match.group(3)
+
+        # Construct download URL for folder
+        # Note: This may prompt for browser download for folders
+        download_url = f"https://{host}/personal/{user}/_layouts/15/download.aspx?share={share_id}"
+
+        print(f"Download URL: {download_url}")
+        print("")
+        print("OneDrive folder downloads require browser interaction.")
+        print("")
+        print("Please download manually:")
+        print(f"  1. Open in browser: {onedrive_url}")
+        print(f"  2. Select folder: interval{interval}_{scene}01")
+        print(f"  3. Click 'Download' button")
+        print(f"  4. Extract to: {data_dir}/")
+        print("")
+        print("Or use wget with cookies from browser session.")
+        sys.exit(1)
+    else:
+        print(f"Could not parse OneDrive URL: {onedrive_url}")
+        sys.exit(1)
+
+except Exception as e:
+    print(f"Error: {e}")
+    sys.exit(1)
 EOF
+        return 1
+    else
+        log_warn "rclone not available"
+        log_info "Install with: curl https://rclone.org/install.sh | sudo bash"
         return 1
     fi
 }
@@ -464,8 +513,8 @@ for scene in "${SCENES[@]}"; do
             SOURCES=("huggingface" "gdrive" "onedrive")
             ;;
         auto|*)
-            # Auto: try gdrive first (most reliable), then HF, then onedrive
-            SOURCES=("gdrive" "huggingface" "onedrive")
+            # Auto: try huggingface first (most reliable), then onedrive, then gdrive
+            SOURCES=("huggingface" "onedrive" "gdrive")
             ;;
     esac
 
