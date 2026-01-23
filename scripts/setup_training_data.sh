@@ -107,12 +107,12 @@ occ3d/
 ```
 EOF
 
-    # Create nuScenes dataset adapter for VeryLargeWeebModel
-    log_info "Creating nuScenes dataset adapter..."
+# Create nuScenes dataset adapter for OccWorld training
+log_info "Creating nuScenes dataset adapter..."
     cat << 'PYTHON' > "${PROJECT_ROOT}/dataset/nuscenes_occworld_dataset.py"
 #!/usr/bin/env python3
 """
-nuScenes dataset adapter for VeryLargeWeebModel training.
+nuScenes dataset adapter for OccWorld training.
 
 Loads nuScenes data in format compatible with our training pipeline.
 """
@@ -148,8 +148,8 @@ class NuScenesConfig:
     occ3d_path: Optional[str] = None
 
 
-class NuScenesVeryLargeWeebModelDataset(Dataset):
-    """nuScenes dataset for VeryLargeWeebModel training."""
+class NuScenesOccWorldDataset(Dataset):
+    """nuScenes dataset for OccWorld training."""
 
     def __init__(self, data_root: str, config: NuScenesConfig):
         if not HAS_NUSCENES:
@@ -315,7 +315,7 @@ if __name__ == '__main__':
         split='train',
     )
 
-    dataset = NuScenesVeryLargeWeebModelDataset(data_root, config)
+    dataset = NuScenesOccWorldDataset(data_root, config)
     print(f"Dataset size: {len(dataset)}")
 
     sample = dataset[0]

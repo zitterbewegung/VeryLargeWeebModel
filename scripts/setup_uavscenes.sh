@@ -129,10 +129,15 @@ log_info "Checking Python dependencies..."
 MISSING_DEPS=()
 
 python3 -c "from pyquaternion import Quaternion" 2>/dev/null || MISSING_DEPS+=("pyquaternion")
-python3 -c "import open3d" 2>/dev/null || MISSING_DEPS+=("open3d")
+
+# open3d is optional - only needed for point cloud processing, not downloading
+if ! python3 -c "import open3d" 2>/dev/null; then
+    log_warn "open3d not installed (optional - needed for point cloud processing)"
+    log_warn "Note: open3d may not support your Python version"
+fi
 
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-    log_warn "Missing dependencies: ${MISSING_DEPS[*]}"
+    log_warn "Missing required dependencies: ${MISSING_DEPS[*]}"
     log_info "Installing..."
     pip install "${MISSING_DEPS[@]}"
 fi
@@ -152,14 +157,23 @@ fi
 # Function to check if a scene is installed
 check_scene() {
     local scene=$1
-    local scene_path="$DATA_DIR/$scene"
+    local legacy_path="$DATA_DIR/$scene"
+    local hf_path1="$DATA_DIR/interval${INTERVAL}_${scene}01"
+    local hf_path2="$DATA_DIR/interval${INTERVAL}_${scene}"
 
-    if [ -d "$scene_path" ]; then
-        # Check for expected subdirectories
-        if [ -d "$scene_path/interval${INTERVAL}_CAM_LIDAR" ] || [ -d "$scene_path/interval1_CAM_LIDAR" ]; then
+    if [ -d "$legacy_path" ]; then
+        if [ -d "$legacy_path/interval${INTERVAL}_CAM_LIDAR" ] || [ -d "$legacy_path/interval1_CAM_LIDAR" ]; then
             return 0
         fi
     fi
+
+    for base in "$hf_path1" "$hf_path2"; do
+        if [ -d "$base" ]; then
+            if [ -d "$base/interval${INTERVAL}_LIDAR" ] || [ -d "$base/interval${INTERVAL}_CAM" ] || [ -d "$base/interval${INTERVAL}_CAM_LIDAR" ]; then
+                return 0
+            fi
+        fi
+    done
     return 1
 }
 
@@ -234,7 +248,11 @@ try:
         repo_id="$HF_REPO",
         repo_type="dataset",
         local_dir=data_dir,
-        allow_patterns=[f"{scene}/*"],
+        allow_patterns=[
+            f"{scene}/*",
+            f"interval{interval}_{scene}*",
+            f"interval{interval}_{scene}*/*",
+        ],
         ignore_patterns=["*.md", "*.txt"] if interval == 5 else None,
     )
     print(f"Downloaded to: {local_dir}")
@@ -270,6 +288,15 @@ show_manual_instructions() {
     echo ""
     echo "After download, extract to:"
     echo "  $DATA_DIR/"
+    echo "  ├── interval1_AMtown01/"
+    echo "  │   ├── interval1_CAM/"
+    echo "  │   ├── interval1_LIDAR/"
+    echo "  │   └── sampleinfos_interpolated.json"
+    echo "  ├── interval1_AMvalley01/"
+    echo "  ├── interval1_HKairport01/"
+    echo "  └── interval1_HKisland01/"
+    echo ""
+    echo "Legacy layout (older releases):"
     echo "  ├── AMtown/"
     echo "  │   ├── interval1_CAM_LIDAR/"
     echo "  │   │   ├── run01/"

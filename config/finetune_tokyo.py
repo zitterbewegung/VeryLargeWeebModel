@@ -51,6 +51,7 @@ dataset_config = dict(
     agent_type='both',  # 'drone', 'rover', or 'both'
     val_ratio=0.1,
     test_ratio=0.1,
+    exclude_dummy_sessions=True,
     image_size=(900, 1600),
     normalize_images=True,
     max_points=100000,

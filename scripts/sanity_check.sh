@@ -336,7 +336,7 @@ if [ "$FULL_CHECK" = true ] && [ "$QUICK_CHECK" = false ]; then
 import sys
 sys.path.insert(0, '.')
 try:
-    from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
+    from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
     print('IMPORT_OK')
 except ImportError as e:
     print(f'IMPORT_ERROR:{e}')

@@ -10,20 +10,15 @@ UAVScenes is an ICCV 2025 benchmark built on MARS-LVIG providing:
 
 This is REAL aerial 6DoF data, unlike nuScenes (ground vehicles with augmentation).
 
-Dataset structure:
+Dataset structure (actual HuggingFace format):
     data_root/
-    ├── AMtown/
-    │   ├── interval1_CAM_LIDAR/
-    │   │   ├── run01/
-    │   │   │   ├── images/
-    │   │   │   ├── lidar/
-    │   │   │   └── poses/
-    │   │   └── run02/
-    │   ├── interval1_CAM_label/
-    │   └── interval1_LIDAR_label/
-    ├── AMvalley/
-    ├── HKairport/
-    └── HKisland/
+    ├── interval1_AMtown01/
+    │   ├── interval1_CAM/           # Camera images (*.jpg)
+    │   ├── interval1_LIDAR/         # LiDAR point clouds (*.txt with x y z)
+    │   └── sampleinfos_interpolated.json  # Poses as T4x4 matrices
+    ├── interval1_AMvalley01/
+    ├── interval1_HKairport01/
+    └── interval1_HKisland01/
 
 Download from: https://github.com/sijieaaa/UAVScenes
 
@@ -79,6 +74,11 @@ class UAVScenesConfig:
     point_cloud_range: Tuple[float, ...] = (-40.0, -40.0, -10.0, 40.0, 40.0, 50.0)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 0.5)
 
+    # Transform LiDAR points into ego frame using pose
+    ego_frame: bool = True
+    fallback_to_lidar_center: bool = True
+    min_in_range_ratio: float = 0.01
+
     # Pose format: 13D = position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
     pose_dim: int = 13
 
@@ -115,6 +115,9 @@ class UAVScenesDataset(Dataset):
                 f"Download from: https://github.com/sijieaaa/UAVScenes"
             )
 
+        # Cache for sampleinfos to avoid repeated file reads
+        self._sampleinfos_cache: Dict[str, List[Dict]] = {}
+
         # Build sample index
         self.samples = self._build_sample_index()
 
@@ -130,58 +133,135 @@ class UAVScenesDataset(Dataset):
         samples = []
 
         for scene in self.config.scenes:
-            scene_path = self.data_root / scene / f'interval{self.config.interval}_CAM_LIDAR'
+            # Try multiple folder naming patterns
+            scene_folders = self._find_scene_folder(scene)
 
-            if not scene_path.exists():
-                print(f"Warning: Scene not found: {scene_path}")
+            if not scene_folders:
+                print(f"Warning: Scene not found: {scene}")
                 continue
 
-            # Find all runs
-            runs = self.config.runs or [d.name for d in scene_path.iterdir() if d.is_dir()]
+            for scene_folder in scene_folders:
+                scene_path = self.data_root / scene_folder
 
-            for run in runs:
-                run_path = scene_path / run
+                # Load sampleinfos for pose lookup
+                sampleinfos_path = scene_path / 'sampleinfos_interpolated.json'
+                if sampleinfos_path.exists():
+                    self._load_sampleinfos(scene_folder, sampleinfos_path)
 
-                # Find all frames (assuming sequential numbering)
-                lidar_path = run_path / 'lidar'
-                if not lidar_path.exists():
-                    # Try alternative structure
-                    lidar_files = sorted(run_path.glob('*.pcd')) or sorted(run_path.glob('*.bin'))
-                else:
-                    lidar_files = sorted(lidar_path.glob('*.pcd')) or sorted(lidar_path.glob('*.bin'))
+                # Find LiDAR files - try different structures
+                lidar_files = self._find_lidar_files(scene_path)
 
                 if not lidar_files:
-                    print(f"Warning: No LiDAR files in {run_path}")
+                    print(f"Warning: No LiDAR files in {scene_path}")
                     continue
 
-                # Get frame IDs from filenames
-                frame_ids = []
-                for f in lidar_files:
-                    try:
-                        frame_id = int(f.stem.split('_')[0])
-                        frame_ids.append((frame_id, f))
-                    except (ValueError, IndexError):
-                        frame_ids.append((len(frame_ids), f))
+                print(f"  Found {len(lidar_files)} LiDAR files in {scene_folder}")
 
-                frame_ids.sort(key=lambda x: x[0])
+                # Get frame info from filenames
+                frame_info = []
+                for idx, f in enumerate(lidar_files):
+                    frame_info.append({
+                        'idx': idx,
+                        'path': f,
+                        'filename': f.stem,
+                    })
 
                 # Apply frame skip
                 if self.config.frame_skip > 1:
-                    frame_ids = frame_ids[::self.config.frame_skip]
+                    frame_info = frame_info[::self.config.frame_skip]
 
                 # Create sliding windows
                 total_frames = self.config.history_frames + self.config.future_frames
-                for i in range(len(frame_ids) - total_frames + 1):
-                    window = frame_ids[i:i + total_frames]
+                for i in range(len(frame_info) - total_frames + 1):
+                    window = frame_info[i:i + total_frames]
                     samples.append({
                         'scene': scene,
-                        'run': run,
+                        'scene_folder': scene_folder,
+                        'run': 'default',  # UAVScenes uses flat structure
                         'frames': window,
                         'history_frames': window[:self.config.history_frames],
                         'future_frames': window[self.config.history_frames:],
                     })
 
         return samples
+
+    def _find_scene_folder(self, scene: str) -> List[str]:
+        """Find actual folder name for a scene (handles different naming conventions)."""
+        folders = []
+
+        # Pattern 1: interval{N}_{scene}01 (HuggingFace format)
+        pattern1 = f"interval{self.config.interval}_{scene}01"
+        if (self.data_root / pattern1).exists():
+            folders.append(pattern1)
+
+        # Pattern 2: interval{N}_{scene} (without run number)
+        pattern2 = f"interval{self.config.interval}_{scene}"
+        if (self.data_root / pattern2).exists():
+            folders.append(pattern2)
+
+        # Pattern 3: {scene}/interval{N}_CAM_LIDAR (original expected format)
+        pattern3 = scene
+        if (self.data_root / pattern3 / f'interval{self.config.interval}_CAM_LIDAR').exists():
+            folders.append(pattern3)
+
+        # Pattern 4: Just {scene} (simple structure)
+        if (self.data_root / scene).exists() and scene not in folders:
+            folders.append(scene)
+
+        # Pattern 5: Glob for any matching pattern
+        if not folders:
+            for d in self.data_root.iterdir():
+                if d.is_dir() and scene.lower() in d.name.lower():
+                    folders.append(d.name)
+
+        return folders
+
+    def _find_lidar_files(self, scene_path: Path) -> List[Path]:
+        """Find LiDAR files in a scene folder (handles different structures)."""
+        lidar_files = []
+
+        # Pattern 1: interval{N}_LIDAR/*.txt (HuggingFace format)
+        lidar_dir = scene_path / f'interval{self.config.interval}_LIDAR'
+        if lidar_dir.exists():
+            lidar_files = sorted(lidar_dir.glob('*.txt'))
+            if lidar_files:
+                return lidar_files
+
+        # Pattern 2: interval{N}_CAM_LIDAR/*/lidar/*.pcd (original expected)
+        for run_dir in (scene_path / f'interval{self.config.interval}_CAM_LIDAR').glob('*'):
+            if run_dir.is_dir():
+                lidar_path = run_dir / 'lidar'
+                if lidar_path.exists():
+                    lidar_files.extend(sorted(lidar_path.glob('*.pcd')))
+                    lidar_files.extend(sorted(lidar_path.glob('*.bin')))
+                else:
+                    lidar_files.extend(sorted(run_dir.glob('*.pcd')))
+                    lidar_files.extend(sorted(run_dir.glob('*.bin')))
+        if lidar_files:
+            return sorted(lidar_files)
+
+        # Pattern 3: lidar/*.pcd or lidar/*.bin
+        lidar_dir = scene_path / 'lidar'
+        if lidar_dir.exists():
+            lidar_files = sorted(lidar_dir.glob('*.pcd')) or sorted(lidar_dir.glob('*.bin'))
+            if lidar_files:
+                return lidar_files
+
+        # Pattern 4: Direct *.pcd, *.bin, *.txt in scene folder
+        lidar_files = sorted(scene_path.glob('*.pcd'))
+        if not lidar_files:
+            lidar_files = sorted(scene_path.glob('*.bin'))
+        if not lidar_files:
+            lidar_files = sorted(scene_path.glob('*.txt'))
+
+        return lidar_files
+
+    def _load_sampleinfos(self, scene_folder: str, path: Path):
+        """Load and cache sampleinfos_interpolated.json."""
+        if scene_folder not in self._sampleinfos_cache:
+            with open(path) as f:
+                self._sampleinfos_cache[scene_folder] = json.load(f)
+            print(f"  Loaded {len(self._sampleinfos_cache[scene_folder])} poses from sampleinfos")
 
     def _apply_split(self):
         """Apply train/val/test split."""
@@ -211,8 +291,22 @@ class UAVScenesDataset(Dataset):
             return self._load_bin(lidar_path)
         elif lidar_path.suffix == '.npy':
             return np.load(lidar_path)
+        elif lidar_path.suffix == '.txt':
+            return self._load_txt(lidar_path)
         else:
             raise ValueError(f"Unknown LiDAR format: {lidar_path.suffix}")
+
+    def _load_txt(self, path: Path) -> np.ndarray:
+        """Load point cloud from space-separated text file (UAVScenes format)."""
+        try:
+            # UAVScenes format: x y z per line
+            points = np.loadtxt(str(path), dtype=np.float32)
+            if points.ndim == 1:
+                points = points.reshape(1, -1)
+            return points[:, :3] if points.shape[1] >= 3 else points
+        except Exception as e:
+            print(f"Warning: Failed to load {path}: {e}")
+            return np.zeros((0, 3), dtype=np.float32)
 
     def _load_pcd(self, path: Path) -> np.ndarray:
         """Load PCD file (simple ASCII/binary PCD parser)."""
@@ -261,35 +355,121 @@ class UAVScenesDataset(Dataset):
                 break
         return points[:, :3].astype(np.float32)
 
-    def _load_pose(self, scene: str, run: str, frame_id: int) -> np.ndarray:
+    def _load_pose(self, scene_folder: str, frame_idx: int, frame_filename: str = None) -> np.ndarray:
         """
-        Load 6DoF pose from pose file.
+        Load 6DoF pose from cached sampleinfos or pose files.
+
+        Args:
+            scene_folder: The actual folder name (e.g., 'interval1_AMtown01')
+            frame_idx: The frame index in the sequence
+            frame_filename: Optional filename for matching (e.g., 'image1658137057.641204937_lidar...')
 
         Returns 13D pose: position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
         """
-        # Try different pose file locations and formats
-        scene_path = self.data_root / scene / f'interval{self.config.interval}_CAM_LIDAR' / run
+        # Option 1: Use cached sampleinfos (HuggingFace format)
+        if scene_folder in self._sampleinfos_cache:
+            sampleinfos = self._sampleinfos_cache[scene_folder]
 
-        # Option 1: Individual pose JSON files
-        pose_file = scene_path / 'poses' / f'{frame_id:06d}.json'
+            # Try to find by index first
+            if frame_idx < len(sampleinfos):
+                sample = sampleinfos[frame_idx]
+                if 'T4x4' in sample:
+                    return self._parse_t4x4_matrix(sample['T4x4'])
+
+            # Try to find by matching filename
+            if frame_filename:
+                # Extract image timestamp from LiDAR filename
+                # Format: image{ts}_lidar{ts}.txt -> match with OriginalImageName
+                if frame_filename.startswith('image'):
+                    img_ts = frame_filename.split('_')[0].replace('image', '')
+                    for sample in sampleinfos:
+                        if img_ts in sample.get('OriginalImageName', ''):
+                            if 'T4x4' in sample:
+                                return self._parse_t4x4_matrix(sample['T4x4'])
+
+        # Option 2: Try legacy formats
+        scene_path = self.data_root / scene_folder
+
+        # Individual pose JSON files
+        pose_file = scene_path / 'poses' / f'{frame_idx:06d}.json'
         if pose_file.exists():
             with open(pose_file) as f:
                 pose_data = json.load(f)
                 return self._parse_pose_json(pose_data)
 
-        # Option 2: Aggregated poses file
+        # Aggregated poses.txt file
         poses_file = scene_path / 'poses.txt'
         if poses_file.exists():
-            return self._load_pose_from_txt(poses_file, frame_id)
-
-        # Option 3: sampleinfos_interpolated.json
-        sampleinfos = self.data_root / scene / 'sampleinfos_interpolated.json'
-        if sampleinfos.exists():
-            return self._load_pose_from_sampleinfos(sampleinfos, run, frame_id)
+            return self._load_pose_from_txt(poses_file, frame_idx)
 
         # Fallback: return zero pose
-        print(f"Warning: No pose found for {scene}/{run}/{frame_id}")
         return np.zeros(13, dtype=np.float32)
+
+    def _parse_t4x4_matrix(self, t4x4: List[List[float]]) -> np.ndarray:
+        """
+        Parse T4x4 transformation matrix to pose vector.
+
+        T4x4 format:
+            [[r11, r12, r13, tx],
+             [r21, r22, r23, ty],
+             [r31, r32, r33, tz],
+             [0,   0,   0,   1]]
+
+        Returns 13D pose: position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
+        """
+        T = np.array(t4x4, dtype=np.float64)
+
+        # Extract translation
+        position = T[:3, 3].astype(np.float32)
+
+        # Extract rotation matrix and convert to quaternion
+        R = T[:3, :3]
+        quat = self._rotation_matrix_to_quaternion(R)
+
+        # Velocities not available in sampleinfos, will be computed from pose differences
+        lin_vel = np.zeros(3, dtype=np.float32)
+        ang_vel = np.zeros(3, dtype=np.float32)
+
+        return np.concatenate([position, quat, lin_vel, ang_vel]).astype(np.float32)
+
+    def _rotation_matrix_to_quaternion(self, R: np.ndarray) -> np.ndarray:
+        """Convert 3x3 rotation matrix to quaternion [w, x, y, z]."""
+        if HAS_QUATERNION:
+            q = Quaternion(matrix=R)
+            return np.array([q.w, q.x, q.y, q.z], dtype=np.float32)
+
+        # Manual conversion (Shepperd's method)
+        trace = np.trace(R)
+
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+
+        # Normalize quaternion
+        quat = np.array([w, x, y, z], dtype=np.float32)
+        quat = quat / (np.linalg.norm(quat) + 1e-8)
+        return quat
 
     def _parse_pose_json(self, pose_data: Dict) -> np.ndarray:
         """Parse pose from JSON format."""
@@ -326,6 +506,98 @@ class UAVScenesDataset(Dataset):
             ang_vel = np.zeros(3)
 
         return np.concatenate([pos, quat, lin_vel, ang_vel]).astype(np.float32)
+
+    def _quaternion_to_rotation_matrix(self, quat: np.ndarray) -> np.ndarray:
+        """Convert quaternion [w, x, y, z] to rotation matrix."""
+        w, x, y, z = quat
+        n = w * w + x * x + y * y + z * z
+        if n < 1e-8:
+            return np.eye(3, dtype=np.float32)
+        s = 2.0 / n
+
+        wx = s * w * x
+        wy = s * w * y
+        wz = s * w * z
+        xx = s * x * x
+        xy = s * x * y
+        xz = s * x * z
+        yy = s * y * y
+        yz = s * y * z
+        zz = s * z * z
+
+        return np.array([
+            [1.0 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1.0 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1.0 - (xx + yy)],
+        ], dtype=np.float32)
+
+    def _transform_points_to_ego(self, points: np.ndarray, pose: np.ndarray) -> np.ndarray:
+        """Transform world-frame points into ego frame using pose."""
+        if points.shape[0] == 0:
+            return points
+
+        position = pose[:3].astype(np.float32)
+        quat = pose[3:7].astype(np.float32)
+        R = self._quaternion_to_rotation_matrix(quat)
+
+        xyz = points[:, :3].astype(np.float32)
+        # Assume pose maps ego -> world; invert for world -> ego.
+        xyz_ego = (xyz - position) @ R
+
+        if points.shape[1] > 3:
+            return np.concatenate([xyz_ego, points[:, 3:]], axis=1)
+        return xyz_ego
+
+    def _center_points(self, points: np.ndarray, origin: np.ndarray) -> np.ndarray:
+        """Center points by a fixed origin (translation only)."""
+        xyz = points[:, :3] - origin
+        if points.shape[1] > 3:
+            return np.concatenate([xyz, points[:, 3:]], axis=1)
+        return xyz
+
+    def _in_range_ratio(self, xyz: np.ndarray) -> float:
+        """Compute fraction of points inside the configured point cloud range."""
+        if xyz.shape[0] == 0:
+            return 0.0
+        pc_range = np.array(self.config.point_cloud_range)
+        mask = (
+            (xyz[:, 0] >= pc_range[0]) & (xyz[:, 0] < pc_range[3]) &
+            (xyz[:, 1] >= pc_range[1]) & (xyz[:, 1] < pc_range[4]) &
+            (xyz[:, 2] >= pc_range[2]) & (xyz[:, 2] < pc_range[5])
+        )
+        return float(mask.mean())
+
+    def _align_points(
+        self,
+        points: np.ndarray,
+        pose: np.ndarray,
+        sequence_origin: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], bool]:
+        """
+        Align points to a stable frame.
+
+        Returns:
+            aligned_points, updated_sequence_origin, used_lidar_center
+        """
+        if self.config.fallback_to_lidar_center and sequence_origin is not None:
+            return self._center_points(points, sequence_origin), sequence_origin, True
+
+        if self.config.ego_frame:
+            points_pose = self._transform_points_to_ego(points, pose)
+            if not self.config.fallback_to_lidar_center:
+                return points_pose, sequence_origin, False
+            ratio = self._in_range_ratio(points_pose[:, :3])
+            if ratio >= self.config.min_in_range_ratio:
+                return points_pose, sequence_origin, False
+
+        if self.config.fallback_to_lidar_center:
+            if sequence_origin is None and points.shape[0] > 0:
+                sequence_origin = points[:, :3].mean(axis=0).astype(np.float32)
+            if sequence_origin is None:
+                return points, sequence_origin, False
+            return self._center_points(points, sequence_origin), sequence_origin, True
+
+        return points, sequence_origin, False
 
     def _load_pose_from_txt(self, poses_file: Path, frame_id: int) -> np.ndarray:
         """Load pose from TUM-style poses.txt file."""
@@ -420,20 +692,28 @@ class UAVScenesDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample_info = self.samples[idx]
         scene = sample_info['scene']
-        run = sample_info['run']
+        scene_folder = sample_info.get('scene_folder', scene)
 
         # Load history frames
         history_occ = []
         history_poses = []
         prev_pose = None
+        sequence_origin = None
 
-        for frame_id, lidar_path in sample_info['history_frames']:
-            # Load LiDAR
-            points = self._load_lidar(lidar_path)
-            occ = self._points_to_occupancy(points)
-
+        for frame_info in sample_info['history_frames']:
             # Load pose
-            pose = self._load_pose(scene, run, frame_id)
+            frame_idx = frame_info['idx']
+            frame_filename = frame_info.get('filename', '')
+            pose = self._load_pose(scene_folder, frame_idx, frame_filename)
+
+            # Load LiDAR
+            lidar_path = frame_info['path']
+            points = self._load_lidar(lidar_path)
+            points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
+            if used_lidar_center and sequence_origin is not None:
+                pose = pose.copy()
+                pose[:3] = pose[:3] - sequence_origin
+            occ = self._points_to_occupancy(points)
 
             # Compute velocities if not provided
             if prev_pose is not None and np.allclose(pose[7:], 0):
@@ -447,10 +727,18 @@ class UAVScenesDataset(Dataset):
         future_occ = []
         future_poses = []
 
-        for frame_id, lidar_path in sample_info['future_frames']:
+        for frame_info in sample_info['future_frames']:
+            frame_idx = frame_info['idx']
+            frame_filename = frame_info.get('filename', '')
+            pose = self._load_pose(scene_folder, frame_idx, frame_filename)
+
+            lidar_path = frame_info['path']
             points = self._load_lidar(lidar_path)
+            points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
+            if used_lidar_center and sequence_origin is not None:
+                pose = pose.copy()
+                pose[:3] = pose[:3] - sequence_origin
             occ = self._points_to_occupancy(points)
-            pose = self._load_pose(scene, run, frame_id)
 
             if prev_pose is not None and np.allclose(pose[7:], 0):
                 pose = self._compute_velocity(pose, prev_pose)
@@ -466,7 +754,7 @@ class UAVScenesDataset(Dataset):
             'future_poses': torch.from_numpy(np.stack(future_poses)).float(),
             'agent_type': torch.tensor(1),  # 1 = aerial (real UAV data!)
             'scene': scene,
-            'run': run,
+            'scene_folder': scene_folder,
         }
 
 
@@ -530,10 +818,13 @@ def download_uavscenes(output_dir: str, scenes: List[str] = None, interval: int 
     print()
     print("After download, extract to:")
     print(f"  {output_dir}/")
-    print("  ├── AMtown/")
-    print("  ├── AMvalley/")
-    print("  ├── HKairport/")
-    print("  └── HKisland/")
+    print("  ├── interval1_AMtown01/")
+    print("  │   ├── interval1_CAM/")
+    print("  │   ├── interval1_LIDAR/")
+    print("  │   └── sampleinfos_interpolated.json")
+    print("  ├── interval1_AMvalley01/")
+    print("  ├── interval1_HKairport01/")
+    print("  └── interval1_HKisland01/")
     print()
 
 

@@ -1013,14 +1013,14 @@ python3 scripts/depth_occupancy_processor.py --input . --output .
 ## Using with VeryLargeWeebModel Training
 
 \`\`\`python
-from dataset.gazebo_occworld_dataset import GazeboVeryLargeWeebModelDataset, DatasetConfig
+	from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
 
 config = DatasetConfig(
     history_frames=4,
     future_frames=6,
     agent_type='both',
 )
-dataset = GazeboVeryLargeWeebModelDataset('data/tokyo_gazebo', config)
+	dataset = GazeboOccWorldDataset('data/tokyo_gazebo', config)
 \`\`\`
 EOF
 

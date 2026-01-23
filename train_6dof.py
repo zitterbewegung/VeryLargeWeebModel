@@ -266,11 +266,13 @@ def main():
     print("\nCreating dataset...")
     data_root = getattr(file_config, 'data_root', 'data/tokyo_gazebo') if file_config else 'data/tokyo_gazebo'
 
+    ds_cfg = getattr(file_config, 'dataset_config', {}) if file_config else {}
     dataset_cfg = DatasetConfig(
         history_frames=model_config.history_frames,
         future_frames=model_config.future_frames,
         frame_skip=getattr(file_config, 'frame_skip', 1) if file_config else 1,
         split='train',
+        exclude_dummy_sessions=ds_cfg.get('exclude_dummy_sessions', True),
         point_cloud_range=getattr(file_config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)) if file_config else (-40, -40, -2, 40, 40, 150),
         voxel_size=getattr(file_config, 'voxel_size', (0.4, 0.4, 1.25)) if file_config else (0.4, 0.4, 1.25),
     )

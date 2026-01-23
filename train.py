@@ -791,6 +791,9 @@ def main():
             frame_skip=ds_cfg.get('frame_skip', 1),
             point_cloud_range=tuple(getattr(config, 'point_cloud_range', (-40, -40, -10, 40, 40, 50))),
             voxel_size=tuple(getattr(config, 'voxel_size', (0.4, 0.4, 0.5))),
+            ego_frame=ds_cfg.get('ego_frame', True),
+            fallback_to_lidar_center=ds_cfg.get('fallback_to_lidar_center', True),
+            min_in_range_ratio=ds_cfg.get('min_in_range_ratio', 0.01),
             val_ratio=ds_cfg.get('val_ratio', 0.1),
             test_ratio=ds_cfg.get('test_ratio', 0.1),
             split='train',
@@ -805,6 +808,9 @@ def main():
             frame_skip=uavscenes_cfg.frame_skip,
             point_cloud_range=uavscenes_cfg.point_cloud_range,
             voxel_size=uavscenes_cfg.voxel_size,
+            ego_frame=uavscenes_cfg.ego_frame,
+            fallback_to_lidar_center=uavscenes_cfg.fallback_to_lidar_center,
+            min_in_range_ratio=uavscenes_cfg.min_in_range_ratio,
             val_ratio=uavscenes_cfg.val_ratio,
             test_ratio=uavscenes_cfg.test_ratio,
             split='val',
@@ -898,6 +904,7 @@ def main():
             split='train',
             val_ratio=ds_config.get('val_ratio', 0.1),
             test_ratio=ds_config.get('test_ratio', 0.1),
+            exclude_dummy_sessions=ds_config.get('exclude_dummy_sessions', True),
             point_cloud_range=getattr(config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)),
             voxel_size=getattr(config, 'voxel_size', (0.4, 0.4, 1.25)),
         )
@@ -1034,6 +1041,13 @@ def main():
 
     # TensorBoard
     writer = SummaryWriter(log_dir=str(work_dir / 'logs'))
+
+    if args.eval_only:
+        is_6dof = args.model_type == '6dof'
+        val_loss = validate(model, val_loader, criterion, device, is_6dof)
+        print(f"Eval-only: Val Loss = {val_loss:.6f}")
+        writer.close()
+        return
 
     # Weights & Biases
     use_wandb = args.wandb and HAS_WANDB

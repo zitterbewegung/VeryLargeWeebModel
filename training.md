@@ -139,3 +139,23 @@ Watch for loss collapse in the W&B dashboard:
 - **Collapsing**: `pred/mean` drops toward 0.0001
 
 The mean-matching regularization should prevent collapse, but monitor the `pred/*` metrics to verify.
+
+---
+
+## UAVScenes Voxelization Notes (2025-01-22)
+
+### Symptom
+Most UAVScenes samples had zero occupied voxels when using pose-only ego-frame alignment.
+
+### Fix
+Keep `min_in_range_ratio=0.01` and enable the lidar-centering fallback for UAVScenes:
+- `ego_frame=True`
+- `fallback_to_lidar_center=True`
+- `min_in_range_ratio=0.01`
+
+This ensures occupancy grids stay non-empty even when pose alignment is off.
+
+### Quick Check
+```bash
+python scripts/verify_uavscenes_occupancy.py --data data/uavscenes --scenes AMtown --samples 200
+```

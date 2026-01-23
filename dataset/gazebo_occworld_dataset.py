@@ -80,6 +80,7 @@ class DatasetConfig:
     min_pose_delta: float = 0.1      # Minimum position change between frames (meters)
     min_occ_change: float = 0.001    # Minimum occupancy change ratio between frames
     filter_static: bool = True       # Filter out static sequences
+    exclude_dummy_sessions: bool = True  # Skip dummy data (e.g., *dummy* sessions)
 
 
 class GazeboOccWorldDataset(Dataset):
@@ -163,6 +164,8 @@ class GazeboOccWorldDataset(Dataset):
                 continue
 
             session_name = os.path.basename(session_dir)
+            if self.config.exclude_dummy_sessions and 'dummy' in session_name.lower():
+                continue
 
             # Filter by agent type
             if self.config.agent_type == 'drone':
