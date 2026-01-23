@@ -1007,6 +1007,18 @@ def main():
         torch.set_num_threads(1)
         torch.set_num_interop_threads(1)
 
+    # Validate dataset has samples before creating DataLoader
+    if len(train_dataset) == 0:
+        raise ValueError(
+            f"Training dataset has 0 samples!\n"
+            f"  Dataset type: {dataset_type}\n"
+            f"  Data root: {data_root}\n"
+            f"Please verify:\n"
+            f"  1. Data exists at the specified path\n"
+            f"  2. Data follows the expected directory structure\n"
+            f"  3. LiDAR files (*.txt, *.bin, *.pcd) exist in the scene folders"
+        )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,

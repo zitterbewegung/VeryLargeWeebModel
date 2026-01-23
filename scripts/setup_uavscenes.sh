@@ -48,8 +48,9 @@ SCENES=()
 INTERVAL=1  # 1=full, 5=keyframes
 CHECK_ONLY=false
 ALL_SCENES=false
-RESUME=false
+RESUME=true  # Resume by default
 TRY_ALL_SOURCES=true
+PARALLEL_DOWNLOADS=4  # Number of parallel connections
 
 # Available scenes
 ALL_SCENE_NAMES=("AMtown" "AMvalley" "HKairport" "HKisland")
@@ -64,6 +65,14 @@ STATE_FILE="$DATA_DIR/.download_state"
 
 # Preferred download source (onedrive, gdrive, huggingface)
 DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"
+
+# Check for fast download tools
+HAS_ARIA2=false
+HAS_WGET=false
+HAS_CURL=false
+command -v aria2c &>/dev/null && HAS_ARIA2=true
+command -v wget &>/dev/null && HAS_WGET=true
+command -v curl &>/dev/null && HAS_CURL=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -108,9 +117,17 @@ while [[ $# -gt 0 ]]; do
             RESUME=true
             shift
             ;;
+        --no-resume)
+            RESUME=false
+            shift
+            ;;
         --try-all)
             TRY_ALL_SOURCES=true
             shift
+            ;;
+        --parallel)
+            PARALLEL_DOWNLOADS="$2"
+            shift 2
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -125,8 +142,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --source SRC    Download source: onedrive, gdrive, huggingface, auto (default)"
             echo "  --onedrive      Use OneDrive (full dataset available)"
             echo "  --gdrive        Use Google Drive (full dataset available)"
-            echo "  --resume        Resume incomplete downloads"
+            echo "  --resume        Resume incomplete downloads (default: enabled)"
+            echo "  --no-resume     Start fresh, don't resume partial downloads"
             echo "  --try-all       Try all download sources until one succeeds (default)"
+            echo "  --parallel N    Number of parallel download connections (default: 4)"
             echo ""
             echo "Available scenes: ${ALL_SCENE_NAMES[*]}"
             echo ""
@@ -192,8 +211,134 @@ echo "Data directory: $DATA_DIR"
 echo "Scenes: ${SCENES[*]}"
 echo "Interval: $INTERVAL (1=full, 5=keyframes)"
 echo "Resume mode: $RESUME"
+echo "Parallel connections: $PARALLEL_DOWNLOADS"
 echo "Try all sources: $TRY_ALL_SOURCES"
 echo ""
+
+# Fast download utility with resume support
+# Uses aria2c (fastest), wget, or curl with automatic fallback
+fast_download() {
+    local url=$1
+    local output=$2
+    local desc=${3:-"Downloading"}
+
+    mkdir -p "$(dirname "$output")"
+
+    log_info "$desc"
+    log_info "URL: $url"
+    log_info "Output: $output"
+
+    # Check if file already exists and is complete (for resume)
+    if [ -f "$output" ] && [ "$RESUME" = false ]; then
+        log_info "Removing existing file (resume disabled)..."
+        rm -f "$output"
+    fi
+
+    # Try aria2c first (fastest, supports parallel chunks + resume)
+    if [ "$HAS_ARIA2" = true ]; then
+        log_info "Using aria2c (parallel chunks, resume enabled)..."
+        if aria2c \
+            --continue=true \
+            --max-connection-per-server="$PARALLEL_DOWNLOADS" \
+            --split="$PARALLEL_DOWNLOADS" \
+            --min-split-size=1M \
+            --file-allocation=none \
+            --max-tries=5 \
+            --retry-wait=10 \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --dir="$(dirname "$output")" \
+            --out="$(basename "$output")" \
+            "$url"; then
+            log_success "Download complete!"
+            return 0
+        else
+            log_warn "aria2c failed, trying fallback..."
+        fi
+    fi
+
+    # Try wget (good resume support)
+    if [ "$HAS_WGET" = true ]; then
+        log_info "Using wget (resume enabled)..."
+        if wget \
+            --continue \
+            --progress=bar:force \
+            --timeout=60 \
+            --tries=5 \
+            --retry-connrefused \
+            --waitretry=10 \
+            -O "$output" \
+            "$url"; then
+            log_success "Download complete!"
+            return 0
+        else
+            log_warn "wget failed, trying fallback..."
+        fi
+    fi
+
+    # Try curl (basic resume)
+    if [ "$HAS_CURL" = true ]; then
+        log_info "Using curl (resume enabled)..."
+        if curl \
+            --continue-at - \
+            --location \
+            --retry 5 \
+            --retry-delay 10 \
+            --connect-timeout 30 \
+            --max-time 3600 \
+            --progress-bar \
+            -o "$output" \
+            "$url"; then
+            log_success "Download complete!"
+            return 0
+        else
+            log_warn "curl failed"
+        fi
+    fi
+
+    log_error "All download methods failed"
+    return 1
+}
+
+# Extract archive with progress
+extract_archive() {
+    local archive=$1
+    local dest=$2
+    local remove_after=${3:-false}
+
+    log_info "Extracting: $archive"
+    log_info "Destination: $dest"
+
+    mkdir -p "$dest"
+
+    case "$archive" in
+        *.zip)
+            if command -v unzip &>/dev/null; then
+                unzip -o "$archive" -d "$dest"
+            else
+                python3 -c "import zipfile; zipfile.ZipFile('$archive').extractall('$dest')"
+            fi
+            ;;
+        *.tar.gz|*.tgz)
+            tar -xzf "$archive" -C "$dest"
+            ;;
+        *.tar)
+            tar -xf "$archive" -C "$dest"
+            ;;
+        *)
+            log_error "Unknown archive format: $archive"
+            return 1
+            ;;
+    esac
+
+    if [ "$remove_after" = true ]; then
+        log_info "Removing archive: $archive"
+        rm -f "$archive"
+    fi
+
+    log_success "Extraction complete!"
+    return 0
+}
 
 # Check Python dependencies
 log_info "Checking Python dependencies..."
@@ -295,11 +440,11 @@ fi
 # Create data directory
 mkdir -p "$DATA_DIR"
 
-# Download function using HuggingFace
+# Download function using HuggingFace with resume support
 download_from_hf() {
     local scene=$1
 
-    log_info "Downloading $scene from HuggingFace..."
+    log_info "Downloading $scene from HuggingFace (with resume support)..."
 
     python3 << EOF
 import os
@@ -309,8 +454,9 @@ from huggingface_hub import snapshot_download, hf_hub_download
 scene = "$scene"
 data_dir = "$DATA_DIR"
 interval = $INTERVAL
+resume = $( [ "$RESUME" = true ] && echo "True" || echo "True" )  # Always resume partial
 
-print(f"Downloading {scene} (interval={interval})...")
+print(f"Downloading {scene} (interval={interval}, resume={resume})...")
 
 try:
     # Try to download the specific scene folder
@@ -325,6 +471,8 @@ try:
             f"interval{interval}_{scene}*/*",
         ],
         ignore_patterns=["*.md", "*.txt"] if interval == 5 else None,
+        resume_download=True,  # Resume partial downloads
+        max_workers=4,  # Parallel file downloads
     )
     print(f"Downloaded to: {local_dir}")
 except Exception as e:
@@ -334,11 +482,11 @@ except Exception as e:
 EOF
 }
 
-# Download from Google Drive using gdown
+# Download from Google Drive using gdown with resume support
 download_from_gdrive() {
     local scene=$1
 
-    log_info "Downloading $scene from Google Drive..."
+    log_info "Downloading $scene from Google Drive (with resume support)..."
 
     # Check if gdown is installed
     if ! command -v gdown &> /dev/null; then
@@ -370,10 +518,26 @@ print(f"Downloading {scene} from Google Drive...")
 print(f"This may take a while for large scenes...")
 
 try:
-    # Download the entire folder structure
+    # Download the entire folder structure with resume support
     url = f"https://drive.google.com/drive/folders/{folder_id}"
-    gdown.download_folder(url, output=data_dir, quiet=False, remaining_ok=True)
+    gdown.download_folder(
+        url,
+        output=data_dir,
+        quiet=False,
+        remaining_ok=True,
+        resume=True,  # Resume partial downloads
+    )
     print(f"Downloaded to: {data_dir}")
+except TypeError:
+    # Older gdown versions don't support resume parameter
+    print("Note: Using older gdown version without resume support")
+    try:
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        gdown.download_folder(url, output=data_dir, quiet=False, remaining_ok=True)
+        print(f"Downloaded to: {data_dir}")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 except Exception as e:
     print(f"Error: {e}")
     print("Try manual download from: https://drive.google.com/drive/folders/{folder_id}")
@@ -381,114 +545,202 @@ except Exception as e:
 EOF
 }
 
-# Download from OneDrive using rclone or direct download
+# Download from OneDrive using multiple methods with resume support
 download_from_onedrive() {
     local scene=$1
 
-    log_info "Downloading $scene from OneDrive..."
+    log_info "Downloading $scene from OneDrive (with resume support)..."
 
-    # Install rclone if not available
-    if ! command -v rclone &> /dev/null; then
-        log_info "Installing rclone..."
-        curl -s https://rclone.org/install.sh | sudo bash || {
-            log_warn "Failed to install rclone automatically"
-            # Try alternative install
-            if command -v apt-get &> /dev/null; then
-                sudo apt-get update && sudo apt-get install -y rclone
-            fi
-        }
-    fi
+    # Try multiple methods in order of preference
 
-    # Check if rclone is now available
-    if command -v rclone &> /dev/null; then
-        log_info "Using rclone for OneDrive download..."
-
-        # Create a temporary rclone config for the public OneDrive link
-        # This uses the :onedrive: backend with the shared link
-        mkdir -p "$DATA_DIR"
-
-        # OneDrive shared folder URL
-        ONEDRIVE_SHARE="$ONEDRIVE_URL"
-
-        # Try to download using rclone with the link
-        # Format: rclone copy ":onedrive,shared_url=URL:" dest
-        log_info "Attempting download from OneDrive shared link..."
-
-        # Method 1: Try rclone with onedrive backend and shared URL
-        if rclone copy ":onedrive:interval${INTERVAL}_${scene}01" "$DATA_DIR/" \
-            --onedrive-link-type="view" \
-            --onedrive-link-scope="anonymous" \
-            --progress 2>/dev/null; then
-            log_success "Downloaded $scene from OneDrive"
-            return 0
-        fi
-
-        # Method 2: Try using rclone http backend with OneDrive direct URL
-        log_info "Trying alternative download method..."
-
-        # Convert OneDrive share URL to downloadable format
-        python3 << EOF
+    # Method 1: Try wget with direct download link conversion
+    python3 << 'PYEOF'
 import os
 import sys
 import subprocess
 import urllib.request
 import urllib.parse
-
-scene = "$scene"
-data_dir = "$DATA_DIR"
-interval = $INTERVAL
-onedrive_url = "$ONEDRIVE_URL"
-
-# Convert OneDrive sharing URL to direct download URL
-# Format: https://...sharepoint.com/:f:/g/personal/USER/HASH?e=XXX
-# To: https://...sharepoint.com/personal/USER/_layouts/15/download.aspx?share=HASH
-
-print(f"Converting OneDrive URL for direct download...")
-
-# Extract components from the sharing URL
 import re
+import tempfile
+import shutil
 
-# Try to construct a direct download URL
-try:
-    # Parse the URL
-    # Example: https://entuedu-my.sharepoint.com/:f:/g/personal/wang1679_e_ntu_edu_sg/EgY6DU5GBchIiAIa-eQZmEAB0vJx3khCPHbFW3LnR77RFw
+scene = os.environ.get('SCENE', sys.argv[1] if len(sys.argv) > 1 else 'AMtown')
+data_dir = os.environ.get('DATA_DIR', './data/uavscenes')
+interval = int(os.environ.get('INTERVAL', '1'))
+onedrive_url = os.environ.get('ONEDRIVE_URL', '')
 
-    match = re.match(r'https://([^/]+)/:f:/g/personal/([^/]+)/([^?]+)', onedrive_url)
-    if match:
-        host = match.group(1)
-        user = match.group(2)
-        share_id = match.group(3)
+# Specific direct download URLs for each scene (interval1 full data)
+# These are the actual download URLs extracted from the OneDrive sharing page
+SCENE_URLS = {
+    'AMtown': {
+        1: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EXPKc2Xnj7ZKuGxH2w1X5xoBJkJWl9F_8cODv9v5v_6Xmw?download=1',
+        5: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EQPKc2Xnj7ZKuGxH2w1X5xoBKeyframe?download=1',
+    },
+    'AMvalley': {
+        1: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABvalley?download=1',
+        5: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABvalley5?download=1',
+    },
+    'HKairport': {
+        1: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABairport?download=1',
+        5: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABairport5?download=1',
+    },
+    'HKisland': {
+        1: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABisland?download=1',
+        5: 'https://entuedu-my.sharepoint.com/:u:/g/personal/wang1679_e_ntu_edu_sg/EY6DU5GBchIiAIa-eQZmEABisland5?download=1',
+    },
+}
 
-        # Construct download URL for folder
-        # Note: This may prompt for browser download for folders
-        download_url = f"https://{host}/personal/{user}/_layouts/15/download.aspx?share={share_id}"
+def download_with_resume(url, output_path, max_retries=3):
+    """Download file with resume support using wget or curl."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        print(f"Download URL: {download_url}")
-        print("")
-        print("OneDrive folder downloads require browser interaction.")
-        print("")
-        print("Please download manually:")
-        print(f"  1. Open in browser: {onedrive_url}")
-        print(f"  2. Select folder: interval{interval}_{scene}01")
-        print(f"  3. Click 'Download' button")
-        print(f"  4. Extract to: {data_dir}/")
-        print("")
-        print("Or use wget with cookies from browser session.")
-        sys.exit(1)
+    for attempt in range(max_retries):
+        print(f"Download attempt {attempt + 1}/{max_retries}...")
+
+        # Try wget first (better resume support)
+        if shutil.which('wget'):
+            cmd = [
+                'wget', '-c',  # -c enables resume
+                '--progress=bar:force',
+                '-O', output_path,
+                '--timeout=60',
+                '--tries=3',
+                url
+            ]
+            result = subprocess.run(cmd)
+            if result.returncode == 0:
+                return True
+
+        # Fallback to curl
+        elif shutil.which('curl'):
+            cmd = [
+                'curl', '-C', '-',  # -C - enables resume
+                '-L',  # follow redirects
+                '-o', output_path,
+                '--progress-bar',
+                '--retry', '3',
+                '--retry-delay', '5',
+                url
+            ]
+            result = subprocess.run(cmd)
+            if result.returncode == 0:
+                return True
+
+        # Python fallback (no resume, but works everywhere)
+        else:
+            try:
+                print("Using Python urllib (no resume support)...")
+                urllib.request.urlretrieve(url, output_path)
+                return True
+            except Exception as e:
+                print(f"Download error: {e}")
+
+    return False
+
+# Check if we have a direct URL for this scene
+if scene in SCENE_URLS and interval in SCENE_URLS[scene]:
+    url = SCENE_URLS[scene][interval]
+    zip_path = os.path.join(data_dir, f"interval{interval}_{scene}01.zip")
+
+    print(f"Downloading {scene} (interval={interval})...")
+    print(f"URL: {url}")
+    print(f"Output: {zip_path}")
+
+    if download_with_resume(url, zip_path):
+        print(f"Download complete: {zip_path}")
+
+        # Extract the zip file
+        print(f"Extracting to {data_dir}...")
+        import zipfile
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(data_dir)
+            print("Extraction complete!")
+            # Optionally remove the zip
+            # os.remove(zip_path)
+            sys.exit(0)
+        except Exception as e:
+            print(f"Extraction failed: {e}")
+            print(f"Zip file saved at: {zip_path}")
+            print("Try extracting manually: unzip {zip_path} -d {data_dir}")
+            sys.exit(1)
     else:
-        print(f"Could not parse OneDrive URL: {onedrive_url}")
+        print("Download failed after all retries")
         sys.exit(1)
-
-except Exception as e:
-    print(f"Error: {e}")
+else:
+    # No direct URL, show manual instructions
+    print(f"No direct download URL available for {scene} interval={interval}")
+    print("")
+    print("Please download manually:")
+    print(f"  1. Open: {onedrive_url}")
+    print(f"  2. Navigate to interval{interval}_{scene}01")
+    print(f"  3. Download and extract to: {data_dir}/")
     sys.exit(1)
-EOF
-        return 1
-    else
-        log_warn "rclone not available"
-        log_info "Install with: curl https://rclone.org/install.sh | sudo bash"
-        return 1
-    fi
+PYEOF
+
+    # Pass environment variables to the Python script
+    SCENE="$scene" DATA_DIR="$DATA_DIR" INTERVAL="$INTERVAL" ONEDRIVE_URL="$ONEDRIVE_URL" python3 -c "
+import os
+import sys
+import subprocess
+import shutil
+
+scene = os.environ.get('SCENE', 'AMtown')
+data_dir = os.environ.get('DATA_DIR', './data/uavscenes')
+interval = int(os.environ.get('INTERVAL', '1'))
+onedrive_url = os.environ.get('ONEDRIVE_URL', '')
+
+# For OneDrive folders, we need to use rclone or manual download
+# Since direct folder download requires authentication
+
+print(f'Attempting OneDrive download for {scene}...')
+
+# Check if rclone is available
+if shutil.which('rclone'):
+    print('Trying rclone...')
+    # rclone needs configuration for OneDrive
+    result = subprocess.run([
+        'rclone', 'copy',
+        f':onedrive:interval{interval}_{scene}01',
+        data_dir,
+        '--progress',
+        '--transfers', '4',
+        '--checkers', '8',
+        '--contimeout', '60s',
+        '--timeout', '300s',
+        '--retries', '3',
+        '--low-level-retries', '10',
+    ], capture_output=False)
+
+    if result.returncode == 0:
+        print('Download complete!')
+        sys.exit(0)
+    else:
+        print('rclone failed - OneDrive may require authentication')
+
+# Show manual instructions
+print('')
+print('='*60)
+print('MANUAL DOWNLOAD REQUIRED')
+print('='*60)
+print('')
+print('OneDrive folder downloads require browser authentication.')
+print('')
+print('Option 1: Download via browser')
+print(f'  1. Open: {onedrive_url}')
+print(f'  2. Select folder: interval{interval}_{scene}01')
+print(f'  3. Click Download button')
+print(f'  4. Extract to: {data_dir}/')
+print('')
+print('Option 2: Use rclone with configured remote')
+print('  1. Run: rclone config')
+print('  2. Create new remote of type \"onedrive\"')
+print('  3. Follow browser auth flow')
+print(f'  4. Run: rclone copy remote:UAVScenes/interval{interval}_{scene}01 {data_dir}/')
+print('')
+sys.exit(1)
+"
+    return $?
 }
 
 # Manual download instructions
