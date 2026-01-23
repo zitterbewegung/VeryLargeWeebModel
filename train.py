@@ -734,7 +734,7 @@ def main():
     args = parse_args()
 
     print("=" * 60)
-    print("OccWorld Training for Tokyo Gazebo Dataset")
+    print("OccWorld Training")
     print("=" * 60)
 
     # Setup
@@ -999,6 +999,27 @@ def main():
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
 
+    # Print dataset info banner
+    print("\n" + "=" * 60)
+    print("DATASET CONFIGURATION")
+    print("=" * 60)
+    dataset_descriptions = {
+        'uavscenes': 'UAVScenes - Real aerial UAV data (LiDAR + Camera, 6DoF poses)',
+        'nuscenes': 'nuScenes - Real autonomous driving data',
+        'nuscenes_6dof': 'nuScenes 6DoF - Driving data with geometric augmentation',
+        'gazebo': 'Tokyo PLATEAU/Gazebo - Synthetic city simulation data',
+    }
+    print(f"  Dataset:      {dataset_type}")
+    print(f"  Description:  {dataset_descriptions.get(dataset_type, 'Custom dataset')}")
+    print(f"  Data root:    {data_root}")
+    print(f"  Train samples: {len(train_dataset)}")
+    print(f"  Val samples:   {len(val_dataset)}")
+    print(f"  Batch size:    {batch_size}")
+    print(f"  Grid size:     {getattr(config, 'grid_size', 'default')}")
+    if dataset_type == 'uavscenes':
+        print(f"  Scenes:       {getattr(config, 'dataset_config', {}).get('scenes', 'all')}")
+    print("=" * 60 + "\n")
+
     # Create model
     print(f"Creating model (type: {args.model_type})...")
     if use_occworld and args.use_occworld:
@@ -1103,6 +1124,22 @@ def main():
     use_wandb = args.wandb and HAS_WANDB
     if args.wandb and not HAS_WANDB:
         print("WARNING: --wandb specified but wandb not installed. Run: pip install wandb")
+
+    if use_wandb:
+        # Check if wandb is logged in, prompt for API key if not
+        if not wandb.api.api_key:
+            print("\n" + "=" * 60)
+            print("Weights & Biases Login Required")
+            print("=" * 60)
+            print("Get your API key from: https://wandb.ai/authorize")
+            print("")
+            api_key = input("Enter your W&B API key (or press Enter to skip W&B): ").strip()
+            if api_key:
+                wandb.login(key=api_key)
+                print("W&B login successful!")
+            else:
+                print("Skipping W&B logging.")
+                use_wandb = False
 
     if use_wandb:
         wandb_config = {
