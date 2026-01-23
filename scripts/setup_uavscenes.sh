@@ -48,6 +48,8 @@ SCENES=()
 INTERVAL=1  # 1=full, 5=keyframes
 CHECK_ONLY=false
 ALL_SCENES=false
+RESUME=false
+TRY_ALL_SOURCES=true
 
 # Available scenes
 ALL_SCENE_NAMES=("AMtown" "AMvalley" "HKairport" "HKisland")
@@ -56,6 +58,9 @@ ALL_SCENE_NAMES=("AMtown" "AMvalley" "HKairport" "HKisland")
 HF_REPO="sijieaaa/UAVScenes"
 ONEDRIVE_URL="https://entuedu-my.sharepoint.com/:f:/g/personal/wang1679_e_ntu_edu_sg/EgY6DU5GBchIiAIa-eQZmEAB0vJx3khCPHbFW3LnR77RFw"
 GDRIVE_FOLDER="1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
+
+# State file for tracking downloads
+STATE_FILE="$DATA_DIR/.download_state"
 
 # Preferred download source (onedrive, gdrive, huggingface)
 DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"
@@ -99,6 +104,14 @@ while [[ $# -gt 0 ]]; do
             DOWNLOAD_SOURCE="gdrive"
             shift
             ;;
+        --resume)
+            RESUME=true
+            shift
+            ;;
+        --try-all)
+            TRY_ALL_SOURCES=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -112,6 +125,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --source SRC    Download source: onedrive, gdrive, huggingface, auto (default)"
             echo "  --onedrive      Use OneDrive (full dataset available)"
             echo "  --gdrive        Use Google Drive (full dataset available)"
+            echo "  --resume        Resume incomplete downloads"
+            echo "  --try-all       Try all download sources until one succeeds (default)"
             echo ""
             echo "Available scenes: ${ALL_SCENE_NAMES[*]}"
             echo ""
@@ -135,6 +150,40 @@ elif [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=("AMtown")
 fi
 
+# Create data directory and state file
+mkdir -p "$DATA_DIR"
+STATE_FILE="$DATA_DIR/.download_state"
+
+# State tracking functions
+save_state() {
+    local scene=$1
+    local source=$2
+    local status=$3
+    echo "${scene}|${source}|${status}|$(date +%s)" >> "$STATE_FILE"
+}
+
+get_last_source() {
+    local scene=$1
+    if [ -f "$STATE_FILE" ]; then
+        grep "^${scene}|" "$STATE_FILE" | tail -1 | cut -d'|' -f2
+    fi
+}
+
+get_scene_status() {
+    local scene=$1
+    if [ -f "$STATE_FILE" ]; then
+        grep "^${scene}|" "$STATE_FILE" | tail -1 | cut -d'|' -f3
+    fi
+}
+
+clear_scene_state() {
+    local scene=$1
+    if [ -f "$STATE_FILE" ]; then
+        grep -v "^${scene}|" "$STATE_FILE" > "${STATE_FILE}.tmp" || true
+        mv "${STATE_FILE}.tmp" "$STATE_FILE"
+    fi
+}
+
 echo "=============================================="
 echo "  UAVScenes Dataset Setup"
 echo "=============================================="
@@ -142,6 +191,8 @@ echo ""
 echo "Data directory: $DATA_DIR"
 echo "Scenes: ${SCENES[*]}"
 echo "Interval: $INTERVAL (1=full, 5=keyframes)"
+echo "Resume mode: $RESUME"
+echo "Try all sources: $TRY_ALL_SOURCES"
 echo ""
 
 # Check Python dependencies
@@ -496,10 +547,23 @@ for scene in "${SCENES[@]}"; do
 
     if check_scene "$scene"; then
         log_success "$scene already exists, skipping"
+        clear_scene_state "$scene"
+        save_state "$scene" "complete" "success"
         continue
     fi
 
     SCENE_DOWNLOADED=false
+
+    # Check for resume - get last attempted source
+    LAST_SOURCE=""
+    LAST_STATUS=""
+    if [ "$RESUME" = true ]; then
+        LAST_SOURCE=$(get_last_source "$scene")
+        LAST_STATUS=$(get_scene_status "$scene")
+        if [ -n "$LAST_SOURCE" ]; then
+            log_info "Resuming from last attempt: $LAST_SOURCE (status: $LAST_STATUS)"
+        fi
+    fi
 
     # Determine download source order
     case "$DOWNLOAD_SOURCE" in
@@ -518,38 +582,82 @@ for scene in "${SCENES[@]}"; do
             ;;
     esac
 
+    # If resuming and we have a last source that failed, start from the next one
+    if [ "$RESUME" = true ] && [ -n "$LAST_SOURCE" ] && [ "$LAST_STATUS" = "failed" ]; then
+        SKIP_UNTIL_AFTER="$LAST_SOURCE"
+        FOUND_LAST=false
+    else
+        SKIP_UNTIL_AFTER=""
+        FOUND_LAST=true
+    fi
+
     for source in "${SOURCES[@]}"; do
         if [ "$SCENE_DOWNLOADED" = true ]; then
             break
         fi
 
+        # Skip sources until we pass the last failed one (for resume)
+        if [ "$FOUND_LAST" = false ]; then
+            if [ "$source" = "$SKIP_UNTIL_AFTER" ]; then
+                FOUND_LAST=true
+                log_info "Skipping $source (failed in previous attempt)"
+            fi
+            continue
+        fi
+
+        # Track that we're attempting this source
+        save_state "$scene" "$source" "attempting"
+
         case "$source" in
             huggingface)
                 if [ "$HAS_HF" = true ]; then
-                    log_info "Trying HuggingFace..."
+                    log_info "Trying HuggingFace... (1/3 sources)"
                     if download_from_hf "$scene"; then
                         SCENE_DOWNLOADED=true
+                        save_state "$scene" "$source" "success"
+                    else
+                        save_state "$scene" "$source" "failed"
+                        if [ "$TRY_ALL_SOURCES" = true ]; then
+                            log_warn "HuggingFace failed, trying next source..."
+                        fi
                     fi
                 fi
                 ;;
             gdrive)
-                log_info "Trying Google Drive..."
+                log_info "Trying Google Drive... (2/3 sources)"
                 if download_from_gdrive "$scene"; then
                     SCENE_DOWNLOADED=true
+                    save_state "$scene" "$source" "success"
+                else
+                    save_state "$scene" "$source" "failed"
+                    if [ "$TRY_ALL_SOURCES" = true ]; then
+                        log_warn "Google Drive failed, trying next source..."
+                    fi
                 fi
                 ;;
             onedrive)
-                log_info "Trying OneDrive..."
+                log_info "Trying OneDrive... (3/3 sources)"
                 if download_from_onedrive "$scene"; then
                     SCENE_DOWNLOADED=true
+                    save_state "$scene" "$source" "success"
+                else
+                    save_state "$scene" "$source" "failed"
                 fi
                 ;;
         esac
+
+        # If not trying all sources, break after first attempt
+        if [ "$TRY_ALL_SOURCES" = false ] && [ "$SCENE_DOWNLOADED" = false ]; then
+            break
+        fi
     done
 
     if [ "$SCENE_DOWNLOADED" = false ]; then
         log_warn "All download methods failed for $scene"
+        log_info "Run with --resume to continue from where you left off"
         DOWNLOAD_FAILED=true
+    else
+        log_success "Successfully downloaded $scene"
     fi
 done
 
