@@ -167,6 +167,8 @@ def parse_args():
                         help='Data loading workers (default: 4, use 0 for debugging)')
     parser.add_argument('--debug-freq', type=int, default=500,
                         help='Debug print frequency (default: 500, higher = faster)')
+    parser.add_argument('--save-freq', type=int, default=1,
+                        help='Checkpoint save frequency in epochs (default: 1 = every epoch)')
 
     # Weights & Biases
     parser.add_argument('--wandb', action='store_true',
@@ -1300,7 +1302,7 @@ def main():
             })
 
         # Save checkpoint
-        if (epoch + 1) % 5 == 0 or epoch == max_epochs - 1:
+        if (epoch + 1) % args.save_freq == 0 or epoch == max_epochs - 1:
             ckpt_path = work_dir / 'checkpoints' / f'epoch_{epoch+1}.pth'
             torch.save({
                 'epoch': epoch + 1,
