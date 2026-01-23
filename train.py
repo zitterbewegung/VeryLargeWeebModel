@@ -520,7 +520,7 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False):
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown'):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -583,7 +583,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             pred_mean = pred_occ.mean().item()
             pred_max = pred_occ.max().item()
             pred_min = pred_occ.min().item()
-            print(f"  DEBUG [{batch_idx}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
+            print(f"  DEBUG [{batch_idx}] [{dataset_type}]: Occ: {occ_rate:.2f}%, Pred mean: {pred_mean:.4f}, min: {pred_min:.4f}, max: {pred_max:.4f}")
             # Check if pred and target accidentally share memory
             print(f"  DEBUG [{batch_idx}]: pred_occ.data_ptr={pred_occ.data_ptr()}, future_occ.data_ptr={future_occ.data_ptr()}")
             # Check if predictions are accidentally equal to targets
@@ -1207,7 +1207,7 @@ def main():
 
     # Training loop
     print("=" * 60)
-    print(f"Starting training for {max_epochs} epochs (from epoch {start_epoch})")
+    print(f"Starting training on [{dataset_type.upper()}] for {max_epochs} epochs (from epoch {start_epoch})")
     print("=" * 60)
 
     is_6dof = args.model_type == '6dof'
@@ -1217,7 +1217,7 @@ def main():
 
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
-                                  device, epoch, writer, use_wandb, is_6dof)
+                                  device, epoch, writer, use_wandb, is_6dof, dataset_type)
 
         # Validate
         val_loss = validate(model, val_loader, criterion, device, is_6dof)
