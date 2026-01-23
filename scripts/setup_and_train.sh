@@ -15,6 +15,7 @@
 #   --test          Use synthetic buildings for quick pipeline testing (~5 min)
 #   --6dof          Use 6DoF enhanced model (pose uncertainty, relocalization)
 #   --nuscenes      Download and use nuScenes mini dataset instead
+#   --uavscenes     Download UAVScenes aerial drone dataset (real 6DoF data)
 #   --plateau       Download real Tokyo PLATEAU 3D city data (default)
 #   --all           Download all available datasets
 #   --skip-train    Only setup data, don't start training
@@ -23,6 +24,14 @@
 #   --epochs N      Training epochs (default: 50)
 #   --batch-size N  Batch size (default: auto-detect)
 #   --work-dir DIR  Output directory (default: /workspace/checkpoints or ./out)
+#   --mirror URL    Custom data mirror URL (faster than official source)
+#
+# Caching for Vast.ai:
+#   1. Upload data to your S3: ./scripts/upload_data_cache.sh s3://your-bucket/plateau
+#   2. On Vast.ai: ./scripts/setup_and_train.sh --mirror https://your-bucket.s3.amazonaws.com/plateau
+#
+#   Or set environment variable:
+#     export DATA_MIRROR="https://your-bucket.s3.amazonaws.com/plateau"
 #
 set -e
 
@@ -50,6 +59,12 @@ EPOCHS=50
 BATCH_SIZE=""
 WORK_DIR=""
 SYNTHETIC_BUILDINGS=200
+
+# Custom data mirror (set via environment or --mirror flag)
+# Examples:
+#   export DATA_MIRROR="https://your-bucket.s3.amazonaws.com/plateau"
+#   export DATA_MIRROR="https://huggingface.co/datasets/your-name/plateau/resolve/main"
+DATA_MIRROR="${DATA_MIRROR:-}"
 
 # Detect environment
 if [ -d "/workspace" ]; then
@@ -82,6 +97,11 @@ while [[ $# -gt 0 ]]; do
             MODE="nuscenes"
             shift
             ;;
+        --uavscenes)
+            MODE="uavscenes"
+            USE_6DOF=true  # UAVScenes works best with 6DoF model
+            shift
+            ;;
         --plateau)
             MODE="plateau"
             shift
@@ -112,6 +132,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --work-dir)
             WORK_DIR="$2"
+            shift 2
+            ;;
+        --mirror)
+            DATA_MIRROR="$2"
             shift 2
             ;;
         --help|-h)
@@ -197,7 +221,14 @@ case $MODE in
         mkdir -p "$PLATEAU_RAW" "$PLATEAU_MESHES"
 
         PLATEAU_ARCHIVE="$PLATEAU_RAW/tokyo23ku_obj.zip"
-        PLATEAU_URL="https://gic-plateau.s3.ap-northeast-1.amazonaws.com/2020/13100_tokyo23-ku_2020_obj_3_op.zip"
+
+        # Use custom mirror if set, otherwise use official PLATEAU source
+        if [ -n "$DATA_MIRROR" ]; then
+            PLATEAU_URL="${DATA_MIRROR}/tokyo23ku_obj.zip"
+            log_info "Using custom mirror: $DATA_MIRROR"
+        else
+            PLATEAU_URL="https://gic-plateau.s3.ap-northeast-1.amazonaws.com/2020/13100_tokyo23-ku_2020_obj_3_op.zip"
+        fi
 
         # Check if already downloaded
         MESH_COUNT=$(find "$PLATEAU_MESHES" -name "*.obj" 2>/dev/null | wc -l)
@@ -205,10 +236,57 @@ case $MODE in
         if [ "$MESH_COUNT" -gt 10 ]; then
             log_info "PLATEAU meshes already exist: $MESH_COUNT files"
         else
+            # Expected size ~2.1GB (2100000000 bytes minimum)
+            MIN_SIZE=2000000000
+
+            # Check if file exists and is large enough
+            if [ -f "$PLATEAU_ARCHIVE" ]; then
+                FILE_SIZE=$(stat -c%s "$PLATEAU_ARCHIVE" 2>/dev/null || stat -f%z "$PLATEAU_ARCHIVE" 2>/dev/null || echo 0)
+                if [ "$FILE_SIZE" -lt "$MIN_SIZE" ]; then
+                    log_warn "Existing archive is incomplete (${FILE_SIZE} bytes, expected ~2.1GB)"
+                    log_info "Removing corrupted file and re-downloading..."
+                    rm -f "$PLATEAU_ARCHIVE"
+                fi
+            fi
+
+            # Download if file doesn't exist
             if [ ! -f "$PLATEAU_ARCHIVE" ]; then
                 log_info "Downloading from Project PLATEAU (MLIT Japan)..."
-                wget -q --show-progress -O "$PLATEAU_ARCHIVE" "$PLATEAU_URL" || \
-                curl -L --progress-bar -o "$PLATEAU_ARCHIVE" "$PLATEAU_URL"
+                log_info "This is a large file (~2.1GB), please wait..."
+
+                # Try wget with resume support first
+                if command -v wget &> /dev/null; then
+                    wget -c --show-progress -O "$PLATEAU_ARCHIVE" "$PLATEAU_URL" || {
+                        log_warn "wget failed, trying curl..."
+                        rm -f "$PLATEAU_ARCHIVE"
+                        curl -L -C - --progress-bar -o "$PLATEAU_ARCHIVE" "$PLATEAU_URL"
+                    }
+                else
+                    curl -L -C - --progress-bar -o "$PLATEAU_ARCHIVE" "$PLATEAU_URL"
+                fi
+
+                # Verify download completed
+                if [ -f "$PLATEAU_ARCHIVE" ]; then
+                    FILE_SIZE=$(stat -c%s "$PLATEAU_ARCHIVE" 2>/dev/null || stat -f%z "$PLATEAU_ARCHIVE" 2>/dev/null || echo 0)
+                    if [ "$FILE_SIZE" -lt "$MIN_SIZE" ]; then
+                        log_error "Download incomplete (${FILE_SIZE} bytes, expected ~2.1GB)"
+                        log_info "Try downloading manually:"
+                        log_info "  wget -c -O $PLATEAU_ARCHIVE $PLATEAU_URL"
+                        exit 1
+                    fi
+                    log_success "Download complete ($(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo "$FILE_SIZE bytes"))"
+                else
+                    log_error "Download failed. Try manually:"
+                    log_info "  wget -c -O $PLATEAU_ARCHIVE $PLATEAU_URL"
+                    exit 1
+                fi
+            fi
+
+            # Verify it's a valid zip before extracting
+            if ! unzip -t "$PLATEAU_ARCHIVE" > /dev/null 2>&1; then
+                log_error "Archive is corrupted. Removing and please re-run script."
+                rm -f "$PLATEAU_ARCHIVE"
+                exit 1
             fi
 
             log_info "Extracting meshes..."
@@ -269,6 +347,33 @@ case $MODE in
         CONFIG="config/finetune_nuscenes.py"
         ;;
 
+    uavscenes)
+        log_info "Setting up UAVScenes aerial drone dataset..."
+        log_info "This is REAL aerial 6DoF data from UAV flights"
+
+        # Install gdown for Google Drive downloads
+        $PIP_CMD install -q gdown pyquaternion
+
+        # Run UAVScenes setup script
+        UAVSCENES_SCENE="${UAVSCENES_SCENE:-AMtown}"
+
+        if [ -n "$DATA_MIRROR" ]; then
+            log_info "Using custom mirror for UAVScenes: $DATA_MIRROR"
+            # If custom mirror is set, download from there
+            UAVSCENES_DIR="$DATA_DIR/uavscenes"
+            mkdir -p "$UAVSCENES_DIR"
+            wget -c -O "$UAVSCENES_DIR/uavscenes.zip" "$DATA_MIRROR/uavscenes.zip" || \
+            curl -L -C - -o "$UAVSCENES_DIR/uavscenes.zip" "$DATA_MIRROR/uavscenes.zip"
+            unzip -q -o "$UAVSCENES_DIR/uavscenes.zip" -d "$UAVSCENES_DIR/"
+        else
+            # Use the setup script with Google Drive (most reliable)
+            ./scripts/setup_uavscenes.sh --gdrive --scene "$UAVSCENES_SCENE" --keyframes
+        fi
+
+        log_success "UAVScenes ready"
+        CONFIG="config/finetune_uavscenes.py"
+        ;;
+
     all)
         log_info "Downloading ALL available datasets..."
 
@@ -296,28 +401,50 @@ esac
 # =============================================================================
 log_step "Step 3/4: Verifying training data..."
 
-if [ "$MODE" = "nuscenes" ]; then
-    DATA_CHECK_DIR="$DATA_DIR/nuscenes"
-else
-    DATA_CHECK_DIR="$DATA_DIR/tokyo_gazebo"
-fi
+case "$MODE" in
+    nuscenes)
+        DATA_CHECK_DIR="$DATA_DIR/nuscenes"
+        ;;
+    uavscenes)
+        DATA_CHECK_DIR="$DATA_DIR/uavscenes"
+        ;;
+    *)
+        DATA_CHECK_DIR="$DATA_DIR/tokyo_gazebo"
+        ;;
+esac
 
-# Count sessions
-SESSION_COUNT=$(find "$DATA_CHECK_DIR" -maxdepth 1 -type d -name "*_*" 2>/dev/null | wc -l)
-
-if [ "$SESSION_COUNT" -eq 0 ] && [ "$MODE" != "nuscenes" ]; then
-    log_error "No training sessions found in $DATA_CHECK_DIR"
-    log_info "Data generation may have failed. Check errors above."
-    exit 1
-fi
-
-if [ "$MODE" != "nuscenes" ]; then
-    # Count frames
-    FRAME_COUNT=$(find "$DATA_CHECK_DIR" -name "*_occupancy.npz" 2>/dev/null | wc -l)
-    log_success "Found $SESSION_COUNT sessions with $FRAME_COUNT total frames"
-else
-    log_success "nuScenes data directory verified"
-fi
+# Verify data exists
+case "$MODE" in
+    nuscenes)
+        if [ -d "$DATA_CHECK_DIR/v1.0-mini" ]; then
+            log_success "nuScenes data directory verified"
+        else
+            log_error "nuScenes data not found"
+            exit 1
+        fi
+        ;;
+    uavscenes)
+        # Check for UAVScenes directory structure
+        SCENE_COUNT=$(find "$DATA_CHECK_DIR" -maxdepth 1 -type d -name "interval*" 2>/dev/null | wc -l)
+        if [ "$SCENE_COUNT" -gt 0 ]; then
+            log_success "Found $SCENE_COUNT UAVScenes scene(s)"
+        else
+            log_warn "UAVScenes data may still be downloading or not found"
+            log_info "Check: $DATA_CHECK_DIR"
+        fi
+        ;;
+    *)
+        # Count sessions for Gazebo/PLATEAU data
+        SESSION_COUNT=$(find "$DATA_CHECK_DIR" -maxdepth 1 -type d -name "*_*" 2>/dev/null | wc -l)
+        if [ "$SESSION_COUNT" -eq 0 ]; then
+            log_error "No training sessions found in $DATA_CHECK_DIR"
+            log_info "Data generation may have failed. Check errors above."
+            exit 1
+        fi
+        FRAME_COUNT=$(find "$DATA_CHECK_DIR" -name "*_occupancy.npz" 2>/dev/null | wc -l)
+        log_success "Found $SESSION_COUNT sessions with $FRAME_COUNT total frames"
+        ;;
+esac
 
 # =============================================================================
 # Step 4: Start Training
@@ -350,7 +477,14 @@ if [ "$USE_6DOF" = true ]; then
     log_info "  - Pose uncertainty estimation"
     log_info "  - Relocalization head"
     log_info "  - Place recognition embeddings"
-    TRAIN_CMD="python train_6dof.py --config config/finetune_6dof.py --work-dir $WORK_DIR --epochs $EPOCHS"
+
+    # Use dataset-specific 6DoF config
+    if [ "$MODE" = "uavscenes" ]; then
+        SIXDOF_CONFIG="config/finetune_uavscenes.py"
+    else
+        SIXDOF_CONFIG="config/finetune_6dof.py"
+    fi
+    TRAIN_CMD="python train.py --config $SIXDOF_CONFIG --work-dir $WORK_DIR --epochs $EPOCHS --model-type 6dof"
 else
     TRAIN_CMD="python train.py --config $CONFIG --work-dir $WORK_DIR --epochs $EPOCHS"
 fi

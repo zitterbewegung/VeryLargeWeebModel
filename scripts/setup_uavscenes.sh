@@ -52,8 +52,13 @@ ALL_SCENES=false
 # Available scenes
 ALL_SCENE_NAMES=("AMtown" "AMvalley" "HKairport" "HKisland")
 
-# HuggingFace dataset URL
+# Download URLs
 HF_REPO="sijieaaa/UAVScenes"
+ONEDRIVE_URL="https://entuedu-my.sharepoint.com/:f:/g/personal/wang1679_e_ntu_edu_sg/EgY6DU5GBchIiAIa-eQZmEAB0vJx3khCPHbFW3LnR77RFw"
+GDRIVE_FOLDER="1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
+
+# Preferred download source (onedrive, gdrive, huggingface)
+DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -82,6 +87,18 @@ while [[ $# -gt 0 ]]; do
             DATA_DIR="$2"
             shift 2
             ;;
+        --source)
+            DOWNLOAD_SOURCE="$2"
+            shift 2
+            ;;
+        --onedrive)
+            DOWNLOAD_SOURCE="onedrive"
+            shift
+            ;;
+        --gdrive)
+            DOWNLOAD_SOURCE="gdrive"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -92,6 +109,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --full          Download full version (interval=1, default)"
             echo "  --check         Check existing installation only"
             echo "  --data-dir      Custom data directory"
+            echo "  --source SRC    Download source: onedrive, gdrive, huggingface, auto (default)"
+            echo "  --onedrive      Use OneDrive (full dataset available)"
+            echo "  --gdrive        Use Google Drive (full dataset available)"
             echo ""
             echo "Available scenes: ${ALL_SCENE_NAMES[*]}"
             echo ""
@@ -263,6 +283,114 @@ except Exception as e:
 EOF
 }
 
+# Download from Google Drive using gdown
+download_from_gdrive() {
+    local scene=$1
+
+    log_info "Downloading $scene from Google Drive..."
+
+    # Check if gdown is installed
+    if ! command -v gdown &> /dev/null; then
+        log_info "Installing gdown..."
+        pip install gdown
+    fi
+
+    # Scene folder IDs on Google Drive (you may need to update these)
+    # The main folder contains subfolders for each scene
+    python3 << EOF
+import os
+import sys
+
+try:
+    import gdown
+except ImportError:
+    print("Installing gdown...")
+    os.system("pip install gdown")
+    import gdown
+
+scene = "$scene"
+data_dir = "$DATA_DIR"
+interval = $INTERVAL
+
+# Main folder ID
+folder_id = "$GDRIVE_FOLDER"
+
+print(f"Downloading {scene} from Google Drive...")
+print(f"This may take a while for large scenes...")
+
+try:
+    # Download the entire folder structure
+    url = f"https://drive.google.com/drive/folders/{folder_id}"
+    gdown.download_folder(url, output=data_dir, quiet=False, remaining_ok=True)
+    print(f"Downloaded to: {data_dir}")
+except Exception as e:
+    print(f"Error: {e}")
+    print("Try manual download from: https://drive.google.com/drive/folders/{folder_id}")
+    sys.exit(1)
+EOF
+}
+
+# Download from OneDrive using rclone or direct download
+download_from_onedrive() {
+    local scene=$1
+
+    log_info "Downloading $scene from OneDrive..."
+
+    # Check if rclone is available (best option for OneDrive)
+    if command -v rclone &> /dev/null; then
+        log_info "Using rclone for OneDrive download..."
+
+        # Check if rclone is configured for OneDrive
+        if rclone listremotes | grep -q "onedrive:"; then
+            log_info "Found existing OneDrive remote in rclone"
+            rclone copy "onedrive:UAVScenes/interval${INTERVAL}_${scene}01" "$DATA_DIR/interval${INTERVAL}_${scene}01" --progress
+        else
+            log_warn "rclone OneDrive remote not configured"
+            log_info "Run: rclone config"
+            log_info "Or use --gdrive for Google Drive instead"
+            return 1
+        fi
+    else
+        # Try using the OneDrive direct download approach
+        log_info "Attempting OneDrive direct download..."
+        log_warn "For best results, install rclone: curl https://rclone.org/install.sh | sudo bash"
+
+        python3 << EOF
+import os
+import sys
+import urllib.request
+import zipfile
+import re
+
+scene = "$scene"
+data_dir = "$DATA_DIR"
+interval = $INTERVAL
+onedrive_url = "$ONEDRIVE_URL"
+
+print(f"OneDrive folder: {onedrive_url}")
+print("")
+print("OneDrive shared folders require manual download or rclone.")
+print("")
+print("Option 1 - Install rclone (recommended):")
+print("  curl https://rclone.org/install.sh | sudo bash")
+print("  rclone config  # Add OneDrive remote")
+print("  rclone copy onedrive:UAVScenes $data_dir --progress")
+print("")
+print("Option 2 - Manual download:")
+print(f"  1. Open: {onedrive_url}")
+print(f"  2. Download interval{interval}_{scene}01.zip")
+print(f"  3. Extract to: {data_dir}/")
+print("")
+print("Option 3 - Use Google Drive instead:")
+print("  ./scripts/setup_uavscenes.sh --gdrive --scene $scene")
+print("")
+
+sys.exit(1)
+EOF
+        return 1
+    fi
+}
+
 # Manual download instructions
 show_manual_instructions() {
     echo ""
@@ -322,14 +450,56 @@ for scene in "${SCENES[@]}"; do
         continue
     fi
 
-    # Try HuggingFace download
-    if [ "$HAS_HF" = true ]; then
-        download_from_hf "$scene" || {
-            log_warn "Automatic download failed for $scene"
-            DOWNLOAD_FAILED=true
-        }
-    else
-        log_warn "HuggingFace not available"
+    SCENE_DOWNLOADED=false
+
+    # Determine download source order
+    case "$DOWNLOAD_SOURCE" in
+        onedrive)
+            SOURCES=("onedrive" "gdrive" "huggingface")
+            ;;
+        gdrive)
+            SOURCES=("gdrive" "onedrive" "huggingface")
+            ;;
+        huggingface|hf)
+            SOURCES=("huggingface" "gdrive" "onedrive")
+            ;;
+        auto|*)
+            # Auto: try gdrive first (most reliable), then HF, then onedrive
+            SOURCES=("gdrive" "huggingface" "onedrive")
+            ;;
+    esac
+
+    for source in "${SOURCES[@]}"; do
+        if [ "$SCENE_DOWNLOADED" = true ]; then
+            break
+        fi
+
+        case "$source" in
+            huggingface)
+                if [ "$HAS_HF" = true ]; then
+                    log_info "Trying HuggingFace..."
+                    if download_from_hf "$scene"; then
+                        SCENE_DOWNLOADED=true
+                    fi
+                fi
+                ;;
+            gdrive)
+                log_info "Trying Google Drive..."
+                if download_from_gdrive "$scene"; then
+                    SCENE_DOWNLOADED=true
+                fi
+                ;;
+            onedrive)
+                log_info "Trying OneDrive..."
+                if download_from_onedrive "$scene"; then
+                    SCENE_DOWNLOADED=true
+                fi
+                ;;
+        esac
+    done
+
+    if [ "$SCENE_DOWNLOADED" = false ]; then
+        log_warn "All download methods failed for $scene"
         DOWNLOAD_FAILED=true
     fi
 done

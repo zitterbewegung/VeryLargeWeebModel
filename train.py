@@ -911,9 +911,59 @@ def main():
 
         train_dataset = GazeboOccWorldDataset(data_root, dataset_cfg)
 
+        # Check for empty dataset and provide diagnostic help
+        if len(train_dataset) == 0:
+            print("\n" + "="*70)
+            print("ERROR: No training samples found!")
+            print("="*70)
+            print(f"\nData root: {data_root}")
+            print(f"Absolute path: {os.path.abspath(data_root)}")
+
+            if not os.path.exists(data_root):
+                print(f"\n[PROBLEM] Directory does not exist: {data_root}")
+                print("\n[FIX] Create the data directory and add training data:")
+                print(f"  mkdir -p {data_root}")
+            else:
+                # Check what's in the directory
+                contents = os.listdir(data_root)
+                print(f"\nDirectory contents ({len(contents)} items):")
+                for item in contents[:10]:
+                    item_path = os.path.join(data_root, item)
+                    if os.path.isdir(item_path):
+                        subdirs = os.listdir(item_path) if os.path.isdir(item_path) else []
+                        print(f"  {item}/ -> {subdirs[:5]}{'...' if len(subdirs) > 5 else ''}")
+                    else:
+                        print(f"  {item}")
+                if len(contents) > 10:
+                    print(f"  ... and {len(contents) - 10} more")
+
+                print("\n[REQUIRED] Each session directory must have these subdirectories:")
+                print("  session_name/")
+                print("  ├── images/      (camera images)")
+                print("  ├── lidar/       (point cloud .npy files)")
+                print("  ├── poses/       (pose .json files)")
+                print("  └── occupancy/   (occupancy .npz files)")
+
+                print("\n[POSSIBLE FIXES]")
+                print("  1. Check that data was downloaded/generated correctly")
+                print("  2. Verify the data_root path in your config file")
+                print("  3. If data exists but is being filtered, try adding to config:")
+                print("     dataset_config = {'filter_static': False}")
+                if dataset_cfg.exclude_dummy_sessions:
+                    print("  4. Dummy sessions are excluded - check if all sessions have 'dummy' in name")
+
+            print("\n" + "="*70)
+            sys.exit(1)
+
         val_cfg = DatasetConfig(**vars(dataset_cfg))
         val_cfg.split = 'val'
         val_dataset = GazeboOccWorldDataset(data_root, val_cfg)
+
+        # Warn if validation set is empty (not fatal, but noteworthy)
+        if len(val_dataset) == 0:
+            print("\nWARNING: Validation dataset is empty. Training will continue without validation.")
+            print("This may happen if val_ratio is too small or all data went to training split.\n")
+
         dataset_collate_fn = collate_fn
 
     # Create dataloaders
