@@ -158,6 +158,16 @@ def parse_args():
     parser.add_argument('--use-transformer', action='store_true',
                         help='Use Transformer instead of LSTM for temporal modeling (6dof only)')
 
+    # Performance optimizations
+    parser.add_argument('--amp', action='store_true',
+                        help='Enable automatic mixed precision (FP16/BF16) - much faster on A100')
+    parser.add_argument('--compile', action='store_true',
+                        help='Use torch.compile() for faster training (PyTorch 2.0+)')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Data loading workers (default: 4, use 0 for debugging)')
+    parser.add_argument('--debug-freq', type=int, default=500,
+                        help='Debug print frequency (default: 500, higher = faster)')
+
     # Weights & Biases
     parser.add_argument('--wandb', action='store_true',
                         help='Enable Weights & Biases logging')
@@ -520,8 +530,8 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown'):
-    """Train for one epoch."""
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500):
+    """Train for one epoch with optional mixed precision."""
     model.train()
     total_loss = 0
     num_batches = 0
@@ -533,52 +543,57 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         history_poses = batch['history_poses'].to(device)
         future_poses = batch['future_poses'].to(device)
 
-        # Forward pass
+        # Forward pass with optional mixed precision
         optimizer.zero_grad()
 
-        if is_6dof:
-            # 6DoF model returns dict of outputs
-            outputs = model(history_occ, history_poses, future_poses)
-            pred_occ = outputs['future_occupancy']
+        # Use autocast for mixed precision if scaler is provided
+        use_amp = scaler is not None
+        amp_context = torch.cuda.amp.autocast() if use_amp else torch.enable_grad()
 
-            # 6DoF loss expects outputs and targets dicts
-            targets = {
-                'future_occupancy': future_occ.float(),
-                'future_poses': future_poses,
-            }
-            losses = criterion(outputs, targets)
-            loss = losses['total']
+        with amp_context:
+            if is_6dof:
+                # 6DoF model returns dict of outputs
+                outputs = model(history_occ, history_poses, future_poses)
+                pred_occ = outputs['future_occupancy']
 
-            # Get debug metrics from loss function
-            debug_metrics = criterion.get_debug_metrics()
-        else:
-            # Simple model - can return dict or tensor depending on pose availability
-            output = model(history_occ, history_poses, future_poses)
+                # 6DoF loss expects outputs and targets dicts
+                targets = {
+                    'future_occupancy': future_occ.float(),
+                    'future_poses': future_poses,
+                }
+                losses = criterion(outputs, targets)
+                loss = losses['total']
 
-            if isinstance(output, dict):
-                # Model returned occupancy and poses
-                pred_occ = output['future_occupancy']
-                pred_poses = output.get('future_poses')
-
-                # Occupancy loss
-                occ_loss = criterion(pred_occ, future_occ.float())
-
-                # Add pose loss if poses predicted
-                if pred_poses is not None:
-                    pose_loss = F.smooth_l1_loss(pred_poses, future_poses)
-                    loss = occ_loss + 0.1 * pose_loss
-                else:
-                    loss = occ_loss
+                # Get debug metrics from loss function
+                debug_metrics = criterion.get_debug_metrics()
             else:
-                # Legacy: model returned just occupancy tensor
-                pred_occ = output
-                loss = criterion(pred_occ, future_occ.float())
+                # Simple model - can return dict or tensor depending on pose availability
+                output = model(history_occ, history_poses, future_poses)
 
-            debug_metrics = {}
+                if isinstance(output, dict):
+                    # Model returned occupancy and poses
+                    pred_occ = output['future_occupancy']
+                    pred_poses = output.get('future_poses')
+
+                    # Occupancy loss
+                    occ_loss = criterion(pred_occ, future_occ.float())
+
+                    # Add pose loss if poses predicted
+                    if pred_poses is not None:
+                        pose_loss = F.smooth_l1_loss(pred_poses, future_poses)
+                        loss = occ_loss + 0.1 * pose_loss
+                    else:
+                        loss = occ_loss
+                else:
+                    # Legacy: model returned just occupancy tensor
+                    pred_occ = output
+                    loss = criterion(pred_occ, future_occ.float())
+
+                debug_metrics = {}
 
         # Debug: Check occupancy rate and prediction distribution
-        # Log at start and every 100 batches to track potential collapse
-        if batch_idx % 100 == 0:
+        # Log at start and every debug_freq batches to track potential collapse
+        if batch_idx % debug_freq == 0:
             occ_rate = (future_occ > 0).float().mean().item() * 100
             pred_mean = pred_occ.mean().item()
             pred_max = pred_occ.max().item()
@@ -632,11 +647,14 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
                 wandb.log(log_dict, commit=False)
 
-        # Backward pass
-        loss.backward()
+        # Backward pass with optional mixed precision scaling
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         # Debug: Check if gradients exist and are non-zero
-        if batch_idx % 100 == 0:
+        if batch_idx % debug_freq == 0:
             total_grad_norm = 0
             num_params_with_grad = 0
             for p in model.parameters():
@@ -654,8 +672,15 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                     'debug/params_with_grad': num_params_with_grad,
                 }, commit=False)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
-        optimizer.step()
+        # Gradient clipping and optimizer step with optional scaling
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -969,31 +994,40 @@ def main():
     # Create dataloaders
     batch_size = args.batch_size or getattr(config, 'data', {}).get('samples_per_gpu', 1)
 
-    # FORCE single-threaded: num_workers=0, no multiprocessing
-    num_workers = 0  # Hardcoded to avoid any multiprocessing issues
-    print(f"Using {num_workers} data loading workers (FORCED single-threaded)")
+    # Data loading workers - use --num-workers to control (default: 4)
+    num_workers = args.num_workers
+    pin_memory = num_workers > 0 and torch.cuda.is_available()
+    print(f"Using {num_workers} data loading workers, pin_memory={pin_memory}")
 
-    # Also limit PyTorch threads
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    # Limit PyTorch threads when using multiprocessing workers
+    if num_workers > 0:
+        torch.set_num_threads(2)
+        torch.set_num_interop_threads(2)
+    else:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # FORCED: no multiprocessing
+        num_workers=num_workers,
         collate_fn=dataset_collate_fn,
-        pin_memory=False,  # Disabled for single-threaded
+        pin_memory=pin_memory,
         drop_last=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,  # FORCED: no multiprocessing
+        num_workers=num_workers,
         collate_fn=dataset_collate_fn,
-        pin_memory=False,  # Disabled for single-threaded
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     print(f"Train samples: {len(train_dataset)}")
@@ -1069,9 +1103,27 @@ def main():
             else:
                 model.load_state_dict(checkpoint, strict=False)
 
+    # Optional: Compile model for faster training (PyTorch 2.0+)
+    if args.compile:
+        if hasattr(torch, 'compile'):
+            print("Compiling model with torch.compile()...")
+            model = torch.compile(model)
+            print("  Model compiled successfully")
+        else:
+            print("WARNING: --compile requires PyTorch 2.0+, skipping")
+
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}")
+
+    # Mixed precision scaler (for --amp)
+    scaler = None
+    if args.amp:
+        if torch.cuda.is_available():
+            scaler = torch.cuda.amp.GradScaler()
+            print("Mixed precision (AMP) enabled - using FP16/BF16 for faster training")
+        else:
+            print("WARNING: --amp requires CUDA, skipping")
 
     # Optimizer
     lr = args.lr or getattr(config, 'optimizer', {}).get('lr', 1e-4)
@@ -1217,7 +1269,8 @@ def main():
 
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
-                                  device, epoch, writer, use_wandb, is_6dof, dataset_type)
+                                  device, epoch, writer, use_wandb, is_6dof, dataset_type,
+                                  scaler=scaler, debug_freq=args.debug_freq)
 
         # Validate
         val_loss = validate(model, val_loader, criterion, device, is_6dof)
