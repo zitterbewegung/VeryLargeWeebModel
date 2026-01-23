@@ -138,8 +138,6 @@ def parse_args():
     # Overrides
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override batch size')
-    parser.add_argument('--num-workers', type=int, default=0,
-                        help='Data loading workers (default: 0 = single-threaded)')
     parser.add_argument('--lr', type=float, default=None,
                         help='Override learning rate')
     parser.add_argument('--epochs', type=int, default=None,
