@@ -163,8 +163,8 @@ def parse_args():
                         help='Enable automatic mixed precision (FP16/BF16) - much faster on A100')
     parser.add_argument('--compile', action='store_true',
                         help='Use torch.compile() for faster training (PyTorch 2.0+)')
-    parser.add_argument('--num-workers', type=int, default=4,
-                        help='Data loading workers (default: 4, use 0 for debugging)')
+    parser.add_argument('--num-workers', type=int, default=1,
+                        help='Data loading workers (default: 1, increase for faster loading)')
     parser.add_argument('--debug-freq', type=int, default=500,
                         help='Debug print frequency (default: 500, higher = faster)')
     parser.add_argument('--save-freq', type=int, default=1,
