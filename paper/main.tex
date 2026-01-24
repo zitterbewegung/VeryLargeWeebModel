@@ -106,6 +106,8 @@ Autonomous drone navigation has traditionally relied on different paradigms:
 
 \textbf{Classical approaches} use SLAM~\cite{slam}, potential fields, and geometric path planning, requiring explicit obstacle detection and map building.
 
+\textbf{Adaptive obstacle avoidance} for real-world drones has also been explored by Devos \etal~\cite{devos2018adaptive}, who tune a computationally inexpensive control algorithm to avoid deadlocks and corners and validate it in simulation and on a custom inspection drone. This line of work targets reactive, local obstacle avoidance rather than learning predictive 3D occupancy. In contrast, \ours{} learns a city-scale occupancy world model that forecasts future voxel states and agent poses, enabling long-horizon planning; this shift from reactive control to predictive world modeling is a key novelty relative to Devos \etal.
+
 \textbf{End-to-end learning} directly maps sensor inputs to control commands. Recent work from MIT~\cite{liquidnets} demonstrates that liquid neural networks can generalize to unseen environments using minimal training data.
 
 \textbf{Lightweight networks} for drone swarms~\cite{droneswarms2025} show that ultra-low-resolution depth maps (12$\times$16) suffice for agile navigation when physics constraints are embedded in training.
@@ -524,6 +526,11 @@ Lightweight neural networks for autonomous drone swarm navigation.
 \bibitem{aceformer}
 AceFormer: Visual Reinforcement Learning for GNSS-Denied Drone Navigation.
 \textit{Journal of Computer Science and Technology}, 2025.
+
+\bibitem{devos2018adaptive}
+Devos, A., Ebeid, E., \& Manoonpong, P. (2018).
+Development of Autonomous Drones for Adaptive Obstacle Avoidance in Real World Environments.
+\textit{2018 21st Euromicro Conference on Digital System Design (DSD)}, 707--710.
 
 \bibitem{slam}
 Cadena, C., Carlone, L., Carrillo, H., Latif, Y., Scaramuzza, D., Neira, J., Reid, I., \& Leonard, J.J. (2016).
