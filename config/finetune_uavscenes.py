@@ -35,8 +35,13 @@ data_root = os.environ.get('UAVSCENES_ROOT', os.path.join(PROJECT_ROOT, 'data/ua
 # Dataset type flag for train.py
 dataset_type = 'uavscenes'
 
-# Scene selection (all 4 scenes for full training)
-uavscenes_scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
+# Scene selection
+# Available: AMtown, AMvalley, HKairport, HKisland
+# Note: Dataset gracefully handles missing scenes (warns and continues)
+# Start with AMtown (most commonly downloaded), add more as they become available
+uavscenes_scenes = ['AMtown']
+# For full training with all scenes:
+# uavscenes_scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
 
 # Interval: 1 = full data, 5 = keyframes only (smaller)
 uavscenes_interval = 1

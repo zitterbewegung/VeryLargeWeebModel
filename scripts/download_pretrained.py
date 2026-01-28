@@ -1,338 +1,505 @@
 #!/usr/bin/env python3
 """
-Download VeryLargeWeebModel pretrained models from Tsinghua Cloud (Seafile).
+Download VeryLargeWeebModel pretrained models and data from S3.
 
-This script uses the Seafile API to download files from shared links,
-bypassing the need for a web browser.
+Primary source: s3://verylargeweebmodel/
+Fallback: Tsinghua Cloud (Seafile)
 
 Usage:
     python scripts/download_pretrained.py
     python scripts/download_pretrained.py --output pretrained/
+    python scripts/download_pretrained.py --all  # Download everything (models + data)
 """
 import os
 import sys
-import re
 import argparse
-import urllib.request
-import urllib.parse
-import json
+import subprocess
 from pathlib import Path
 
 
-def get_seafile_download_link(share_url: str, file_path: str) -> str:
-    """
-    Get direct download link from Seafile shared folder.
+# =============================================================================
+# Configuration
+# =============================================================================
 
-    Seafile API endpoint for shared links:
-    GET /api/v2.1/share-links/{token}/dirents/?path={path}
-    """
-    # Extract token from share URL
-    # https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
-    match = re.search(r'/d/([a-f0-9]+)/?', share_url)
-    if not match:
-        raise ValueError(f"Could not extract token from URL: {share_url}")
+S3_BUCKET = "verylargeweebmodel"
+S3_REGION = "us-west-2"
 
-    token = match.group(1)
-    base_url = share_url.split('/d/')[0]
+# Files available on S3
+S3_FILES = {
+    # Pretrained models
+    "occworld_checkpoint": {
+        "s3_key": "pretrained/occworld/latest.pth",
+        "local_path": "pretrained/occworld/latest.pth",
+        "description": "OccWorld checkpoint (~721MB)",
+        "required": True,
+    },
+    "vqvae_checkpoint": {
+        "s3_key": "pretrained/vqvae/epoch_125.pth",
+        "local_path": "pretrained/vqvae/epoch_125.pth",
+        "description": "VQVAE checkpoint (~500MB)",
+        "required": False,
+    },
+    # PLATEAU data
+    "plateau_obj": {
+        "s3_key": "plateau/tokyo23ku_obj.zip",
+        "local_path": "data/plateau/raw/tokyo23ku_obj.zip",
+        "description": "Tokyo PLATEAU OBJ models (~2.1GB)",
+        "required": False,
+    },
+    "plateau_3dtiles": {
+        "s3_key": "plateau/tokyo23ku_3dtiles.zip",
+        "local_path": "data/plateau/raw/tokyo23ku_3dtiles.zip",
+        "description": "Tokyo PLATEAU 3D Tiles (~4GB)",
+        "required": False,
+    },
+    "plateau_citygml": {
+        "s3_key": "plateau/tokyo23ku_citygml.zip",
+        "local_path": "data/plateau/raw/tokyo23ku_citygml.zip",
+        "description": "Tokyo PLATEAU CityGML (~5GB)",
+        "required": False,
+    },
+    # nuScenes pickle files
+    "nuscenes_train_pkl": {
+        "s3_key": "nuscenes/nuscenes_infos_train_temporal_v3_scene.pkl",
+        "local_path": "data/nuscenes_infos_train_temporal_v3_scene.pkl",
+        "description": "nuScenes training pickle (~100MB)",
+        "required": False,
+    },
+    "nuscenes_val_pkl": {
+        "s3_key": "nuscenes/nuscenes_infos_val_temporal_v3_scene.pkl",
+        "local_path": "data/nuscenes_infos_val_temporal_v3_scene.pkl",
+        "description": "nuScenes validation pickle (~30MB)",
+        "required": False,
+    },
+}
 
-    # Construct download URL
-    # Seafile download endpoint: /d/{token}/files/?p={path}&dl=1
-    encoded_path = urllib.parse.quote(file_path)
-    download_url = f"{base_url}/d/{token}/files/?p={encoded_path}&dl=1"
+# Directories to sync from S3 (use aws s3 sync instead of single file download)
+S3_DIRS = {
+    "uavscenes": {
+        "s3_prefix": "uavscenes",
+        "local_path": "data/uavscenes",
+        "description": "UAVScenes aerial 6DoF dataset (~20GB)",
+        "required": False,
+    },
+    "tokyo_gazebo": {
+        "s3_prefix": "tokyo_gazebo",
+        "local_path": "data/tokyo_gazebo",
+        "description": "Tokyo Gazebo training data (~15MB)",
+        "required": False,
+    },
+}
 
-    return download_url
+# Minimum file sizes (bytes) to consider a file valid
+MIN_FILE_SIZES = {
+    "occworld_checkpoint": 100_000_000,  # 100MB
+    "vqvae_checkpoint": 100_000_000,     # 100MB
+    "plateau_obj": 1_000_000_000,        # 1GB
+    "plateau_3dtiles": 1_000_000_000,    # 1GB
+    "plateau_citygml": 1_000_000_000,    # 1GB
+    "nuscenes_train_pkl": 10_000_000,    # 10MB
+    "nuscenes_val_pkl": 5_000_000,       # 5MB
+}
 
 
-def download_with_redirect(url: str, output_path: str, description: str = "") -> bool:
-    """Download file following redirects."""
-    print(f"Downloading {description or output_path}...")
-    print(f"  URL: {url}")
+# =============================================================================
+# Logging
+# =============================================================================
+
+class Colors:
+    RED = '\033[0;31m'
+    GREEN = '\033[0;32m'
+    YELLOW = '\033[1;33m'
+    BLUE = '\033[0;34m'
+    CYAN = '\033[0;36m'
+    NC = '\033[0m'
+
+
+def log_info(msg: str):
+    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}")
+
+
+def log_success(msg: str):
+    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}")
+
+
+def log_warn(msg: str):
+    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}")
+
+
+def log_error(msg: str):
+    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}")
+
+
+def log_step(msg: str):
+    print(f"\n{Colors.CYAN}==>{Colors.NC} {msg}")
+
+
+# =============================================================================
+# S3 Download Functions
+# =============================================================================
+
+def check_aws_cli() -> bool:
+    """Check if AWS CLI is installed and configured."""
+    try:
+        result = subprocess.run(
+            ["aws", "sts", "get-caller-identity"],
+            capture_output=True,
+            timeout=10
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def download_from_s3(s3_key: str, local_path: str, description: str = "") -> bool:
+    """Download a file from S3 using AWS CLI."""
+    s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
+
+    log_info(f"Downloading {description or s3_key}...")
+    log_info(f"  Source: {s3_uri}")
+    log_info(f"  Destination: {local_path}")
+
+    # Create parent directory
+    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Create request with browser-like headers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }
-
-        request = urllib.request.Request(url, headers=headers)
-
-        # Open URL and follow redirects
-        with urllib.request.urlopen(request, timeout=30) as response:
-            # Check if we got a redirect to actual file
-            final_url = response.geturl()
-            content_type = response.headers.get('Content-Type', '')
-            content_length = response.headers.get('Content-Length', 'unknown')
-
-            print(f"  Content-Type: {content_type}")
-            print(f"  Size: {content_length} bytes")
-
-            # If we got HTML, the download link might need different handling
-            if 'text/html' in content_type:
-                html = response.read().decode('utf-8', errors='ignore')
-
-                # Try to find direct download link in the page
-                # Seafile sometimes returns a page with the actual download link
-                download_match = re.search(r'href="([^"]+\.pth[^"]*)"', html)
-                if download_match:
-                    new_url = download_match.group(1)
-                    if not new_url.startswith('http'):
-                        new_url = urllib.parse.urljoin(url, new_url)
-                    print(f"  Found redirect: {new_url}")
-                    return download_with_redirect(new_url, output_path, description)
-
-                # Check for JavaScript-based download
-                if 'seafile' in html.lower() or 'download' in html.lower():
-                    print("  Got HTML page instead of file.")
-                    print("  Seafile may require JavaScript for this download.")
-                    return False
-
-            # Download the file
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            with open(output_path, 'wb') as f:
-                total = 0
-                while True:
-                    chunk = response.read(8192)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total += len(chunk)
-                    print(f"\r  Downloaded: {total / 1024 / 1024:.1f} MB", end='')
-
-            print()
-
-            # Verify file size
-            file_size = os.path.getsize(output_path)
-            if file_size < 1000000:  # Less than 1MB is probably an error page
-                print(f"  Warning: File seems too small ({file_size} bytes)")
-                # Check if it's an error page
-                with open(output_path, 'rb') as f:
-                    header = f.read(100)
-                    if b'<!DOCTYPE' in header or b'<html' in header:
-                        print("  Downloaded file is HTML, not a model checkpoint.")
-                        os.remove(output_path)
-                        return False
-
-            print(f"  Saved to: {output_path}")
-            return True
-
-    except urllib.error.HTTPError as e:
-        print(f"  HTTP Error: {e.code} {e.reason}")
-        return False
-    except urllib.error.URLError as e:
-        print(f"  URL Error: {e.reason}")
-        return False
-    except Exception as e:
-        print(f"  Error: {e}")
-        return False
-
-
-def try_alternative_methods(output_dir: str) -> bool:
-    """Try alternative download methods."""
-
-    print("\n" + "=" * 60)
-    print("Trying alternative download methods...")
-    print("=" * 60)
-
-    # Method 1: Try requests library with session (handles cookies better)
-    try:
-        import requests
-        print("\n[Method 1] Using requests library with session...")
-
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        })
-
-        share_url = "https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
-
-        # First, visit the share page to get cookies
-        resp = session.get(share_url, timeout=30)
-
-        if resp.status_code == 200:
-            # Try to download files
-            files_to_download = [
-                ("/vqvae/epoch_125.pth", "vqvae/epoch_125.pth"),
-                ("/occworld/latest.pth", "occworld/latest.pth"),
-            ]
-
-            for remote_path, local_path in files_to_download:
-                download_url = f"{share_url}files/?p={urllib.parse.quote(remote_path)}&dl=1"
-                output_path = os.path.join(output_dir, local_path)
-
-                print(f"  Downloading {remote_path}...")
-                resp = session.get(download_url, stream=True, timeout=60)
-
-                if resp.status_code == 200 and 'application/octet-stream' in resp.headers.get('Content-Type', ''):
-                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                    with open(output_path, 'wb') as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    print(f"    Saved: {output_path}")
-                else:
-                    print(f"    Failed: {resp.status_code}")
-
-        return True
-
-    except ImportError:
-        print("  requests library not installed")
-    except Exception as e:
-        print(f"  Failed: {e}")
-
-    return False
-
-
-def print_manual_instructions():
-    """Print manual download instructions."""
-    print("\n" + "=" * 60)
-    print("MANUAL DOWNLOAD REQUIRED")
-    print("=" * 60)
-    print("""
-Automatic download failed. Tsinghua Cloud requires browser interaction.
-
-Option 1: Download on another machine and transfer
---------------------------------------------------
-1. On a machine with a browser, visit:
-   https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
-
-2. Download these files:
-   - vqvae/epoch_125.pth
-   - occworld/latest.pth
-
-3. Transfer to this machine:
-   scp epoch_125.pth user@this-machine:/path/to/pretrained/vqvae/
-   scp latest.pth user@this-machine:/path/to/pretrained/occworld/
-
-Option 2: Use a text browser (if available)
--------------------------------------------
-   lynx https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
-
-   or
-
-   w3m https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/
-
-Option 3: Train from scratch (slower but works)
------------------------------------------------
-   # Edit config/finetune_tokyo.py and comment out:
-   #   load_from = occworld_checkpoint
-   #   vqvae_ckpt = vqvae_checkpoint
-
-   python train.py --py-config config/finetune_tokyo.py
-
-Option 4: Use Selenium (if Chrome/Firefox available)
-----------------------------------------------------
-   pip install selenium webdriver-manager
-   python scripts/download_pretrained.py --use-selenium
-""")
-
-
-def download_with_selenium(output_dir: str) -> bool:
-    """Use Selenium to download files (requires Chrome/Firefox)."""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-
-        print("\n[Selenium] Starting headless browser...")
-
-        # Setup Chrome options
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_experimental_option('prefs', {
-            'download.default_directory': os.path.abspath(output_dir),
-            'download.prompt_for_download': False,
-        })
-
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=options)
-        except:
-            driver = webdriver.Chrome(options=options)
-
-        driver.get("https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/")
-
-        # Wait for page to load
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        result = subprocess.run(
+            ["aws", "s3", "cp", s3_uri, local_path, "--region", S3_REGION],
+            capture_output=False,
+            timeout=3600  # 1 hour timeout for large files
         )
 
-        print("  Page loaded, looking for download links...")
+        if result.returncode == 0 and Path(local_path).exists():
+            size_mb = Path(local_path).stat().st_size / 1024 / 1024
+            log_success(f"Downloaded {description} ({size_mb:.1f}MB)")
+            return True
+        else:
+            log_error(f"Failed to download {description}")
+            return False
 
-        # This is a simplified version - actual implementation would need
-        # to navigate the Seafile interface
-
-        driver.quit()
-        return True
-
-    except ImportError:
-        print("  Selenium not installed. Run: pip install selenium webdriver-manager")
+    except subprocess.TimeoutExpired:
+        log_error(f"Download timed out for {description}")
         return False
     except Exception as e:
-        print(f"  Selenium failed: {e}")
+        log_error(f"Download error: {e}")
         return False
 
 
+def sync_from_s3(s3_prefix: str, local_dir: str, description: str = "") -> bool:
+    """Sync a directory from S3 using AWS CLI."""
+    s3_uri = f"s3://{S3_BUCKET}/{s3_prefix}"
+
+    log_info(f"Syncing {description or s3_prefix}...")
+    log_info(f"  Source: {s3_uri}")
+    log_info(f"  Destination: {local_dir}")
+
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            ["aws", "s3", "sync", s3_uri, local_dir, "--region", S3_REGION],
+            capture_output=False,
+            timeout=7200  # 2 hour timeout
+        )
+
+        if result.returncode == 0:
+            log_success(f"Synced {description}")
+            return True
+        else:
+            log_error(f"Failed to sync {description}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        log_error(f"Sync timed out for {description}")
+        return False
+    except Exception as e:
+        log_error(f"Sync error: {e}")
+        return False
+
+
+# =============================================================================
+# Validation Functions
+# =============================================================================
+
+def validate_file(name: str, local_path: str) -> bool:
+    """Check if a downloaded file is valid."""
+    path = Path(local_path)
+
+    if not path.exists():
+        return False
+
+    size = path.stat().st_size
+    min_size = MIN_FILE_SIZES.get(name, 1000)
+
+    if size < min_size:
+        log_warn(f"{name} seems incomplete ({size} bytes, expected >= {min_size})")
+        return False
+
+    # Check if it's an HTML error page
+    if size < 10_000_000:  # Only check smaller files
+        try:
+            with open(path, 'rb') as f:
+                header = f.read(100)
+                if b'<!DOCTYPE' in header or b'<html' in header:
+                    log_warn(f"{name} appears to be an HTML error page")
+                    return False
+        except Exception:
+            pass
+
+    return True
+
+
+def check_existing_files(output_dir: str, files: list) -> dict:
+    """Check which files already exist and are valid."""
+    status = {}
+
+    for name in files:
+        if name not in S3_FILES:
+            continue
+
+        info = S3_FILES[name]
+        local_path = Path(output_dir) / info["local_path"]
+
+        if local_path.exists() and validate_file(name, str(local_path)):
+            size_mb = local_path.stat().st_size / 1024 / 1024
+            status[name] = {"exists": True, "valid": True, "size_mb": size_mb}
+        elif local_path.exists():
+            status[name] = {"exists": True, "valid": False, "size_mb": 0}
+        else:
+            status[name] = {"exists": False, "valid": False, "size_mb": 0}
+
+    return status
+
+
+# =============================================================================
+# Main Download Function
+# =============================================================================
+
+def download_files(
+    output_dir: str,
+    files: list = None,
+    force: bool = False,
+    dry_run: bool = False,
+    include_dirs: bool = False
+) -> dict:
+    """
+    Download specified files from S3.
+
+    Args:
+        output_dir: Base directory for downloads
+        files: List of file names to download (None = required files only)
+        force: Re-download even if file exists
+        dry_run: Show what would be downloaded without downloading
+        include_dirs: Also sync directories from S3_DIRS
+
+    Returns:
+        Dict with download status for each file
+    """
+    if files is None:
+        files = [name for name, info in S3_FILES.items() if info.get("required", False)]
+
+    # Check AWS CLI
+    if not dry_run and not check_aws_cli():
+        log_error("AWS CLI not configured. Please run: aws configure")
+        log_info("Or set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables")
+        return {}
+
+    # Check existing files
+    existing = check_existing_files(output_dir, files)
+
+    results = {}
+
+    # Download individual files
+    for name in files:
+        if name not in S3_FILES:
+            # Check if it's a directory
+            if name in S3_DIRS:
+                continue  # Handle below
+            log_warn(f"Unknown file: {name}")
+            continue
+
+        info = S3_FILES[name]
+        local_path = Path(output_dir) / info["local_path"]
+
+        # Skip if already valid
+        if not force and existing.get(name, {}).get("valid", False):
+            log_info(f"{info['description']} already exists ({existing[name]['size_mb']:.1f}MB)")
+            results[name] = True
+            continue
+
+        if dry_run:
+            log_info(f"[DRY RUN] Would download: {info['description']}")
+            log_info(f"  s3://{S3_BUCKET}/{info['s3_key']} -> {local_path}")
+            results[name] = True
+            continue
+
+        # Download from S3
+        success = download_from_s3(
+            info["s3_key"],
+            str(local_path),
+            info["description"]
+        )
+
+        results[name] = success
+
+    # Sync directories if requested
+    if include_dirs:
+        for name in files:
+            if name in S3_DIRS:
+                info = S3_DIRS[name]
+                local_path = Path(output_dir) / info["local_path"]
+
+                # Check if directory exists and has content
+                if not force and local_path.exists() and any(local_path.iterdir()):
+                    log_info(f"{info['description']} already exists at {local_path}")
+                    results[name] = True
+                    continue
+
+                if dry_run:
+                    log_info(f"[DRY RUN] Would sync: {info['description']}")
+                    log_info(f"  s3://{S3_BUCKET}/{info['s3_prefix']}/ -> {local_path}/")
+                    results[name] = True
+                    continue
+
+                # Sync from S3
+                success = sync_from_s3(
+                    info["s3_prefix"],
+                    str(local_path),
+                    info["description"]
+                )
+                results[name] = success
+
+        # Also sync any dirs specified with --all
+        if files == list(S3_FILES.keys()):
+            for name, info in S3_DIRS.items():
+                if name in results:
+                    continue
+                local_path = Path(output_dir) / info["local_path"]
+
+                if not force and local_path.exists() and any(local_path.iterdir()):
+                    log_info(f"{info['description']} already exists at {local_path}")
+                    results[name] = True
+                    continue
+
+                if dry_run:
+                    log_info(f"[DRY RUN] Would sync: {info['description']}")
+                    results[name] = True
+                    continue
+
+                success = sync_from_s3(
+                    info["s3_prefix"],
+                    str(local_path),
+                    info["description"]
+                )
+                results[name] = success
+
+    return results
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
 def main():
-    parser = argparse.ArgumentParser(description='Download VeryLargeWeebModel pretrained models')
-    parser.add_argument('--output', '-o', default='pretrained', help='Output directory')
-    parser.add_argument('--use-selenium', action='store_true', help='Use Selenium browser automation')
+    parser = argparse.ArgumentParser(
+        description='Download VeryLargeWeebModel pretrained models from S3',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Download required pretrained models
+  python scripts/download_pretrained.py
+
+  # Download everything (models + data)
+  python scripts/download_pretrained.py --all
+
+  # Download specific files
+  python scripts/download_pretrained.py --files occworld_checkpoint vqvae_checkpoint
+
+  # Force re-download
+  python scripts/download_pretrained.py --force
+
+  # Preview what would be downloaded
+  python scripts/download_pretrained.py --dry-run --all
+
+Available files:
+""" + "\n".join([f"  {name}: {info['description']}" for name, info in S3_FILES.items()])
+    + "\n\nAvailable directories:\n"
+    + "\n".join([f"  {name}: {info['description']}" for name, info in S3_DIRS.items()])
+    )
+
+    all_names = list(S3_FILES.keys()) + list(S3_DIRS.keys())
+    parser.add_argument('--output', '-o', default='.', help='Output directory (default: current)')
+    parser.add_argument('--all', '-a', action='store_true', help='Download all files and directories')
+    parser.add_argument('--files', '-f', nargs='+', choices=all_names,
+                       help='Specific files/directories to download')
+    parser.add_argument('--force', action='store_true', help='Force re-download even if files exist')
+    parser.add_argument('--dry-run', action='store_true', help='Show what would be downloaded')
+    parser.add_argument('--list', '-l', action='store_true', help='List available files and exit')
+
     args = parser.parse_args()
 
-    output_dir = args.output
-    os.makedirs(output_dir, exist_ok=True)
+    # List mode
+    if args.list:
+        print("\nAvailable files on S3:\n")
+        for name, info in S3_FILES.items():
+            required = " (required)" if info.get("required") else ""
+            print(f"  {name}{required}")
+            print(f"    {info['description']}")
+            print(f"    s3://{S3_BUCKET}/{info['s3_key']}")
+            print()
+        print("\nAvailable directories on S3:\n")
+        for name, info in S3_DIRS.items():
+            print(f"  {name}")
+            print(f"    {info['description']}")
+            print(f"    s3://{S3_BUCKET}/{info['s3_prefix']}/")
+            print()
+        return
 
     print("=" * 60)
-    print("VeryLargeWeebModel Pretrained Model Downloader")
+    print("VeryLargeWeebModel - Download from S3")
     print("=" * 60)
-    print(f"Output directory: {os.path.abspath(output_dir)}")
+    print(f"S3 Bucket: s3://{S3_BUCKET}")
+    print(f"Output: {os.path.abspath(args.output)}")
+    print()
 
-    share_url = "https://cloud.tsinghua.edu.cn/d/ff4612b2453841fba7a5/"
+    # Determine which files to download
+    include_dirs = False
+    if args.files:
+        files = args.files
+        # Check if any directories are requested
+        include_dirs = any(f in S3_DIRS for f in files)
+    elif args.all:
+        files = list(S3_FILES.keys()) + list(S3_DIRS.keys())
+        include_dirs = True
+    else:
+        files = None  # Will default to required files
 
-    files_to_download = [
-        ("/vqvae/epoch_125.pth", "vqvae/epoch_125.pth", "VQVAE checkpoint (~500MB)"),
-        ("/occworld/latest.pth", "occworld/latest.pth", "VeryLargeWeebModel checkpoint (~200MB)"),
-    ]
+    # Download
+    results = download_files(
+        args.output,
+        files=files,
+        force=args.force,
+        dry_run=args.dry_run,
+        include_dirs=include_dirs
+    )
 
-    success = True
+    # Summary
+    log_step("Download Summary")
+    success_count = sum(1 for v in results.values() if v)
+    fail_count = len(results) - success_count
 
-    # Try direct download first
-    for remote_path, local_path, description in files_to_download:
-        output_path = os.path.join(output_dir, local_path)
+    for name, success in results.items():
+        status = "OK" if success else "FAILED"
+        print(f"  {name}: {status}")
 
-        if os.path.exists(output_path):
-            size = os.path.getsize(output_path)
-            if size > 10000000:  # > 10MB
-                print(f"\n{description} already exists ({size/1024/1024:.1f}MB), skipping...")
-                continue
+    print()
+    if fail_count == 0:
+        log_success(f"All {success_count} files downloaded successfully!")
+    else:
+        log_warn(f"{success_count} succeeded, {fail_count} failed")
 
-        download_url = get_seafile_download_link(share_url, remote_path)
-
-        if not download_with_redirect(download_url, output_path, description):
-            success = False
-
-    # If direct download failed, try alternatives
-    if not success:
-        if args.use_selenium:
-            success = download_with_selenium(output_dir)
-        else:
-            success = try_alternative_methods(output_dir)
-
-    # If still failed, print manual instructions
-    if not success:
-        print_manual_instructions()
-        sys.exit(1)
-
-    print("\n" + "=" * 60)
-    print("Download complete!")
+    print()
     print("=" * 60)
-    print(f"\nVerify with: ls -lh {output_dir}/vqvae/ {output_dir}/occworld/")
 
 
 if __name__ == '__main__':

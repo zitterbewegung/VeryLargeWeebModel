@@ -109,6 +109,394 @@ except ImportError:
     HAS_UAVSCENES = False
 
 
+# =============================================================================
+# Data Validation
+# =============================================================================
+
+S3_BUCKET = "verylargeweebmodel"
+S3_REGION = "us-west-2"
+
+
+def validate_data(data_root: str, dataset_type: str, auto_download: bool = True) -> bool:
+    """
+    Validate that required training data exists and is complete.
+
+    Args:
+        data_root: Path to data directory
+        dataset_type: Type of dataset (gazebo, nuscenes, uavscenes, etc.)
+        auto_download: If True, attempt to download missing data from S3
+
+    Returns:
+        True if data is valid, False otherwise
+    """
+    data_path = Path(data_root)
+    issues = []
+    warnings = []
+
+    print("\n" + "=" * 60)
+    print("DATA VALIDATION")
+    print("=" * 60)
+    print(f"Data root: {data_path.absolute()}")
+    print(f"Dataset type: {dataset_type}")
+
+    # Check if data directory exists
+    if not data_path.exists():
+        issues.append(f"Data directory does not exist: {data_path}")
+        if auto_download:
+            print(f"\n[AUTO-DOWNLOAD] Creating directory and downloading from S3...")
+            return _download_dataset_from_s3(data_root, dataset_type)
+        return False
+
+    # Dataset-specific validation
+    if dataset_type == 'gazebo':
+        valid = _validate_gazebo_data(data_path, issues, warnings)
+    elif dataset_type == 'nuscenes':
+        valid = _validate_nuscenes_data(data_path, issues, warnings)
+    elif dataset_type == 'nuscenes_6dof':
+        valid = _validate_nuscenes_data(data_path, issues, warnings)
+    elif dataset_type == 'uavscenes':
+        valid = _validate_uavscenes_data(data_path, issues, warnings)
+    else:
+        warnings.append(f"Unknown dataset type: {dataset_type}, skipping validation")
+        valid = True
+
+    # Print results
+    if warnings:
+        print("\nWarnings:")
+        for w in warnings:
+            print(f"  [WARN] {w}")
+
+    if issues:
+        print("\nIssues found:")
+        for i in issues:
+            print(f"  [ERROR] {i}")
+
+        if auto_download:
+            print(f"\n[AUTO-DOWNLOAD] Attempting to download missing data from S3...")
+            if _download_dataset_from_s3(data_root, dataset_type):
+                # Re-validate after download
+                return validate_data(data_root, dataset_type, auto_download=False)
+
+        print("\nTo fix manually:")
+        print(f"  aws s3 sync s3://{S3_BUCKET}/ {data_root}/ --region {S3_REGION}")
+        return False
+
+    print("\n[OK] Data validation passed!")
+    print("=" * 60 + "\n")
+    return True
+
+
+def _validate_gazebo_data(data_path: Path, issues: list, warnings: list) -> bool:
+    """Validate Gazebo/PLATEAU dataset structure."""
+    # Expected structure:
+    # data_root/
+    #   session_name/
+    #     occupancy/  (*.npz files)
+    #     lidar/      (*.npy files)
+    #     poses/      (*.json files)
+
+    sessions = [d for d in data_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+
+    if not sessions:
+        issues.append("No session directories found")
+        return False
+
+    valid_sessions = 0
+    for session in sessions:
+        has_occupancy = (session / 'occupancy').exists() and any((session / 'occupancy').glob('*.npz'))
+        has_lidar = (session / 'lidar').exists() and any((session / 'lidar').glob('*.npy'))
+
+        if has_occupancy or has_lidar:
+            valid_sessions += 1
+        else:
+            warnings.append(f"Session {session.name} missing occupancy/lidar data")
+
+    if valid_sessions == 0:
+        issues.append("No valid sessions with occupancy or lidar data")
+        return False
+
+    print(f"  Found {valid_sessions}/{len(sessions)} valid sessions")
+    return True
+
+
+def _validate_nuscenes_data(data_path: Path, issues: list, warnings: list) -> bool:
+    """Validate nuScenes dataset structure."""
+    # Check for required files
+    required_files = [
+        'nuscenes_infos_train_temporal_v3_scene.pkl',
+        'nuscenes_infos_val_temporal_v3_scene.pkl',
+    ]
+
+    # Check in data_path and parent
+    for req_file in required_files:
+        found = False
+        for check_path in [data_path / req_file, data_path.parent / req_file]:
+            if check_path.exists():
+                size_mb = check_path.stat().st_size / 1024 / 1024
+                if size_mb < 1:
+                    warnings.append(f"{req_file} seems too small ({size_mb:.1f}MB)")
+                else:
+                    print(f"  Found {req_file} ({size_mb:.1f}MB)")
+                found = True
+                break
+        if not found:
+            issues.append(f"Missing: {req_file}")
+
+    # Check for nuScenes data directory
+    nuscenes_dirs = ['v1.0-mini', 'v1.0-trainval', 'samples', 'sweeps']
+    found_any = False
+    for d in nuscenes_dirs:
+        if (data_path / d).exists():
+            found_any = True
+            print(f"  Found nuScenes directory: {d}")
+
+    if not found_any:
+        warnings.append("nuScenes raw data directories not found (may not be needed if using pickle files)")
+
+    return len(issues) == 0
+
+
+def _validate_uavscenes_data(data_path: Path, issues: list, warnings: list) -> bool:
+    """Validate UAVScenes dataset structure."""
+    # Expected structure:
+    # data_root/
+    #   interval1_AMtown01/
+    #     interval1_LIDAR/  (*.txt files)
+    #     interval1_CAM/    (*.jpg files)
+    #     sampleinfos_interpolated.json
+
+    scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
+    found_scenes = []
+
+    for scene in scenes:
+        # Check multiple naming patterns
+        patterns = [
+            f"interval1_{scene}01",
+            f"interval1_{scene}",
+            f"interval5_{scene}01",
+            scene,
+        ]
+
+        for pattern in patterns:
+            scene_path = data_path / pattern
+            if scene_path.exists():
+                # Check for LiDAR data
+                lidar_dirs = [
+                    scene_path / 'interval1_LIDAR',
+                    scene_path / 'interval5_LIDAR',
+                    scene_path / 'lidar',
+                ]
+
+                has_lidar = False
+                for lidar_dir in lidar_dirs:
+                    if lidar_dir.exists():
+                        lidar_files = list(lidar_dir.glob('*.txt')) + list(lidar_dir.glob('*.pcd'))
+                        if lidar_files:
+                            print(f"  Found {scene}: {len(lidar_files)} LiDAR files")
+                            found_scenes.append(scene)
+                            has_lidar = True
+                            break
+
+                if not has_lidar:
+                    warnings.append(f"Scene {pattern} exists but no LiDAR data found")
+                break
+
+    if not found_scenes:
+        issues.append("No UAVScenes data found. Expected interval1_*/interval1_LIDAR/*.txt")
+        return False
+
+    print(f"  Found {len(found_scenes)}/4 scenes: {found_scenes}")
+    return True
+
+
+def _download_dataset_from_s3(data_root: str, dataset_type: str) -> bool:
+    """Download dataset from S3."""
+    import subprocess
+
+    # Map dataset types to S3 prefixes
+    s3_prefixes = {
+        'gazebo': 'tokyo_gazebo',
+        'nuscenes': 'nuscenes',
+        'nuscenes_6dof': 'nuscenes',
+        'uavscenes': 'uavscenes',
+    }
+
+    prefix = s3_prefixes.get(dataset_type, dataset_type)
+    s3_uri = f"s3://{S3_BUCKET}/{prefix}/"
+
+    print(f"Downloading from {s3_uri} to {data_root}/")
+
+    try:
+        # Check if AWS CLI is available
+        result = subprocess.run(
+            ["aws", "sts", "get-caller-identity"],
+            capture_output=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            print("[ERROR] AWS CLI not configured. Run: aws configure")
+            return False
+
+        # Sync from S3
+        result = subprocess.run(
+            ["aws", "s3", "sync", s3_uri, data_root, "--region", S3_REGION],
+            timeout=7200  # 2 hour timeout
+        )
+
+        if result.returncode == 0:
+            print("[OK] Download complete!")
+            return True
+        else:
+            print("[ERROR] S3 sync failed")
+            return False
+
+    except FileNotFoundError:
+        print("[ERROR] AWS CLI not installed. Install with: pip install awscli")
+        return False
+    except subprocess.TimeoutExpired:
+        print("[ERROR] Download timed out")
+        return False
+    except Exception as e:
+        print(f"[ERROR] Download failed: {e}")
+        return False
+
+
+# =============================================================================
+# Pretrained Model Validation
+# =============================================================================
+
+# Pretrained models available on S3
+PRETRAINED_MODELS = {
+    "occworld_checkpoint": {
+        "s3_key": "pretrained/occworld/latest.pth",
+        "local_path": "pretrained/occworld/latest.pth",
+        "min_size": 100_000_000,  # 100MB
+        "description": "OccWorld checkpoint (~721MB)",
+    },
+    "vqvae_checkpoint": {
+        "s3_key": "pretrained/vqvae/epoch_125.pth",
+        "local_path": "pretrained/vqvae/epoch_125.pth",
+        "min_size": 100_000_000,  # 100MB
+        "description": "VQVAE checkpoint (~500MB)",
+    },
+}
+
+
+def validate_pretrained_models(
+    load_from: str = None,
+    vqvae_ckpt: str = None,
+    auto_download: bool = True
+) -> bool:
+    """
+    Validate that required pretrained models exist.
+
+    Args:
+        load_from: Path to main model checkpoint (OccWorld)
+        vqvae_ckpt: Path to VQVAE checkpoint
+        auto_download: If True, attempt to download missing models from S3
+
+    Returns:
+        True if all required models are valid, False otherwise
+    """
+    import subprocess
+
+    print("\n" + "=" * 60)
+    print("PRETRAINED MODEL VALIDATION")
+    print("=" * 60)
+
+    models_to_check = []
+    if load_from:
+        models_to_check.append(("OccWorld checkpoint", load_from, "occworld_checkpoint"))
+    if vqvae_ckpt:
+        models_to_check.append(("VQVAE checkpoint", vqvae_ckpt, "vqvae_checkpoint"))
+
+    if not models_to_check:
+        print("  No pretrained models specified (training from scratch)")
+        print("=" * 60 + "\n")
+        return True
+
+    all_valid = True
+    for name, path, model_key in models_to_check:
+        path = Path(path)
+        model_info = PRETRAINED_MODELS.get(model_key, {})
+        min_size = model_info.get("min_size", 1_000_000)
+
+        if path.exists():
+            size = path.stat().st_size
+            if size >= min_size:
+                print(f"  [OK] {name}: {path} ({size / 1024 / 1024:.1f}MB)")
+                continue
+            else:
+                print(f"  [WARN] {name}: {path} seems incomplete ({size} bytes)")
+                # Remove incomplete file
+                path.unlink()
+
+        # Model not found or incomplete
+        print(f"  [MISSING] {name}: {path}")
+
+        if auto_download and model_key in PRETRAINED_MODELS:
+            print(f"  [AUTO-DOWNLOAD] Downloading {name} from S3...")
+            s3_key = PRETRAINED_MODELS[model_key]["s3_key"]
+            s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
+
+            # Create parent directory
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                # Check AWS CLI
+                result = subprocess.run(
+                    ["aws", "sts", "get-caller-identity"],
+                    capture_output=True,
+                    timeout=10
+                )
+                if result.returncode != 0:
+                    print("    [ERROR] AWS CLI not configured. Run: aws configure")
+                    all_valid = False
+                    continue
+
+                # Download from S3
+                result = subprocess.run(
+                    ["aws", "s3", "cp", s3_uri, str(path), "--region", S3_REGION],
+                    timeout=3600  # 1 hour timeout
+                )
+
+                if result.returncode == 0 and path.exists():
+                    size = path.stat().st_size
+                    if size >= min_size:
+                        print(f"    [OK] Downloaded {name} ({size / 1024 / 1024:.1f}MB)")
+                        continue
+                    else:
+                        print(f"    [ERROR] Downloaded file too small ({size} bytes)")
+                        path.unlink()
+
+                print(f"    [ERROR] Failed to download {name}")
+                all_valid = False
+
+            except subprocess.TimeoutExpired:
+                print(f"    [ERROR] Download timed out for {name}")
+                all_valid = False
+            except FileNotFoundError:
+                print("    [ERROR] AWS CLI not installed. Install with: pip install awscli")
+                all_valid = False
+            except Exception as e:
+                print(f"    [ERROR] Download failed: {e}")
+                all_valid = False
+        else:
+            print(f"  [ERROR] {name} not found and auto-download disabled")
+            all_valid = False
+
+    if all_valid:
+        print("\n[OK] All pretrained models validated!")
+    else:
+        print("\n[ERROR] Some pretrained models are missing!")
+        print("To download manually:")
+        print(f"  python scripts/download_pretrained.py --output .")
+
+    print("=" * 60 + "\n")
+    return all_valid
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='OccWorld Training for Tokyo Gazebo')
 
@@ -179,6 +567,12 @@ def parse_args():
                         help='W&B run name (auto-generated if not provided)')
     parser.add_argument('--wandb-tags', type=str, nargs='+', default=[],
                         help='W&B tags for the run')
+
+    # Data validation
+    parser.add_argument('--skip-validation', action='store_true',
+                        help='Skip data and model validation (use with caution)')
+    parser.add_argument('--no-auto-download', action='store_true',
+                        help='Disable auto-download from S3 for missing data/models')
 
     return parser.parse_args()
 
@@ -798,6 +1192,33 @@ def main():
 
     print(f"Dataset type: {dataset_type}")
 
+    # Auto-detect 6DoF model for aerial/6DoF datasets
+    SIXDOF_DATASETS = ['uavscenes', 'nuscenes_6dof']
+    if dataset_type in SIXDOF_DATASETS and args.model_type != '6dof':
+        print(f"\n[AUTO-DETECT] Dataset '{dataset_type}' requires 6DoF model.")
+        print(f"              Switching from --model-type '{args.model_type}' to '6dof'")
+        args.model_type = '6dof'
+
+    # Validate data before creating dataset
+    # This will auto-download from S3 if data is missing (unless --no-auto-download)
+    if not args.skip_validation:
+        auto_download = not args.no_auto_download
+        if not validate_data(data_root, dataset_type, auto_download=auto_download):
+            print("\n" + "=" * 60)
+            print("DATA VALIDATION FAILED")
+            print("=" * 60)
+            print("Training cannot proceed without valid data.")
+            print("\nTo download data manually:")
+            print(f"  aws s3 sync s3://{S3_BUCKET}/ . --region {S3_REGION}")
+            print("\nOr run the download script:")
+            print("  python scripts/download_pretrained.py --all")
+            print("\nTo skip validation (use with caution):")
+            print("  python train.py --skip-validation ...")
+            print("=" * 60)
+            sys.exit(1)
+    else:
+        print("[WARN] Skipping data validation (--skip-validation)")
+
     if dataset_type == 'uavscenes':
         # UAVScenes - Real aerial 6DoF data from UAV platform
         if not HAS_UAVSCENES:
@@ -1097,6 +1518,8 @@ def main():
     resume_checkpoint = None
     if not args.from_scratch:
         load_from = getattr(config, 'load_from', None)
+        vqvae_ckpt = getattr(config, 'vqvae_ckpt', None)
+
         if args.resume_from:
             load_from = args.resume_from
             resume_checkpoint = load_from
@@ -1106,6 +1529,21 @@ def main():
             if ckpts:
                 load_from = str(ckpts[-1])
                 resume_checkpoint = load_from
+
+        # Validate pretrained models exist (auto-download from S3 if missing)
+        if (load_from or vqvae_ckpt) and not args.skip_validation:
+            auto_download = not args.no_auto_download
+            if not validate_pretrained_models(load_from, vqvae_ckpt, auto_download=auto_download):
+                print("\n" + "=" * 60)
+                print("PRETRAINED MODEL VALIDATION FAILED")
+                print("=" * 60)
+                print("Training cannot proceed without required pretrained models.")
+                print("\nOptions:")
+                print("  1. Download models: python scripts/download_pretrained.py")
+                print("  2. Train from scratch: python train.py --from-scratch ...")
+                print("  3. Skip validation: python train.py --skip-validation ...")
+                print("=" * 60)
+                sys.exit(1)
 
         if load_from and os.path.exists(load_from):
             print(f"Loading weights from: {load_from}")
