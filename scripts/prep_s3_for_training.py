@@ -271,10 +271,15 @@ def upload_directory(
     dry_run: bool = False,
     force: bool = False,
     max_files: int = 1000,
-    exclude_patterns: list = None
+    exclude_patterns: list = None,
+    max_workers: int = 16
 ) -> dict:
-    """Upload a directory recursively to S3."""
+    """Upload a directory recursively to S3 with parallel uploads."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     results = {"uploaded": 0, "skipped": 0, "failed": 0, "total_size": 0}
+    results_lock = threading.Lock()
 
     if exclude_patterns is None:
         exclude_patterns = [".zip", ".tar.gz", ".tar", ".pyc", "__pycache__"]
@@ -305,32 +310,61 @@ def upload_directory(
 
     total_note = f" (showing first {max_files})" if dry_run and len(files) >= max_files else ""
     log_info(f"Found {len(files)} files in {local_dir}{total_note}")
+    log_info(f"Using {max_workers} parallel upload threads")
 
+    # Prepare upload tasks
+    upload_tasks = []
     for filepath in files:
         rel_path = filepath.relative_to(local_dir)
         s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
-
         local_size = filepath.stat().st_size
+        upload_tasks.append((filepath, s3_key, local_size))
+
+    def upload_one(task):
+        """Upload a single file and return result."""
+        filepath, s3_key, local_size = task
 
         # Skip check
         if not force:
             exists, s3_size = s3_object_exists(s3_client, bucket, s3_key)
             if exists and s3_size == local_size:
-                results["skipped"] += 1
-                results["total_size"] += local_size
-                continue
+                return ("skipped", local_size)
 
         if dry_run:
-            results["uploaded"] += 1
-            results["total_size"] += local_size
-            continue
+            return ("uploaded", local_size)
 
-        if upload_file(s3_client, filepath, bucket, s3_key, dry_run=False, force=True):
-            results["uploaded"] += 1
-            results["total_size"] += local_size
-        else:
-            results["failed"] += 1
+        # Create a new S3 client for this thread (boto3 clients aren't thread-safe)
+        thread_s3 = boto3.client('s3', region_name=S3_REGION)
 
+        try:
+            thread_s3.upload_file(str(filepath), bucket, s3_key)
+            return ("uploaded", local_size)
+        except Exception as e:
+            log_error(f"Failed to upload {filepath.name}: {e}")
+            return ("failed", 0)
+
+    # Progress tracking
+    completed = [0]
+    total = len(upload_tasks)
+
+    def update_progress():
+        pct = (completed[0] / total) * 100
+        print(f"\r  Progress: {completed[0]}/{total} ({pct:.1f}%) - {results['uploaded']} uploaded, {results['skipped']} skipped, {results['failed']} failed", end='', flush=True)
+
+    # Execute uploads in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {executor.submit(upload_one, task): task for task in upload_tasks}
+
+        for future in as_completed(future_to_task):
+            status, size = future.result()
+            with results_lock:
+                results[status] += 1
+                results["total_size"] += size
+                completed[0] += 1
+                if completed[0] % 100 == 0 or completed[0] == total:
+                    update_progress()
+
+    print()  # Newline after progress
     return results
 
 
@@ -343,7 +377,8 @@ def prep_s3_bucket(
     bucket: str,
     dry_run: bool = False,
     force: bool = False,
-    include_optional: bool = True
+    include_optional: bool = True,
+    max_workers: int = 16
 ) -> dict:
     """Prepare S3 bucket with all training files."""
 
@@ -427,7 +462,8 @@ def prep_s3_bucket(
             bucket,
             config["s3_prefix"],
             dry_run,
-            force
+            force,
+            max_workers=max_workers
         )
 
         results["dirs"]["uploaded"] += dir_results["uploaded"]
@@ -512,6 +548,12 @@ Examples:
         action="store_true",
         help="Only upload required files (skip optional data)"
     )
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=16,
+        help="Number of parallel upload threads (default: 16)"
+    )
 
     args = parser.parse_args()
 
@@ -528,6 +570,7 @@ Examples:
     print(f"  Bucket:   s3://{args.bucket}", flush=True)
     print(f"  Dry run:  {args.dry_run}", flush=True)
     print(f"  Force:    {args.force}", flush=True)
+    print(f"  Workers:  {args.workers}", flush=True)
     print(flush=True)
 
     if not HAS_BOTO3:
@@ -540,7 +583,8 @@ Examples:
         args.bucket,
         dry_run=args.dry_run,
         force=args.force,
-        include_optional=not args.required_only
+        include_optional=not args.required_only,
+        max_workers=args.workers
     )
 
     # Summary
