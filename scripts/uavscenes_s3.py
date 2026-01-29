@@ -223,11 +223,28 @@ def upload_to_s3(
         log_error("boto3 required. Install with: pip install boto3")
         return {"success": 0, "failed": 0, "skipped": 0}
 
-    s3_client = get_s3_client()
+    try:
+        s3_client = get_s3_client()
+    except NoCredentialsError:
+        log_error("AWS credentials not configured!")
+        print()
+        print("Configure credentials using one of these methods:")
+        print()
+        print("  Option 1: AWS CLI")
+        print("    aws configure")
+        print()
+        print("  Option 2: Environment variables")
+        print("    export AWS_ACCESS_KEY_ID=your_access_key")
+        print("    export AWS_SECRET_ACCESS_KEY=your_secret_key")
+        print()
+        return {"success": 0, "failed": 0, "skipped": 0}
 
     # Ensure bucket exists
     try:
         s3_client.head_bucket(Bucket=bucket)
+    except NoCredentialsError:
+        log_error("AWS credentials not configured! Run: aws configure")
+        return {"success": 0, "failed": 0, "skipped": 0}
     except ClientError as e:
         if e.response['Error']['Code'] == '404':
             log_info(f"Creating bucket: {bucket}")
@@ -320,11 +337,36 @@ def download_from_s3(
         log_error("boto3 required. Install with: pip install boto3")
         return {"success": 0, "failed": 0, "skipped": 0}
 
-    s3_client = get_s3_client()
+    try:
+        s3_client = get_s3_client()
+    except NoCredentialsError:
+        log_error("AWS credentials not configured!")
+        print()
+        print("Configure credentials using one of these methods:")
+        print()
+        print("  Option 1: AWS CLI")
+        print("    aws configure")
+        print()
+        print("  Option 2: Environment variables")
+        print("    export AWS_ACCESS_KEY_ID=your_access_key")
+        print("    export AWS_SECRET_ACCESS_KEY=your_secret_key")
+        print()
+        print("  Option 3: IAM role (if on EC2/Lambda)")
+        print("    Attach an IAM role with S3 read permissions")
+        print()
+        return {"success": 0, "failed": 0, "skipped": 0}
+
     local_dir.mkdir(parents=True, exist_ok=True)
 
     # List files in S3
-    s3_files = list_s3_files(s3_client, bucket, prefix)
+    try:
+        s3_files = list_s3_files(s3_client, bucket, prefix)
+    except NoCredentialsError:
+        log_error("AWS credentials not configured!")
+        print()
+        print("Run: aws configure")
+        print("Or set: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+        return {"success": 0, "failed": 0, "skipped": 0}
 
     if not s3_files:
         log_warn(f"No files found in s3://{bucket}/{prefix}")
