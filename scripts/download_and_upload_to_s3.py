@@ -12,8 +12,10 @@ Then uploads everything to s3://verylargeweebmodel/
 
 Usage:
     python scripts/download_and_upload_to_s3.py
+    python scripts/download_and_upload_to_s3.py --check-only     # Check which files exist locally
     python scripts/download_and_upload_to_s3.py --skip-download  # Upload existing files only
     python scripts/download_and_upload_to_s3.py --dry-run        # Show what would be uploaded
+    python scripts/download_and_upload_to_s3.py --parallel-upload # Upload each file as it downloads
     python scripts/download_and_upload_to_s3.py --bucket my-bucket --prefix data/
 
 Requirements:
@@ -25,9 +27,10 @@ import sys
 import argparse
 import subprocess
 import hashlib
+import multiprocessing
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import Optional, List, Tuple
 
 try:
     import boto3
@@ -132,6 +135,53 @@ def log_error(msg: str):
 
 def log_step(msg: str):
     print(f"\n{Colors.CYAN}==>{Colors.NC} {msg}")
+
+
+# =============================================================================
+# File Checking Functions
+# =============================================================================
+
+def check_local_files(project_root: Path, sources: Optional[List[str]] = None) -> dict:
+    """Check which files already exist locally."""
+
+    if sources is None:
+        sources = list(DOWNLOAD_SOURCES.keys())
+
+    status = {}
+    for name in sources:
+        if name not in DOWNLOAD_SOURCES:
+            continue
+
+        source = DOWNLOAD_SOURCES[name]
+        local_path = project_root / source["local_path"]
+
+        exists = local_path.exists()
+        size = local_path.stat().st_size if exists else 0
+        is_complete = exists and size > 1_000_000  # > 1MB considered complete
+
+        status[name] = {
+            "exists": exists,
+            "path": str(local_path),
+            "size": size,
+            "size_mb": size / 1024 / 1024 if size > 0 else 0,
+            "is_complete": is_complete,
+            "s3_key": source["s3_key"],
+            "description": source["description"],
+        }
+
+    return status
+
+
+def print_file_status(status: dict):
+    """Print status of local files."""
+    log_step("Local File Status")
+    for name, info in status.items():
+        if info["is_complete"]:
+            log_success(f"{name}: {info['size_mb']:.1f}MB - {info['path']}")
+        elif info["exists"]:
+            log_warn(f"{name}: {info['size_mb']:.1f}MB (incomplete) - {info['path']}")
+        else:
+            log_info(f"{name}: NOT FOUND - {info['path']}")
 
 
 # =============================================================================
@@ -411,6 +461,86 @@ def upload_directory_to_s3(
     return results
 
 
+def upload_file_subprocess(
+    local_path: str,
+    bucket: str,
+    s3_key: str,
+    dry_run: bool = False
+) -> bool:
+    """Upload a file to S3 in a subprocess (for parallel execution)."""
+
+    local_path = Path(local_path)
+    if not local_path.exists():
+        log_warn(f"Local file not found for upload: {local_path}")
+        return False
+
+    if dry_run:
+        log_info(f"[DRY RUN] Would upload: {local_path} -> s3://{bucket}/{s3_key}")
+        return True
+
+    try:
+        s3_client = get_s3_client()
+        return upload_file_to_s3(s3_client, local_path, bucket, s3_key, dry_run)
+    except Exception as e:
+        log_error(f"Upload subprocess failed for {local_path}: {e}")
+        return False
+
+
+def download_and_upload_single(
+    name: str,
+    source: dict,
+    project_root: Path,
+    bucket: str,
+    s3_prefix: str,
+    dry_run: bool = False,
+    skip_upload: bool = False
+) -> Tuple[str, dict]:
+    """Download a single file and immediately upload it to S3.
+
+    Returns tuple of (name, result_dict).
+    """
+    local_path = project_root / source["local_path"]
+    s3_key = source["s3_key"]
+    if s3_prefix:
+        s3_key = f"{s3_prefix}/{s3_key}"
+
+    result = {
+        "download_success": False,
+        "upload_success": False,
+        "local_path": str(local_path),
+        "s3_key": s3_key,
+    }
+
+    # Download
+    download_success = download_file(
+        url=source["url"],
+        local_path=str(local_path),
+        description=source["description"]
+    )
+    result["download_success"] = download_success
+
+    # Upload immediately after download if successful
+    if download_success and not skip_upload:
+        log_info(f"Starting upload for {name} in subprocess...")
+
+        # Use multiprocessing to upload in parallel
+        upload_process = multiprocessing.Process(
+            target=upload_file_subprocess,
+            args=(str(local_path), bucket, s3_key, dry_run)
+        )
+        upload_process.start()
+        upload_process.join()  # Wait for upload to complete
+
+        result["upload_success"] = upload_process.exitcode == 0
+
+        if result["upload_success"]:
+            log_success(f"Uploaded {name} to s3://{bucket}/{s3_key}")
+        else:
+            log_warn(f"Upload may have had issues for {name}")
+
+    return name, result
+
+
 def upload_all_to_s3(
     project_root: Path,
     bucket: str,
@@ -512,6 +642,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Check which files already exist locally
+  python scripts/download_and_upload_to_s3.py --check-only
+
   # Download everything and upload to default bucket
   python scripts/download_and_upload_to_s3.py
 
@@ -520,6 +653,9 @@ Examples:
 
   # Preview what would be uploaded
   python scripts/download_and_upload_to_s3.py --dry-run
+
+  # Download and upload in parallel (upload starts as each download completes)
+  python scripts/download_and_upload_to_s3.py --parallel-upload
 
   # Use different bucket
   python scripts/download_and_upload_to_s3.py --bucket my-bucket
@@ -565,6 +701,16 @@ Examples:
         default=".",
         help="Project root directory (default: current directory)"
     )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only check which files exist locally, don't download or upload"
+    )
+    parser.add_argument(
+        "--parallel-upload",
+        action="store_true",
+        help="Upload files in parallel as each download completes"
+    )
 
     args = parser.parse_args()
 
@@ -579,52 +725,145 @@ Examples:
     if args.prefix:
         print(f"S3 prefix:     {args.prefix}")
     print(f"Dry run:       {args.dry_run}")
+    print(f"Parallel upload: {args.parallel_upload}")
     print()
 
-    # Download
+    # Get list of sources to process
+    sources_to_process = args.sources if args.sources else list(DOWNLOAD_SOURCES.keys())
+
+    # First, check which files already exist locally
+    file_status = check_local_files(project_root, sources_to_process)
+    print_file_status(file_status)
+
+    # Check-only mode - just show status and exit
+    if args.check_only:
+        complete_count = sum(1 for s in file_status.values() if s["is_complete"])
+        total_count = len(file_status)
+        print()
+        print(f"Files complete: {complete_count}/{total_count}")
+        print()
+        return
+
+    # Determine what needs downloading
+    files_to_download = [
+        name for name, info in file_status.items()
+        if not info["is_complete"]
+    ]
+    files_already_complete = [
+        name for name, info in file_status.items()
+        if info["is_complete"]
+    ]
+
+    if files_already_complete:
+        log_info(f"{len(files_already_complete)} files already complete locally")
+    if files_to_download:
+        log_info(f"{len(files_to_download)} files need to be downloaded")
+
+    # Process files with parallel upload mode
     download_results = {}
-    if not args.skip_download:
-        download_results = download_all(project_root, args.sources)
 
-        # Print download summary
-        log_step("Download Summary")
-        for name, info in download_results.items():
-            status = "OK" if info["success"] else "FAILED"
-            print(f"  {name}: {status}")
-    else:
-        # Build results from existing files
-        for name, source in DOWNLOAD_SOURCES.items():
-            if args.sources and name not in args.sources:
-                continue
-            local_path = project_root / source["local_path"]
-            download_results[name] = {
-                "success": local_path.exists(),
-                "local_path": str(local_path),
-                "s3_key": source["s3_key"],
-            }
+    if args.parallel_upload and not args.skip_download and not args.skip_upload:
+        # Combined download + upload mode: upload each file as soon as it's downloaded
+        log_step("Download & Upload (parallel upload mode)")
 
-    # Upload to S3
-    if not args.skip_upload:
         if not HAS_BOTO3:
             log_error("boto3 is required for S3 upload. Install with: pip install boto3")
             sys.exit(1)
 
-        upload_results = upload_all_to_s3(
-            project_root,
-            args.bucket,
-            args.prefix,
-            download_results,
-            args.dry_run
-        )
+        # Process files that need downloading
+        for name in files_to_download:
+            source = DOWNLOAD_SOURCES[name]
+            _, result = download_and_upload_single(
+                name, source, project_root,
+                args.bucket, args.prefix,
+                args.dry_run, args.skip_upload
+            )
+            download_results[name] = {
+                "success": result["download_success"],
+                "local_path": result["local_path"],
+                "s3_key": result["s3_key"],
+                "upload_success": result["upload_success"],
+            }
 
-        # Print upload summary
-        log_step("Upload Summary")
-        for name, result in upload_results.items():
-            if isinstance(result, dict):
-                print(f"  {name}: {result.get('success', 0)} uploaded, {result.get('skipped', 0)} skipped, {result.get('failed', 0)} failed")
-            else:
-                status = "OK" if result else "FAILED"
+        # Also upload files that were already complete locally
+        if files_already_complete and not args.skip_upload:
+            log_step("Uploading pre-existing complete files")
+            try:
+                s3_client = get_s3_client()
+                for name in files_already_complete:
+                    info = file_status[name]
+                    s3_key = info["s3_key"]
+                    if args.prefix:
+                        s3_key = f"{args.prefix}/{s3_key}"
+
+                    success = upload_file_to_s3(
+                        s3_client,
+                        Path(info["path"]),
+                        args.bucket,
+                        s3_key,
+                        args.dry_run
+                    )
+                    download_results[name] = {
+                        "success": True,
+                        "local_path": info["path"],
+                        "s3_key": s3_key,
+                        "upload_success": success,
+                    }
+            except Exception as e:
+                log_error(f"Failed to upload pre-existing files: {e}")
+
+        # Print combined summary
+        log_step("Download & Upload Summary")
+        for name, info in download_results.items():
+            dl_status = "OK" if info.get("success") else "FAILED"
+            ul_status = "OK" if info.get("upload_success") else "FAILED"
+            print(f"  {name}: download={dl_status}, upload={ul_status}")
+
+    else:
+        # Original sequential mode
+        # Download
+        if not args.skip_download:
+            download_results = download_all(project_root, sources_to_process)
+
+            # Print download summary
+            log_step("Download Summary")
+            for name, info in download_results.items():
+                status = "OK" if info["success"] else "FAILED"
                 print(f"  {name}: {status}")
+        else:
+            # Build results from existing files
+            for name, source in DOWNLOAD_SOURCES.items():
+                if args.sources and name not in args.sources:
+                    continue
+                local_path = project_root / source["local_path"]
+                download_results[name] = {
+                    "success": local_path.exists(),
+                    "local_path": str(local_path),
+                    "s3_key": source["s3_key"],
+                }
+
+        # Upload to S3
+        if not args.skip_upload:
+            if not HAS_BOTO3:
+                log_error("boto3 is required for S3 upload. Install with: pip install boto3")
+                sys.exit(1)
+
+            upload_results = upload_all_to_s3(
+                project_root,
+                args.bucket,
+                args.prefix,
+                download_results,
+                args.dry_run
+            )
+
+            # Print upload summary
+            log_step("Upload Summary")
+            for name, result in upload_results.items():
+                if isinstance(result, dict):
+                    print(f"  {name}: {result.get('success', 0)} uploaded, {result.get('skipped', 0)} skipped, {result.get('failed', 0)} failed")
+                else:
+                    status = "OK" if result else "FAILED"
+                    print(f"  {name}: {status}")
 
     print()
     print("=" * 60)
