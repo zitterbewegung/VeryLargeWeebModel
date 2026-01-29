@@ -28,6 +28,7 @@ Requirements:
 import os
 import sys
 import argparse
+import contextlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -622,11 +623,12 @@ def setup_environment(args):
 def try_import_occworld():
     """Try to import OccWorld library."""
     try:
-        # Try importing from installed OccWorld
-        sys.path.insert(0, os.path.expanduser('~/OccWorld'))
+        # Try importing from installed OccWorld (configurable via OCCWORLD_PATH env var)
+        occworld_path = os.environ.get('OCCWORLD_PATH', os.path.expanduser('~/OccWorld'))
+        sys.path.insert(0, occworld_path)
         from models import TransVQVAE
         from utils import get_logger
-        print("Using OccWorld library")
+        print(f"Using OccWorld library from {occworld_path}")
         return True, TransVQVAE
     except ImportError:
         print("OccWorld library not found, using standalone mode")
@@ -942,7 +944,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Use autocast for mixed precision if scaler is provided
         use_amp = scaler is not None
-        amp_context = torch.cuda.amp.autocast() if use_amp else torch.enable_grad()
+        amp_context = torch.cuda.amp.autocast() if use_amp else contextlib.nullcontext()
 
         with amp_context:
             if is_6dof:
@@ -1170,7 +1172,8 @@ def main():
 
     if args.use_occworld and not use_occworld:
         print("ERROR: --use-occworld specified but OccWorld library not found")
-        print("Install OccWorld: git clone https://github.com/wzzheng/OccWorld.git ~/OccWorld")
+        print("Install OccWorld: git clone https://github.com/wzzheng/OccWorld.git <path>")
+        print("Then set OCCWORLD_PATH environment variable, or install to ~/OccWorld (default)")
         sys.exit(1)
 
     # Create dataset
