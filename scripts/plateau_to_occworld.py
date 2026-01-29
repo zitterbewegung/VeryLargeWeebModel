@@ -27,33 +27,19 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing
 
-try:
-    from scipy.interpolate import CubicSpline
-    HAS_SCIPY = True
-except ImportError:
-    HAS_SCIPY = False
-    CubicSpline = None
+# Import shared utilities
+from utils import (
+    HAS_SCIPY, HAS_TRIMESH, HAS_OPEN3D, HAS_NUMBA,
+    trimesh, o3d, CubicSpline, jit, prange,
+)
 
-try:
-    import trimesh
-    HAS_TRIMESH = True
-except ImportError:
-    HAS_TRIMESH = False
-    print("Warning: trimesh not installed. Run: pip install trimesh")
-
-try:
-    import open3d as o3d
-    HAS_OPEN3D = True
+if HAS_OPEN3D:
     print(f"Open3D version: {o3d.__version__}")
-except ImportError:
-    HAS_OPEN3D = False
+else:
     print("Note: Open3D not installed. Using trimesh fallback. For better voxelization: pip install open3d")
 
-try:
-    from numba import jit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
+if not HAS_TRIMESH:
+    print("Warning: trimesh not installed. Run: pip install trimesh")
 
 
 # Numba-optimized voxelization kernel
@@ -116,17 +102,10 @@ class VoxelConfig:
 class PLATEAUVoxelizer:
     """Voxelize PLATEAU mesh models into occupancy grids."""
 
-    def __init__(self, config: VoxelConfig, use_open3d: bool = True):
+    def __init__(self, config: VoxelConfig):
         self.config = config
         self.meshes = []
         self.combined_mesh = None
-        self.use_open3d = use_open3d and HAS_OPEN3D
-        self.o3d_pcd = None  # Open3D point cloud for fast voxelization
-
-        if self.use_open3d:
-            print("Using Open3D for voxelization (higher quality)")
-        else:
-            print("Using trimesh for voxelization")
 
     def load_meshes(self, input_path: str, max_meshes: int = 50, num_workers: int = None) -> int:
         """Load mesh files from directory using parallel I/O."""
@@ -210,124 +189,7 @@ class PLATEAUVoxelizer:
 
         print(f"Combined mesh: {len(combined_vertices)} vertices, {len(combined_faces)} faces")
 
-        # Create Open3D point cloud if available
-        if self.use_open3d and HAS_OPEN3D:
-            self._create_open3d_pointcloud(combined_vertices)
-
         return self.combined_mesh
-
-    def _create_open3d_pointcloud(self, vertices: np.ndarray, sample_ratio: float = 0.1):
-        """Create Open3D point cloud from mesh vertices for fast voxelization."""
-        # Subsample if too many vertices
-        if len(vertices) > 1000000:
-            indices = np.random.choice(len(vertices), int(len(vertices) * sample_ratio), replace=False)
-            vertices = vertices[indices]
-
-        self.o3d_pcd = o3d.geometry.PointCloud()
-        self.o3d_pcd.points = o3d.utility.Vector3dVector(vertices)
-
-        # Compute normals for better surface representation
-        self.o3d_pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30)
-        )
-
-        print(f"Created Open3D point cloud: {len(vertices)} points")
-
-    def voxelize_at_position_open3d(
-        self,
-        position: np.ndarray,
-        yaw: float = 0.0
-    ) -> np.ndarray:
-        """
-        Create occupancy grid using Open3D's optimized voxelization.
-
-        This method provides:
-        - More accurate voxel boundaries
-        - Better handling of surface geometry
-        - Faster processing for large point clouds
-
-        Args:
-            position: [x, y, z] center position in world frame
-            yaw: rotation angle in radians
-
-        Returns:
-            occupancy: [X, Y, Z] uint8 grid (0=empty, 1=occupied)
-        """
-        if self.o3d_pcd is None:
-            raise RuntimeError("Open3D point cloud not initialized. Call combine_meshes() first.")
-
-        cfg = self.config
-        grid_size = cfg.grid_size
-
-        # Get points
-        points = np.asarray(self.o3d_pcd.points)
-
-        # Calculate local bounds
-        range_min = np.array([
-            position[0] + cfg.point_cloud_range[0],
-            position[1] + cfg.point_cloud_range[1],
-            position[2] + cfg.point_cloud_range[2],
-        ])
-        range_max = np.array([
-            position[0] + cfg.point_cloud_range[3],
-            position[1] + cfg.point_cloud_range[4],
-            position[2] + cfg.point_cloud_range[5],
-        ])
-
-        # Filter points in range
-        mask = np.all((points >= range_min) & (points < range_max), axis=1)
-        local_points = points[mask]
-
-        if len(local_points) == 0:
-            occupancy = np.zeros(grid_size, dtype=np.uint8)
-            ground_z = int((0 - cfg.point_cloud_range[2]) / cfg.voxel_size[2])
-            if 0 <= ground_z < grid_size[2]:
-                occupancy[:, :, ground_z] = 1
-            return occupancy
-
-        # Transform to local frame
-        local_points = local_points - np.array([position[0], position[1], 0])
-
-        # Apply yaw rotation
-        if yaw != 0:
-            cos_yaw, sin_yaw = np.cos(-yaw), np.sin(-yaw)
-            rot_matrix = np.array([
-                [cos_yaw, -sin_yaw, 0],
-                [sin_yaw, cos_yaw, 0],
-                [0, 0, 1]
-            ])
-            local_points = (rot_matrix @ local_points.T).T
-
-        # Create local point cloud for Open3D voxelization
-        local_pcd = o3d.geometry.PointCloud()
-        local_pcd.points = o3d.utility.Vector3dVector(local_points)
-
-        # Use Open3D voxel grid with smallest voxel dimension
-        min_voxel = min(cfg.voxel_size)
-        voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(
-            local_pcd, voxel_size=min_voxel
-        )
-
-        # Convert to our occupancy format
-        occupancy = np.zeros(grid_size, dtype=np.uint8)
-        voxel_size = np.array(cfg.voxel_size)
-        voxel_origin = np.array(cfg.point_cloud_range[:3])
-
-        for voxel in voxel_grid.get_voxels():
-            center = voxel_grid.get_voxel_center_coordinate(voxel.grid_index)
-            idx = np.floor((center - voxel_origin) / voxel_size).astype(int)
-
-            if (0 <= idx[0] < grid_size[0] and
-                0 <= idx[1] < grid_size[1] and
-                0 <= idx[2] < grid_size[2]):
-                occupancy[idx[0], idx[1], idx[2]] = 1
-
-        # Add ground plane
-        ground_z = int((0 - cfg.point_cloud_range[2]) / cfg.voxel_size[2])
-        if 0 <= ground_z < grid_size[2]:
-            occupancy[:, :, ground_z] = np.maximum(occupancy[:, :, ground_z], 1)
-
-        return occupancy
 
     def voxelize_at_position(
         self,

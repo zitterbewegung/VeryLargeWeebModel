@@ -13,7 +13,7 @@ Depth Occupancy Tiling Algorithm:
 5. Generate semantic labels (if available)
 
 Parameters matching VeryLargeWeebModel expectations:
-- Voxel size: [0.4, 0.4, 0.4] meters (XYZ)
+- Voxel size: [0.4, 0.4, 1.25] meters (XYZ) - see utils/voxel_config.py
 - Point cloud range: [-40, -40, -2, 40, 40, 150] meters (extended Z for drones)
 - Occupancy classes: 0=empty, 1=occupied (binary), or semantic labels
 
@@ -22,22 +22,33 @@ Usage:
     occupancy_grid = processor.depth_to_occupancy(depth_image, camera_pose, intrinsics)
 """
 
+import os
+import sys
 import numpy as np
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass, field
-import cv2
+
+# Add scripts directory to path for utils import
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import HAS_CV2
+from utils.voxel_config import DEFAULT_POINT_CLOUD_RANGE, DEFAULT_VOXEL_SIZE
+
+if HAS_CV2:
+    import cv2
+else:
+    cv2 = None
 
 
 @dataclass
 class DepthOccupancyConfig:
     """Configuration for depth-to-occupancy conversion."""
 
-    # Voxel grid parameters (VeryLargeWeebModel defaults)
-    voxel_size: Tuple[float, float, float] = (0.4, 0.4, 0.4)
+    # Voxel grid parameters (from centralized config)
+    voxel_size: Tuple[float, float, float] = DEFAULT_VOXEL_SIZE
 
     # Point cloud range [xmin, ymin, zmin, xmax, ymax, zmax]
     # Extended Z range for aerial operations
-    point_cloud_range: Tuple[float, ...] = (-40.0, -40.0, -2.0, 40.0, 40.0, 150.0)
+    point_cloud_range: Tuple[float, ...] = DEFAULT_POINT_CLOUD_RANGE
 
     # Depth camera parameters
     depth_min: float = 0.1    # Minimum valid depth (meters)
@@ -143,7 +154,7 @@ class DepthOccupancyProcessor:
         valid_mask = (depth > self.config.depth_min) & (depth < self.config.depth_max)
 
         # Apply noise filtering (reject large depth discontinuities)
-        if self.config.depth_noise_threshold > 0:
+        if self.config.depth_noise_threshold > 0 and HAS_CV2:
             depth_gradient = np.abs(cv2.Sobel(depth, cv2.CV_32F, 1, 1, ksize=3))
             valid_mask &= (depth_gradient < self.config.depth_noise_threshold * depth)
 
@@ -470,6 +481,10 @@ if __name__ == '__main__':
     print(f"Point cloud range: {config.point_cloud_range}")
 
     if args.depth:
+        if not HAS_CV2:
+            print("Error: OpenCV (cv2) is required to load depth images.")
+            print("Install with: pip install opencv-python")
+            sys.exit(1)
         # Load and process depth image
         depth_image = cv2.imread(args.depth, cv2.IMREAD_UNCHANGED)
 

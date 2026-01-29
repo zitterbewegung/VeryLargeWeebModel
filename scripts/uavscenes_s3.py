@@ -26,72 +26,41 @@ import os
 import sys
 import argparse
 import subprocess
-import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict
 
-try:
-    import boto3
+# Import shared utilities
+from utils import (
+    Colors, log_info, log_success, log_warn, log_error, log_step,
+    HAS_BOTO3, HAS_TQDM,
+    get_s3_client, s3_file_exists, list_s3_files,
+    S3_REGION, DEFAULT_BUCKET,
+)
+
+if HAS_BOTO3:
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import ClientError, NoCredentialsError
-    HAS_BOTO3 = True
-except ImportError:
-    HAS_BOTO3 = False
+else:
+    TransferConfig = None
+    ClientError = Exception
+    NoCredentialsError = Exception
 
-try:
+if HAS_TQDM:
     from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-DEFAULT_BUCKET = "verylargeweebmodel"
 S3_PREFIX = "uavscenes"
-S3_REGION = "us-west-2"
 
 GDRIVE_FOLDER_ID = "1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
 GDRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{GDRIVE_FOLDER_ID}"
 
 # Expected scenes in the dataset
 EXPECTED_SCENES = ["AMtown", "AMvalley", "HKairport", "HKisland"]
-
-
-# =============================================================================
-# Logging
-# =============================================================================
-
-class Colors:
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    NC = '\033[0m'
-
-
-def log_info(msg: str):
-    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}")
-
-
-def log_success(msg: str):
-    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}")
-
-
-def log_warn(msg: str):
-    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}")
-
-
-def log_error(msg: str):
-    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}")
-
-
-def log_step(msg: str):
-    print(f"\n{Colors.CYAN}==>{Colors.NC} {msg}")
 
 
 # =============================================================================
@@ -172,43 +141,6 @@ def download_from_gdrive(output_dir: Path, use_rclone: bool = True) -> bool:
 # =============================================================================
 # S3 Functions
 # =============================================================================
-
-def get_s3_client():
-    """Get S3 client."""
-    if not HAS_BOTO3:
-        raise ImportError("boto3 required. Install with: pip install boto3")
-    return boto3.client('s3', region_name=S3_REGION)
-
-
-def s3_file_exists(s3_client, bucket: str, key: str, local_size: Optional[int] = None) -> bool:
-    """Check if file exists in S3 (optionally check size matches)."""
-    try:
-        response = s3_client.head_object(Bucket=bucket, Key=key)
-        if local_size is not None:
-            return response['ContentLength'] == local_size
-        return True
-    except ClientError:
-        return False
-
-
-def list_s3_files(s3_client, bucket: str, prefix: str) -> List[Dict]:
-    """List all files in S3 under prefix."""
-    files = []
-    paginator = s3_client.get_paginator('list_objects_v2')
-
-    try:
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get('Contents', []):
-                files.append({
-                    'key': obj['Key'],
-                    'size': obj['Size'],
-                    'modified': obj['LastModified']
-                })
-    except ClientError as e:
-        log_error(f"Failed to list S3 bucket: {e}")
-
-    return files
-
 
 def upload_to_s3(
     local_dir: Path,

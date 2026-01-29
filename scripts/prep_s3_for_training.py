@@ -27,32 +27,34 @@ After running, use this on the remote server:
 import os
 import sys
 import argparse
-import subprocess
-import hashlib
 from pathlib import Path
 from typing import Optional
 
-try:
+# Import shared utilities
+from utils import (
+    Colors, log_info, log_success, log_warn, log_error, log_step,
+    HAS_BOTO3, HAS_TQDM,
+    get_s3_client, s3_file_exists, ensure_bucket_exists, check_aws_credentials,
+    S3_REGION, DEFAULT_BUCKET,
+)
+
+if HAS_BOTO3:
     import boto3
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import ClientError, NoCredentialsError
-    HAS_BOTO3 = True
-except ImportError:
-    HAS_BOTO3 = False
+else:
+    boto3 = None
+    TransferConfig = None
+    ClientError = Exception
+    NoCredentialsError = Exception
 
-try:
+if HAS_TQDM:
     from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
-
-DEFAULT_BUCKET = "verylargeweebmodel"
-S3_REGION = "us-west-2"
 
 # Files to upload for training
 TRAINING_FILES = {
@@ -106,98 +108,8 @@ TRAINING_DIRS = {
 
 
 # =============================================================================
-# Logging
-# =============================================================================
-
-class Colors:
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    BOLD = '\033[1m'
-    NC = '\033[0m'
-
-
-def log_info(msg: str):
-    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}", flush=True)
-
-
-def log_success(msg: str):
-    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}", flush=True)
-
-
-def log_warn(msg: str):
-    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}", flush=True)
-
-
-def log_error(msg: str):
-    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}", flush=True)
-
-
-def log_step(msg: str):
-    print(f"\n{Colors.CYAN}==>{Colors.NC} {Colors.BOLD}{msg}{Colors.NC}", flush=True)
-
-
-# =============================================================================
 # S3 Functions
 # =============================================================================
-
-def check_aws_credentials() -> bool:
-    """Check if AWS credentials are configured."""
-    if not HAS_BOTO3:
-        return False
-    try:
-        import socket
-        socket.setdefaulttimeout(10)  # 10 second timeout
-        sts = boto3.client('sts')
-        sts.get_caller_identity()
-        return True
-    except Exception as e:
-        log_error(f"AWS credential check failed: {e}")
-        return False
-
-
-def get_s3_client():
-    """Get S3 client."""
-    if not HAS_BOTO3:
-        raise ImportError("boto3 required: pip install boto3")
-    return boto3.client('s3', region_name=S3_REGION)
-
-
-def ensure_bucket_exists(s3_client, bucket: str, dry_run: bool = False) -> bool:
-    """Create bucket if it doesn't exist."""
-    try:
-        s3_client.head_bucket(Bucket=bucket)
-        log_info(f"Bucket exists: s3://{bucket}")
-        return True
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == '404':
-            log_info(f"Creating bucket: {bucket}")
-            if dry_run:
-                log_info(f"[DRY RUN] Would create bucket: {bucket}")
-                return True
-            try:
-                if S3_REGION != 'us-east-1':
-                    s3_client.create_bucket(
-                        Bucket=bucket,
-                        CreateBucketConfiguration={'LocationConstraint': S3_REGION}
-                    )
-                else:
-                    s3_client.create_bucket(Bucket=bucket)
-                log_success(f"Created bucket: {bucket}")
-                return True
-            except Exception as create_err:
-                log_error(f"Failed to create bucket: {create_err}")
-                return False
-        elif error_code == '403':
-            log_error(f"Access denied to bucket: {bucket}")
-            return False
-        else:
-            log_error(f"Error checking bucket: {e}")
-            return False
-
 
 def s3_object_exists(s3_client, bucket: str, key: str) -> tuple[bool, int]:
     """Check if S3 object exists and return its size."""
@@ -402,7 +314,7 @@ def prep_s3_bucket(
 
     # Ensure bucket exists
     log_step("Checking S3 bucket")
-    if not ensure_bucket_exists(s3_client, bucket, dry_run):
+    if not ensure_bucket_exists(s3_client, bucket, dry_run=dry_run):
         return results
 
     # Upload individual files

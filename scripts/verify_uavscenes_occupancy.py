@@ -16,6 +16,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from dataset.uavscenes_dataset import UAVScenesConfig, UAVScenesDataset
+from scripts.utils.voxel_config import DEFAULT_POINT_CLOUD_RANGE, DEFAULT_VOXEL_SIZE
 
 
 def parse_args():
@@ -33,10 +34,10 @@ def parse_args():
     parser.add_argument('--min-in-range', type=float, default=0.01,
                         help='Min in-range ratio before fallback triggers')
     parser.add_argument('--pc-range', nargs=6, type=float,
-                        default=[-40.0, -40.0, -10.0, 40.0, 40.0, 50.0],
+                        default=list(DEFAULT_POINT_CLOUD_RANGE),
                         help='Point cloud range: xmin ymin zmin xmax ymax zmax')
     parser.add_argument('--voxel-size', nargs=3, type=float,
-                        default=[0.4, 0.4, 0.5],
+                        default=list(DEFAULT_VOXEL_SIZE),
                         help='Voxel size: x y z')
     return parser.parse_args()
 

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: Use plateau_to_occworld.py instead.
+
+This script is deprecated because:
+- Open3D-ML semantic features were never completed (see voxelize_with_features)
+- plateau_to_occworld.py is faster with Numba optimization
+- The Open3DMLFeatureExtractor class is never used in the pipeline
+
 Open3D-ML Pipeline Setup for OccWorld Training
 
 This script sets up the complete data pipeline using Open3D and Open3D-ML:
@@ -19,6 +26,13 @@ Usage:
     python scripts/setup_open3d_pipeline.py --process-only --input data/plateau/meshes --output data/tokyo_gazebo
 """
 
+import warnings
+warnings.warn(
+    "setup_open3d_pipeline.py is deprecated. Use plateau_to_occworld.py instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 import os
 import sys
 import argparse
@@ -31,17 +45,13 @@ from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
 
-# Check for required libraries
-try:
-    import open3d as o3d
-    HAS_OPEN3D = True
-    O3D_VERSION = o3d.__version__
-except ImportError:
-    HAS_OPEN3D = False
-    O3D_VERSION = None
+# Import shared utilities
+from utils import HAS_OPEN3D, HAS_TORCH, HAS_REQUESTS, HAS_TQDM, o3d, tqdm, requests
 
+O3D_VERSION = o3d.__version__ if HAS_OPEN3D else None
+
+# Open3D-ML for semantic feature extraction (specific to this script)
 try:
-    # Open3D-ML for semantic feature extraction
     import open3d.ml as ml3d
     import open3d.ml.torch as ml3d_torch
     HAS_OPEN3D_ML = True
@@ -53,19 +63,6 @@ except Exception as e:
     if "Version mismatch" in str(e):
         print(f"Note: Open3D-ML disabled: {e}")
         print("  Geometric features still available. Semantic segmentation disabled.")
-
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
-
-try:
-    import requests
-    from tqdm import tqdm
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
 
 
 # =============================================================================
@@ -122,8 +119,8 @@ PLATEAU_URLS = {
 
 def download_file(url: str, output_path: str, description: str = "Downloading") -> bool:
     """Download a file with progress bar."""
-    if not HAS_REQUESTS:
-        print("Error: requests library required. Install with: pip install requests tqdm")
+    if not HAS_REQUESTS or not HAS_TQDM:
+        print("Error: requests and tqdm libraries required. Install with: pip install requests tqdm")
         return False
 
     try:

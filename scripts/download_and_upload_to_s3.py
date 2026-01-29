@@ -32,36 +32,35 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Tuple
 
-try:
-    import boto3
+# Import shared utilities
+from utils import (
+    Colors, log_info, log_success, log_warn, log_error, log_step,
+    HAS_BOTO3, HAS_TQDM, HAS_REQUESTS,
+    get_s3_client, s3_file_exists,
+    S3_REGION, DEFAULT_BUCKET,
+)
+
+if HAS_BOTO3:
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import ClientError, NoCredentialsError
-    HAS_BOTO3 = True
-except ImportError:
-    HAS_BOTO3 = False
+else:
     TransferConfig = None
+    ClientError = Exception
+    NoCredentialsError = Exception
 
-try:
+if HAS_REQUESTS:
     import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
 
-try:
+if HAS_TQDM:
     from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-DEFAULT_BUCKET = "verylargeweebmodel"
 DEFAULT_LOCAL_DIR = "data"
 DEFAULT_PRETRAINED_DIR = "pretrained"
-S3_REGION = "us-west-2"  # Must match prep_s3_for_training.py
 
 # Download URLs
 DOWNLOAD_SOURCES = {
@@ -102,39 +101,6 @@ DOWNLOAD_SOURCES = {
         "description": "nuScenes validation pickle (~30MB)",
     },
 }
-
-
-# =============================================================================
-# Logging
-# =============================================================================
-
-class Colors:
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    NC = '\033[0m'
-
-
-def log_info(msg: str):
-    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}")
-
-
-def log_success(msg: str):
-    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}")
-
-
-def log_warn(msg: str):
-    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}")
-
-
-def log_error(msg: str):
-    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}")
-
-
-def log_step(msg: str):
-    print(f"\n{Colors.CYAN}==>{Colors.NC} {msg}")
 
 
 # =============================================================================
@@ -312,14 +278,6 @@ def download_all(project_root: Path, sources: Optional[list] = None) -> dict:
 # =============================================================================
 # S3 Upload Functions
 # =============================================================================
-
-def get_s3_client():
-    """Get S3 client with proper credentials."""
-    if not HAS_BOTO3:
-        raise ImportError("boto3 is required. Install with: pip install boto3")
-
-    return boto3.client('s3', region_name=S3_REGION)
-
 
 def file_md5(filepath: Path, chunk_size: int = 8192) -> str:
     """Calculate MD5 hash of a file."""

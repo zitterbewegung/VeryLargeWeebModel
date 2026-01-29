@@ -23,26 +23,8 @@ from pathlib import Path
 from multiprocessing import Pool, cpu_count
 from functools import partial
 
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-
-
-def create_session_dirs(base_dir: str, session_name: str) -> dict:
-    """Create directory structure for a recording session."""
-    session_dir = os.path.join(base_dir, session_name)
-    dirs = {
-        'root': session_dir,
-        'images': os.path.join(session_dir, 'images'),
-        'lidar': os.path.join(session_dir, 'lidar'),
-        'poses': os.path.join(session_dir, 'poses'),
-        'occupancy': os.path.join(session_dir, 'occupancy'),
-    }
-    for d in dirs.values():
-        os.makedirs(d, exist_ok=True)
-    return dirs
+# Import shared utilities
+from utils import create_session_dirs, HAS_CV2
 
 
 def generate_trajectory(num_frames: int, pattern: str = 'random') -> list:

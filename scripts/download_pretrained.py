@@ -16,13 +16,18 @@ import argparse
 import subprocess
 from pathlib import Path
 
+# Import shared utilities
+from utils import (
+    Colors, log_info, log_success, log_warn, log_error, log_step,
+    S3_REGION, DEFAULT_BUCKET,
+)
+
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-S3_BUCKET = "verylargeweebmodel"
-S3_REGION = "us-west-2"
+S3_BUCKET = DEFAULT_BUCKET
 
 # Files available on S3
 S3_FILES = {
@@ -99,39 +104,6 @@ MIN_FILE_SIZES = {
     "nuscenes_train_pkl": 10_000_000,    # 10MB
     "nuscenes_val_pkl": 5_000_000,       # 5MB
 }
-
-
-# =============================================================================
-# Logging
-# =============================================================================
-
-class Colors:
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    NC = '\033[0m'
-
-
-def log_info(msg: str):
-    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}")
-
-
-def log_success(msg: str):
-    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}")
-
-
-def log_warn(msg: str):
-    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}")
-
-
-def log_error(msg: str):
-    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}")
-
-
-def log_step(msg: str):
-    print(f"\n{Colors.CYAN}==>{Colors.NC} {msg}")
 
 
 # =============================================================================

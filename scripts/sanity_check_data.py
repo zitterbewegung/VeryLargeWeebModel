@@ -14,6 +14,10 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+# Add scripts directory to path for utils import
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils.voxel_config import DEFAULT_GRID_SIZE
+
 def check_session(session_dir: str) -> dict:
     """Check a single session for data integrity."""
     results = {
@@ -136,14 +140,13 @@ def check_session(session_dir: str) -> dict:
         results['occupancy_stats'] = {
             'grid_shapes': list(grid_shapes),
             'avg_occupancy_rate': total_occupied / total_voxels,
-            'expected_shape': (200, 200, 121),
+            'expected_shape': DEFAULT_GRID_SIZE,
         }
 
         # Check grid shape
-        expected = (200, 200, 121)
         for shape in grid_shapes:
-            if shape != expected:
-                results['warnings'].append(f"Grid shape {shape} differs from expected {expected}")
+            if shape != DEFAULT_GRID_SIZE:
+                results['warnings'].append(f"Grid shape {shape} differs from expected {DEFAULT_GRID_SIZE}")
 
     return results
 
