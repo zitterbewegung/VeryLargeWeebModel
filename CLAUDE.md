@@ -24,3 +24,11 @@ OccWorld training pipeline for Tokyo PLATEAU 3D city data with Gazebo simulation
 
 - Occupancy data is very sparse (~1% occupied voxels)
 - Loss functions need to handle extreme class imbalance (Focal Loss, Dice Loss)
+
+## Testing
+
+**Always run tests after making changes:**
+
+```bash
+python -m pytest tests/ -v --tb=short
+```
