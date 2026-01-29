@@ -944,7 +944,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Use autocast for mixed precision if scaler is provided
         use_amp = scaler is not None
-        amp_context = torch.cuda.amp.autocast() if use_amp else contextlib.nullcontext()
+        amp_context = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
 
         with amp_context:
             if is_6dof:

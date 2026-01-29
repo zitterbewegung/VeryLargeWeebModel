@@ -148,7 +148,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         optimizer.zero_grad()
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = model(history_occ, history_poses, future_poses)
                 targets = {
                     'future_occupancy': future_occ.float(),
