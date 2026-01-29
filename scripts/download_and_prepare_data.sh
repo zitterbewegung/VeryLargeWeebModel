@@ -17,6 +17,7 @@
 #   --plateau        Download Tokyo PLATEAU 3D models only
 #   --models         Download pretrained models only
 #   --nuscenes       Download nuScenes pickle files only
+#   --uavscenes      Download UAVScenes dataset from Google Drive
 #   --generate-data  Generate training data from PLATEAU meshes
 #   --skip-plateau   Skip PLATEAU download (large files)
 #   --skip-convert   Skip mesh conversion step
@@ -56,6 +57,7 @@ DOWNLOAD_ALL=true
 DOWNLOAD_PLATEAU=false
 DOWNLOAD_MODELS=false
 DOWNLOAD_NUSCENES=false
+DOWNLOAD_UAVSCENES=false
 SKIP_PLATEAU=false
 SKIP_CONVERT=false
 GENERATE_DATA=false
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --plateau)      DOWNLOAD_ALL=false; DOWNLOAD_PLATEAU=true; shift ;;
         --models)       DOWNLOAD_ALL=false; DOWNLOAD_MODELS=true; shift ;;
         --nuscenes)     DOWNLOAD_ALL=false; DOWNLOAD_NUSCENES=true; shift ;;
+        --uavscenes)    DOWNLOAD_ALL=false; DOWNLOAD_UAVSCENES=true; shift ;;
         --generate-data) GENERATE_DATA=true; shift ;;
         --skip-plateau) SKIP_PLATEAU=true; shift ;;
         --skip-convert) SKIP_CONVERT=true; shift ;;
@@ -88,6 +91,7 @@ if [ "$DOWNLOAD_ALL" = true ]; then
     DOWNLOAD_PLATEAU=true
     DOWNLOAD_MODELS=true
     DOWNLOAD_NUSCENES=true
+    DOWNLOAD_UAVSCENES=true
     GENERATE_DATA=true
 fi
 
@@ -495,6 +499,112 @@ For occupancy supervision:
 EOF
 
     log_success "nuScenes download instructions created"
+}
+
+# =============================================================================
+# Download UAVScenes Dataset from Google Drive
+# =============================================================================
+download_uavscenes() {
+    log_step "Downloading UAVScenes dataset from Google Drive..."
+
+    local UAVSCENES_DIR="${OUTPUT_DIR}/uavscenes"
+    local FOLDER_ID="1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
+    local REMOTE_NAME="gdrive"
+
+    mkdir -p "$UAVSCENES_DIR"
+
+    # Check if rclone is installed
+    if ! command -v rclone &> /dev/null; then
+        log_error "rclone not found. Please install it:"
+        log_info "  macOS:   brew install rclone"
+        log_info "  Linux:   curl https://rclone.org/install.sh | sudo bash"
+        log_info "  Windows: Download from https://rclone.org/downloads/"
+
+        # Create manual download instructions
+        cat << 'EOF' > "${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
+# UAVScenes Dataset Download
+
+## Option 1: Install rclone (Recommended)
+
+```bash
+# macOS
+brew install rclone
+
+# Linux
+curl https://rclone.org/install.sh | sudo bash
+
+# Then configure Google Drive:
+rclone config
+# Select: n (new remote) -> name: gdrive -> type: drive -> defaults -> auto config: y
+
+# Then run the download script again
+./scripts/download_and_prepare_data.sh --uavscenes
+```
+
+## Option 2: Manual Download
+
+1. Visit: https://drive.google.com/drive/folders/1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN
+2. Download all files/folders manually
+3. Extract to: data/uavscenes/
+
+## Option 3: Use gdown (simpler but may hit quota limits)
+
+```bash
+pip install gdown
+gdown --folder --remaining-ok "https://drive.google.com/drive/folders/1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN" -O data/uavscenes/
+```
+EOF
+        log_info "Download instructions saved to ${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
+        return 1
+    fi
+
+    # Check if gdrive remote is configured
+    if ! rclone listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:"; then
+        log_warn "Google Drive remote '${REMOTE_NAME}' not configured."
+        log_info "Please run 'rclone config' to set up Google Drive access:"
+        log_info ""
+        log_info "  1. Run: rclone config"
+        log_info "  2. Select 'n' for new remote"
+        log_info "  3. Name it: ${REMOTE_NAME}"
+        log_info "  4. Select 'drive' (Google Drive)"
+        log_info "  5. Leave client_id and client_secret blank (press Enter)"
+        log_info "  6. Select '1' for full access"
+        log_info "  7. Leave root_folder_id blank"
+        log_info "  8. Leave service_account_file blank"
+        log_info "  9. Select 'n' for advanced config"
+        log_info "  10. Select 'y' for auto config (opens browser)"
+        log_info "  11. Select 'n' for shared drive"
+        log_info "  12. Confirm with 'y', then 'q' to quit"
+        log_info ""
+        log_info "Then run this script again with --uavscenes"
+        return 1
+    fi
+
+    log_info "Downloading from Google Drive folder..."
+    log_info "  Folder ID: $FOLDER_ID"
+    log_info "  Output: $UAVSCENES_DIR"
+
+    # Download using rclone
+    # --progress: Show progress
+    # --transfers=4: 4 parallel transfers
+    # --drive-acknowledge-abuse: Download even if flagged
+    if rclone copy \
+        --progress \
+        --transfers=4 \
+        --drive-acknowledge-abuse \
+        "${REMOTE_NAME}:/${FOLDER_ID}" \
+        "$UAVSCENES_DIR"; then
+        log_success "UAVScenes dataset downloaded to $UAVSCENES_DIR"
+
+        # List downloaded contents
+        log_info "Downloaded contents:"
+        ls -lh "$UAVSCENES_DIR" 2>/dev/null || true
+    else
+        log_error "rclone download failed"
+        log_info "Try running manually:"
+        log_info "  rclone copy --progress '${REMOTE_NAME}:/${FOLDER_ID}' '$UAVSCENES_DIR'"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -1043,6 +1153,7 @@ print_summary() {
     echo "  │   ├── meshes/               # Extracted mesh files"
     echo "  │   └── gazebo_models/        # Converted Gazebo SDF models"
     echo "  ├── tokyo_gazebo/             # Training data (generated)"
+    echo "  ├── uavscenes/                # UAVScenes dataset (if downloaded)"
     echo "  └── nuscenes/                 # nuScenes data (if downloaded)"
     echo ""
     echo "  ${PROJECT_ROOT}/pretrained/"
@@ -1076,6 +1187,14 @@ print_summary() {
         echo -e "  ${GREEN}✓${NC} Training data: $num_sessions sessions"
     else
         echo -e "  ${YELLOW}!${NC} No training data generated yet"
+    fi
+
+    # Check UAVScenes
+    if [ -d "${OUTPUT_DIR}/uavscenes" ] && [ "$(ls -A ${OUTPUT_DIR}/uavscenes 2>/dev/null)" ]; then
+        local uav_files=$(ls -1 ${OUTPUT_DIR}/uavscenes 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "  ${GREEN}✓${NC} UAVScenes: $uav_files items downloaded"
+    else
+        echo -e "  ${YELLOW}!${NC} UAVScenes not downloaded (use --uavscenes)"
     fi
 
     echo ""
@@ -1144,6 +1263,10 @@ main() {
 
     if [ "$DOWNLOAD_NUSCENES" = true ]; then
         download_nuscenes_metadata
+    fi
+
+    if [ "$DOWNLOAD_UAVSCENES" = true ]; then
+        download_uavscenes
     fi
 
     # Setup directories
