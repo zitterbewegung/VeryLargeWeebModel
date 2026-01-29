@@ -1,6 +1,6 @@
 """S3 utilities for uploading and downloading data."""
 
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 
 from .logging import log_info, log_success, log_error
 from .dependencies import HAS_BOTO3
@@ -16,19 +16,33 @@ else:
     NoCredentialsError = Exception
 
 # Default configuration
-S3_REGION = "us-west-2"
-DEFAULT_BUCKET = "verylargeweebmodel"
+S3_REGION: str = "us-west-2"
+DEFAULT_BUCKET: str = "verylargeweebmodel"
 
 
-def get_s3_client(region: str = None):
-    """Get an S3 client."""
+def get_s3_client(region: Optional[str] = None) -> Any:
+    """Get an S3 client.
+
+    Args:
+        region: AWS region name (defaults to S3_REGION)
+
+    Returns:
+        boto3 S3 client
+
+    Raises:
+        ImportError: If boto3 is not installed
+    """
     if not HAS_BOTO3:
         raise ImportError("boto3 is required. Install with: pip install boto3")
     return boto3.client('s3', region_name=region or S3_REGION)
 
 
 def check_aws_credentials() -> bool:
-    """Check if AWS credentials are configured."""
+    """Check if AWS credentials are configured.
+
+    Returns:
+        True if credentials are valid, False otherwise
+    """
     if not HAS_BOTO3:
         return False
     try:
@@ -43,12 +57,22 @@ def check_aws_credentials() -> bool:
 
 
 def s3_file_exists(
-    s3_client,
+    s3_client: Any,
     bucket: str,
     key: str,
     local_size: Optional[int] = None
 ) -> bool:
-    """Check if a file exists in S3, optionally checking size matches."""
+    """Check if a file exists in S3, optionally checking size matches.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        key: S3 object key
+        local_size: If provided, also verify file size matches
+
+    Returns:
+        True if file exists (and size matches if specified)
+    """
     try:
         response = s3_client.head_object(Bucket=bucket, Key=key)
         if local_size is not None:
@@ -58,9 +82,18 @@ def s3_file_exists(
         return False
 
 
-def list_s3_files(s3_client, bucket: str, prefix: str) -> List[Dict]:
-    """List all files in S3 under a prefix."""
-    files = []
+def list_s3_files(s3_client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
+    """List all files in S3 under a prefix.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        prefix: S3 key prefix to list
+
+    Returns:
+        List of dicts with 'key', 'size', and 'modified' for each file
+    """
+    files: List[Dict[str, Any]] = []
     paginator = s3_client.get_paginator('list_objects_v2')
 
     try:
@@ -78,12 +111,22 @@ def list_s3_files(s3_client, bucket: str, prefix: str) -> List[Dict]:
 
 
 def ensure_bucket_exists(
-    s3_client,
+    s3_client: Any,
     bucket: str,
-    region: str = None,
+    region: Optional[str] = None,
     dry_run: bool = False
 ) -> bool:
-    """Create S3 bucket if it doesn't exist."""
+    """Create S3 bucket if it doesn't exist.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        region: AWS region for bucket creation
+        dry_run: If True, don't actually create
+
+    Returns:
+        True if bucket exists or was created successfully
+    """
     region = region or S3_REGION
 
     try:
@@ -122,8 +165,20 @@ def get_transfer_config(
     multipart_threshold_mb: int = 100,
     max_concurrency: int = 10,
     multipart_chunksize_mb: int = 100
-):
-    """Get a TransferConfig for large file uploads/downloads."""
+) -> Any:
+    """Get a TransferConfig for large file uploads/downloads.
+
+    Args:
+        multipart_threshold_mb: Size threshold for multipart uploads (MB)
+        max_concurrency: Maximum concurrent transfers
+        multipart_chunksize_mb: Size of each multipart chunk (MB)
+
+    Returns:
+        boto3 TransferConfig object
+
+    Raises:
+        ImportError: If boto3 is not installed
+    """
     if not HAS_BOTO3:
         raise ImportError("boto3 is required. Install with: pip install boto3")
 
@@ -135,11 +190,11 @@ def get_transfer_config(
 
 
 def upload_file(
-    s3_client,
+    s3_client: Any,
     local_path: str,
     bucket: str,
     s3_key: str,
-    transfer_config=None,
+    transfer_config: Optional[Any] = None,
     dry_run: bool = False
 ) -> bool:
     """Upload a single file to S3.
@@ -155,7 +210,6 @@ def upload_file(
     Returns:
         True if successful, False otherwise
     """
-    import os
     if dry_run:
         log_info(f"[DRY RUN] Would upload: {local_path} -> s3://{bucket}/{s3_key}")
         return True
@@ -172,11 +226,11 @@ def upload_file(
 
 
 def download_file(
-    s3_client,
+    s3_client: Any,
     bucket: str,
     s3_key: str,
     local_path: str,
-    transfer_config=None,
+    transfer_config: Optional[Any] = None,
     dry_run: bool = False
 ) -> bool:
     """Download a single file from S3.
@@ -210,14 +264,14 @@ def download_file(
 
 
 def upload_directory(
-    s3_client,
+    s3_client: Any,
     local_dir: str,
     bucket: str,
     prefix: str,
-    transfer_config=None,
+    transfer_config: Optional[Any] = None,
     dry_run: bool = False,
     skip_existing: bool = True
-) -> Dict:
+) -> Dict[str, int]:
     """Upload a directory to S3.
 
     Args:
@@ -232,11 +286,10 @@ def upload_directory(
     Returns:
         Dict with counts: {"success": N, "failed": N, "skipped": N}
     """
-    import os
     from pathlib import Path
 
     local_path = Path(local_dir)
-    results = {"success": 0, "failed": 0, "skipped": 0}
+    results: Dict[str, int] = {"success": 0, "failed": 0, "skipped": 0}
 
     for filepath in local_path.rglob("*"):
         if not filepath.is_file():
@@ -261,14 +314,14 @@ def upload_directory(
 
 
 def download_directory(
-    s3_client,
+    s3_client: Any,
     bucket: str,
     prefix: str,
     local_dir: str,
-    transfer_config=None,
+    transfer_config: Optional[Any] = None,
     dry_run: bool = False,
     skip_existing: bool = True
-) -> Dict:
+) -> Dict[str, int]:
     """Download all files under an S3 prefix to a local directory.
 
     Args:
@@ -284,9 +337,8 @@ def download_directory(
         Dict with counts: {"success": N, "failed": N, "skipped": N}
     """
     import os
-    from pathlib import Path
 
-    results = {"success": 0, "failed": 0, "skipped": 0}
+    results: Dict[str, int] = {"success": 0, "failed": 0, "skipped": 0}
 
     # List all files under prefix
     files = list_s3_files(s3_client, bucket, prefix)
