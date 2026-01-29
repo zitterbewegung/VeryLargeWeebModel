@@ -132,3 +132,179 @@ def get_transfer_config(
         max_concurrency=max_concurrency,
         multipart_chunksize=multipart_chunksize_mb * 1024 * 1024,
     )
+
+
+def upload_file(
+    s3_client,
+    local_path: str,
+    bucket: str,
+    s3_key: str,
+    transfer_config=None,
+    dry_run: bool = False
+) -> bool:
+    """Upload a single file to S3.
+
+    Args:
+        s3_client: boto3 S3 client
+        local_path: Local file path
+        bucket: S3 bucket name
+        s3_key: S3 object key
+        transfer_config: Optional TransferConfig for large files
+        dry_run: If True, don't actually upload
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import os
+    if dry_run:
+        log_info(f"[DRY RUN] Would upload: {local_path} -> s3://{bucket}/{s3_key}")
+        return True
+
+    try:
+        if transfer_config:
+            s3_client.upload_file(local_path, bucket, s3_key, Config=transfer_config)
+        else:
+            s3_client.upload_file(local_path, bucket, s3_key)
+        return True
+    except Exception as e:
+        log_error(f"Failed to upload {local_path}: {e}")
+        return False
+
+
+def download_file(
+    s3_client,
+    bucket: str,
+    s3_key: str,
+    local_path: str,
+    transfer_config=None,
+    dry_run: bool = False
+) -> bool:
+    """Download a single file from S3.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        s3_key: S3 object key
+        local_path: Local file path to save to
+        transfer_config: Optional TransferConfig for large files
+        dry_run: If True, don't actually download
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import os
+    if dry_run:
+        log_info(f"[DRY RUN] Would download: s3://{bucket}/{s3_key} -> {local_path}")
+        return True
+
+    try:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        if transfer_config:
+            s3_client.download_file(bucket, s3_key, local_path, Config=transfer_config)
+        else:
+            s3_client.download_file(bucket, s3_key, local_path)
+        return True
+    except Exception as e:
+        log_error(f"Failed to download {s3_key}: {e}")
+        return False
+
+
+def upload_directory(
+    s3_client,
+    local_dir: str,
+    bucket: str,
+    prefix: str,
+    transfer_config=None,
+    dry_run: bool = False,
+    skip_existing: bool = True
+) -> Dict:
+    """Upload a directory to S3.
+
+    Args:
+        s3_client: boto3 S3 client
+        local_dir: Local directory path
+        bucket: S3 bucket name
+        prefix: S3 key prefix
+        transfer_config: Optional TransferConfig for large files
+        dry_run: If True, don't actually upload
+        skip_existing: Skip files that already exist with same size
+
+    Returns:
+        Dict with counts: {"success": N, "failed": N, "skipped": N}
+    """
+    import os
+    from pathlib import Path
+
+    local_path = Path(local_dir)
+    results = {"success": 0, "failed": 0, "skipped": 0}
+
+    for filepath in local_path.rglob("*"):
+        if not filepath.is_file():
+            continue
+
+        relative = filepath.relative_to(local_path)
+        s3_key = f"{prefix}/{relative}".replace("\\", "/")
+
+        # Check if already exists
+        if skip_existing:
+            file_size = filepath.stat().st_size
+            if s3_file_exists(s3_client, bucket, s3_key, file_size):
+                results["skipped"] += 1
+                continue
+
+        if upload_file(s3_client, str(filepath), bucket, s3_key, transfer_config, dry_run):
+            results["success"] += 1
+        else:
+            results["failed"] += 1
+
+    return results
+
+
+def download_directory(
+    s3_client,
+    bucket: str,
+    prefix: str,
+    local_dir: str,
+    transfer_config=None,
+    dry_run: bool = False,
+    skip_existing: bool = True
+) -> Dict:
+    """Download all files under an S3 prefix to a local directory.
+
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        prefix: S3 key prefix
+        local_dir: Local directory path
+        transfer_config: Optional TransferConfig for large files
+        dry_run: If True, don't actually download
+        skip_existing: Skip files that already exist with same size
+
+    Returns:
+        Dict with counts: {"success": N, "failed": N, "skipped": N}
+    """
+    import os
+    from pathlib import Path
+
+    results = {"success": 0, "failed": 0, "skipped": 0}
+
+    # List all files under prefix
+    files = list_s3_files(s3_client, bucket, prefix)
+
+    for file_info in files:
+        s3_key = file_info['key']
+        relative_path = s3_key[len(prefix):].lstrip('/')
+        local_path = os.path.join(local_dir, relative_path)
+
+        # Check if already exists
+        if skip_existing and os.path.exists(local_path):
+            if os.path.getsize(local_path) == file_info['size']:
+                results["skipped"] += 1
+                continue
+
+        if download_file(s3_client, bucket, s3_key, local_path, transfer_config, dry_run):
+            results["success"] += 1
+        else:
+            results["failed"] += 1
+
+    return results

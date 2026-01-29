@@ -5,7 +5,9 @@ from .s3 import (
     S3_REGION, DEFAULT_BUCKET,
     get_s3_client, s3_file_exists, list_s3_files, ensure_bucket_exists,
     check_aws_credentials, get_transfer_config,
+    upload_file, download_file, upload_directory, download_directory,
 )
+from .trajectory import TrajectoryGenerator, TrajectoryConfig
 from .directories import create_session_dirs
 from .voxel_config import (
     VoxelConfig, DEFAULT_VOXEL_CONFIG,
