@@ -509,102 +509,108 @@ download_uavscenes() {
 
     local UAVSCENES_DIR="${OUTPUT_DIR}/uavscenes"
     local FOLDER_ID="1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
+    local FOLDER_URL="https://drive.google.com/drive/folders/${FOLDER_ID}"
     local REMOTE_NAME="gdrive"
 
     mkdir -p "$UAVSCENES_DIR"
 
-    # Check if rclone is installed
-    if ! command -v rclone &> /dev/null; then
-        log_error "rclone not found. Please install it:"
-        log_info "  macOS:   brew install rclone"
-        log_info "  Linux:   curl https://rclone.org/install.sh | sudo bash"
-        log_info "  Windows: Download from https://rclone.org/downloads/"
+    # Try rclone first (best option - no quota limits, parallel transfers)
+    if command -v rclone &> /dev/null; then
+        if rclone listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:"; then
+            log_info "Using rclone (4 parallel transfers)..."
+            log_info "  Folder ID: $FOLDER_ID"
+            log_info "  Output: $UAVSCENES_DIR"
 
-        # Create manual download instructions
-        cat << 'EOF' > "${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
+            if rclone copy \
+                --progress \
+                --transfers=4 \
+                --drive-acknowledge-abuse \
+                "${REMOTE_NAME}:/${FOLDER_ID}" \
+                "$UAVSCENES_DIR"; then
+                log_success "UAVScenes dataset downloaded to $UAVSCENES_DIR"
+                ls -lh "$UAVSCENES_DIR" 2>/dev/null || true
+                return 0
+            else
+                log_warn "rclone download failed, trying gdown..."
+            fi
+        else
+            log_warn "rclone installed but '${REMOTE_NAME}' remote not configured"
+            log_info "To configure: rclone config (select 'drive', name it '${REMOTE_NAME}')"
+            log_info "Falling back to gdown..."
+        fi
+    fi
+
+    # Try gdown (simpler setup, may hit quota limits on large files)
+    if command -v gdown &> /dev/null || python3 -c "import gdown" 2>/dev/null; then
+        log_info "Using gdown..."
+        log_info "  Folder URL: $FOLDER_URL"
+        log_info "  Output: $UAVSCENES_DIR"
+        log_warn "Note: gdown may hit Google Drive quota limits on large files"
+
+        # Ensure gdown is available as command
+        if ! command -v gdown &> /dev/null; then
+            log_info "Installing gdown CLI..."
+            pip install --quiet gdown
+        fi
+
+        if gdown --folder --remaining-ok "$FOLDER_URL" -O "$UAVSCENES_DIR"; then
+            log_success "UAVScenes dataset downloaded to $UAVSCENES_DIR"
+            ls -lh "$UAVSCENES_DIR" 2>/dev/null || true
+            return 0
+        else
+            log_warn "gdown download failed or incomplete (quota limit?)"
+        fi
+    fi
+
+    # Neither tool available - provide installation instructions
+    log_error "No download tool available. Install one of:"
+    echo ""
+    log_info "Option 1: gdown (easiest)"
+    log_info "  pip install gdown"
+    echo ""
+    log_info "Option 2: rclone (best for large files, no quota limits)"
+    log_info "  macOS:   brew install rclone"
+    log_info "  Linux:   curl https://rclone.org/install.sh | sudo bash"
+    log_info "  Then:    rclone config  (create remote named '${REMOTE_NAME}')"
+    echo ""
+
+    # Create manual download instructions
+    cat << EOF > "${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
 # UAVScenes Dataset Download
 
-## Option 1: Install rclone (Recommended)
+## Option 1: gdown (easiest)
 
-```bash
-# macOS
-brew install rclone
-
-# Linux
-curl https://rclone.org/install.sh | sudo bash
-
-# Then configure Google Drive:
-rclone config
-# Select: n (new remote) -> name: gdrive -> type: drive -> defaults -> auto config: y
-
-# Then run the download script again
-./scripts/download_and_prepare_data.sh --uavscenes
-```
-
-## Option 2: Manual Download
-
-1. Visit: https://drive.google.com/drive/folders/1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN
-2. Download all files/folders manually
-3. Extract to: data/uavscenes/
-
-## Option 3: Use gdown (simpler but may hit quota limits)
-
-```bash
+\`\`\`bash
 pip install gdown
-gdown --folder --remaining-ok "https://drive.google.com/drive/folders/1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN" -O data/uavscenes/
-```
+gdown --folder --remaining-ok "${FOLDER_URL}" -O ${UAVSCENES_DIR}/
+\`\`\`
+
+Note: May hit quota limits on large files. If so, wait or use rclone.
+
+## Option 2: rclone (recommended for large files)
+
+\`\`\`bash
+# Install
+brew install rclone   # macOS
+# or: curl https://rclone.org/install.sh | sudo bash  # Linux
+
+# Configure Google Drive
+rclone config
+# Select: n -> name: ${REMOTE_NAME} -> type: drive -> defaults -> auto config: y
+
+# Download
+rclone copy --progress --transfers=4 "${REMOTE_NAME}:/${FOLDER_ID}" "${UAVSCENES_DIR}"
+\`\`\`
+
+## Option 3: Manual Download
+
+1. Visit: ${FOLDER_URL}
+2. Download all files/folders manually
+3. Extract to: ${UAVSCENES_DIR}/
 EOF
-        log_info "Download instructions saved to ${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
-        return 1
-    fi
 
-    # Check if gdrive remote is configured
-    if ! rclone listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:"; then
-        log_warn "Google Drive remote '${REMOTE_NAME}' not configured."
-        log_info "Please run 'rclone config' to set up Google Drive access:"
-        log_info ""
-        log_info "  1. Run: rclone config"
-        log_info "  2. Select 'n' for new remote"
-        log_info "  3. Name it: ${REMOTE_NAME}"
-        log_info "  4. Select 'drive' (Google Drive)"
-        log_info "  5. Leave client_id and client_secret blank (press Enter)"
-        log_info "  6. Select '1' for full access"
-        log_info "  7. Leave root_folder_id blank"
-        log_info "  8. Leave service_account_file blank"
-        log_info "  9. Select 'n' for advanced config"
-        log_info "  10. Select 'y' for auto config (opens browser)"
-        log_info "  11. Select 'n' for shared drive"
-        log_info "  12. Confirm with 'y', then 'q' to quit"
-        log_info ""
-        log_info "Then run this script again with --uavscenes"
-        return 1
-    fi
-
-    log_info "Downloading from Google Drive folder..."
-    log_info "  Folder ID: $FOLDER_ID"
-    log_info "  Output: $UAVSCENES_DIR"
-
-    # Download using rclone
-    # --progress: Show progress
-    # --transfers=4: 4 parallel transfers
-    # --drive-acknowledge-abuse: Download even if flagged
-    if rclone copy \
-        --progress \
-        --transfers=4 \
-        --drive-acknowledge-abuse \
-        "${REMOTE_NAME}:/${FOLDER_ID}" \
-        "$UAVSCENES_DIR"; then
-        log_success "UAVScenes dataset downloaded to $UAVSCENES_DIR"
-
-        # List downloaded contents
-        log_info "Downloaded contents:"
-        ls -lh "$UAVSCENES_DIR" 2>/dev/null || true
-    else
-        log_error "rclone download failed"
-        log_info "Try running manually:"
-        log_info "  rclone copy --progress '${REMOTE_NAME}:/${FOLDER_ID}' '$UAVSCENES_DIR'"
-        return 1
-    fi
+    log_info "Instructions saved to ${UAVSCENES_DIR}/DOWNLOAD_INSTRUCTIONS.md"
+    return 1
 }
 
 # =============================================================================
