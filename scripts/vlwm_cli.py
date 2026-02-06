@@ -87,56 +87,195 @@ def cmd_setup(args: argparse.Namespace) -> int:
 PLATEAU_URL = "https://assets.cms.plateau.reearth.io/assets/d6/70821e-7f58-4f69-bc74-43f240713f1e/13100_tokyo23-ku_2022_3dtiles_1_1_op_bldg_13101_chiyoda-ku_lod2.zip"
 NUSCENES_MINI_URL = "https://www.nuscenes.org/data/v1.0-mini.tgz"
 
+# Drone/aerial dataset info
+UAVSCENES_HF_REPO = "sijieaaa/UAVScenes"
+UAVSCENES_GDRIVE_FOLDER = "1HSJWc5qmIKLdpaS8w8pqrWch4F9MHIeN"
+MIDAIR_URL = "https://midair.ulg.ac.be/"
+TARTANAIR_URL = "https://theairlab.org/tartanair-dataset/"
+
+
+def _download_uavscenes(data_dir: Path, scene: str = None) -> bool:
+    """Download UAVScenes from HuggingFace (preferred) or Google Drive.
+
+    Args:
+        data_dir: Base data directory.
+        scene: Specific scene to download (AMtown, AMvalley, HKairport, HKisland)
+               or None for all scenes.
+
+    Returns:
+        True if download succeeded.
+    """
+    uav_dir = data_dir / "uavscenes"
+    uav_dir.mkdir(parents=True, exist_ok=True)
+
+    # Try HuggingFace Hub first (preferred — no quota limits)
+    try:
+        from huggingface_hub import snapshot_download
+        log_info(f"Downloading UAVScenes from HuggingFace ({UAVSCENES_HF_REPO})...")
+        if scene:
+            log_info(f"Scene filter: {scene}")
+            snapshot_download(
+                repo_id=UAVSCENES_HF_REPO,
+                repo_type="dataset",
+                local_dir=str(uav_dir),
+                allow_patterns=[f"*{scene}*"],
+            )
+        else:
+            snapshot_download(
+                repo_id=UAVSCENES_HF_REPO,
+                repo_type="dataset",
+                local_dir=str(uav_dir),
+            )
+        log_success(f"UAVScenes downloaded to {uav_dir}")
+        return True
+    except ImportError:
+        log_warn("huggingface_hub not installed, trying gdown...")
+    except Exception as e:
+        log_warn(f"HuggingFace download failed: {e}, trying gdown...")
+
+    # Try gdown (Google Drive)
+    try:
+        import subprocess
+        gdown_cmd = [sys.executable, "-m", "gdown", "--folder", "--remaining-ok",
+                     f"https://drive.google.com/drive/folders/{UAVSCENES_GDRIVE_FOLDER}",
+                     "-O", str(uav_dir)]
+        log_info("Downloading UAVScenes from Google Drive via gdown...")
+        log_warn("Google Drive may impose quota limits on large files")
+        result = subprocess.run(gdown_cmd, timeout=7200)
+        if result.returncode == 0:
+            log_success(f"UAVScenes downloaded to {uav_dir}")
+            return True
+        log_warn("gdown failed or incomplete")
+    except ImportError:
+        log_warn("gdown not installed")
+    except Exception as e:
+        log_warn(f"gdown failed: {e}")
+
+    # Manual instructions
+    log_error("Automatic UAVScenes download failed. Install a download tool:")
+    log_info("  pip install huggingface_hub   # Recommended")
+    log_info("  pip install gdown             # Alternative (may hit quota)")
+    log_info("")
+    log_info("Or use the shell script:")
+    log_info("  ./scripts/setup_uavscenes.sh --all")
+    return False
+
+
+def _download_midair(data_dir: Path) -> bool:
+    """Download Mid-Air dataset."""
+    midair_dir = data_dir / "midair"
+    midair_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mid-Air requires registration — provide instructions
+    log_info("Mid-Air dataset requires manual download (academic registration).")
+    log_info(f"  1. Visit: {MIDAIR_URL}")
+    log_info("  2. Register and download the desired environments")
+    log_info(f"  3. Extract to: {midair_dir}")
+    log_info("")
+    log_info("Expected structure:")
+    log_info(f"  {midair_dir}/Kite_training/")
+    log_info(f"  {midair_dir}/PLE_training/")
+    return True
+
+
+def _download_tartanair(data_dir: Path) -> bool:
+    """Download TartanAir dataset."""
+    tartanair_dir = data_dir / "tartanair"
+    tartanair_dir.mkdir(parents=True, exist_ok=True)
+
+    # Try tartanair Python package
+    try:
+        import tartanair as ta
+        log_info("Downloading TartanAir via tartanair package...")
+        ta.init(str(tartanair_dir))
+        ta.download(env=["abandonedfactory", "neighborhood"], difficulty=["Easy"])
+        log_success(f"TartanAir downloaded to {tartanair_dir}")
+        return True
+    except ImportError:
+        pass
+    except Exception as e:
+        log_warn(f"tartanair package download failed: {e}")
+
+    log_info("TartanAir dataset download options:")
+    log_info(f"  1. Visit: {TARTANAIR_URL}")
+    log_info("  2. Or install: pip install tartanair")
+    log_info(f"  3. Extract to: {tartanair_dir}")
+    return True
+
 
 def cmd_download(args: argparse.Namespace) -> int:
     """Download training data and pretrained models."""
     log_step("Data Download")
-
-    tool = available_download_tool()
-    if tool:
-        log_info(f"Best download tool: {tool}")
-    else:
-        log_error("No download tool found (need curl, wget, aria2c, or axel)")
-        return 1
 
     env = detect_cloud_environment()
     data_dir = Path(args.data_dir or os.path.join(env.work_dir, "data"))
 
     if args.dry_run:
         log_info(f"[DRY RUN] Would download to {data_dir}")
-        if args.plateau:
+        if args.plateau or args.all:
             log_info(f"  - PLATEAU data from {PLATEAU_URL}")
-        if args.nuscenes:
+        if args.nuscenes or args.all:
             log_info(f"  - nuScenes mini from {NUSCENES_MINI_URL}")
+        if args.uavscenes or args.all:
+            log_info(f"  - UAVScenes from HuggingFace ({UAVSCENES_HF_REPO})")
+        if args.midair or args.all:
+            log_info(f"  - Mid-Air (manual download from {MIDAIR_URL})")
+        if args.tartanair or args.all:
+            log_info(f"  - TartanAir from {TARTANAIR_URL}")
         return 0
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    failed = []
 
     if args.plateau or args.all:
         log_step("Downloading PLATEAU data")
-        output = str(data_dir / "plateau" / "tokyo_chiyoda.zip")
-        if verify_download(output, min_size=1_000_000):
-            log_info("PLATEAU data already downloaded, skipping")
+        tool = available_download_tool()
+        if not tool:
+            log_error("No download tool found (need curl, wget, aria2c, or axel)")
+            failed.append("PLATEAU")
         else:
-            if not fast_download(PLATEAU_URL, output, "PLATEAU Tokyo Chiyoda"):
+            output = str(data_dir / "plateau" / "tokyo_chiyoda.zip")
+            if verify_download(output, min_size=1_000_000):
+                log_info("PLATEAU data already downloaded, skipping")
+            elif not fast_download(PLATEAU_URL, output, "PLATEAU Tokyo Chiyoda"):
                 log_error("PLATEAU download failed")
-                if not args.all:
-                    return 1
+                failed.append("PLATEAU")
 
     if args.nuscenes or args.all:
         log_step("Downloading nuScenes mini")
-        output = str(data_dir / "nuscenes" / "v1.0-mini.tgz")
-        if verify_download(output, min_size=1_000_000):
-            log_info("nuScenes mini already downloaded, skipping")
+        tool = available_download_tool()
+        if not tool:
+            log_error("No download tool found (need curl, wget, aria2c, or axel)")
+            failed.append("nuScenes")
         else:
-            if not fast_download(NUSCENES_MINI_URL, output, "nuScenes mini"):
+            output = str(data_dir / "nuscenes" / "v1.0-mini.tgz")
+            if verify_download(output, min_size=1_000_000):
+                log_info("nuScenes mini already downloaded, skipping")
+            elif not fast_download(NUSCENES_MINI_URL, output, "nuScenes mini"):
                 log_error("nuScenes download failed")
-                if not args.all:
-                    return 1
+                failed.append("nuScenes")
+
+    if args.uavscenes or args.all:
+        log_step("Downloading UAVScenes")
+        scene = getattr(args, 'scene', None)
+        if not _download_uavscenes(data_dir, scene=scene):
+            failed.append("UAVScenes")
+
+    if args.midair or args.all:
+        log_step("Mid-Air Dataset")
+        _download_midair(data_dir)
+
+    if args.tartanair or args.all:
+        log_step("TartanAir Dataset")
+        _download_tartanair(data_dir)
 
     if args.models or args.all:
         log_step("Downloading pretrained models")
         log_info("Pretrained model download: use scripts/download_pretrained.py")
+
+    if failed:
+        log_error(f"Some downloads failed: {', '.join(failed)}")
+        return 1
 
     log_success("Download complete")
     return 0
@@ -509,8 +648,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- download ---
     p_dl = subparsers.add_parser("download", help="Download data and models")
-    p_dl.add_argument("--plateau", action="store_true", help="Download PLATEAU data")
+    p_dl.add_argument("--plateau", action="store_true", help="Download PLATEAU 3D city data")
     p_dl.add_argument("--nuscenes", action="store_true", help="Download nuScenes mini")
+    p_dl.add_argument("--uavscenes", action="store_true", help="Download UAVScenes drone dataset")
+    p_dl.add_argument("--midair", action="store_true", help="Download Mid-Air drone dataset")
+    p_dl.add_argument("--tartanair", action="store_true", help="Download TartanAir drone dataset")
+    p_dl.add_argument("--scene", help="UAVScenes scene filter (AMtown, AMvalley, HKairport, HKisland)")
     p_dl.add_argument("--models", action="store_true", help="Download pretrained models")
     p_dl.add_argument("--all", action="store_true", help="Download everything")
     p_dl.add_argument("--data-dir", help="Override data directory")
