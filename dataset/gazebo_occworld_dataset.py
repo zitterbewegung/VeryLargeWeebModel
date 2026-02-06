@@ -467,6 +467,9 @@ class GazeboOccWorldDataset(Dataset):
         if os.path.exists(lidar_path):
             points = np.load(lidar_path)  # [N, 4] - x, y, z, intensity
 
+            if len(points) == 0:
+                return torch.zeros(0, 4)
+
             # Subsample if too many points
             if len(points) > self.config.max_points:
                 indices = np.random.choice(
@@ -508,7 +511,7 @@ class GazeboOccWorldDataset(Dataset):
         data = np.load(occ_path)
         occupancy = data['occupancy']  # [X, Y, Z]
 
-        return torch.from_numpy(occupancy).long()
+        return torch.from_numpy(occupancy).float()
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, Any]:

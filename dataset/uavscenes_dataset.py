@@ -94,7 +94,7 @@ class UAVScenesConfig:
         """Calculate grid size from range and voxel size."""
         pc_range = np.array(self.point_cloud_range)
         voxel_sz = np.array(self.voxel_size)
-        return tuple(((pc_range[3:] - pc_range[:3]) / voxel_sz).astype(int))
+        return tuple(np.round((pc_range[3:] - pc_range[:3]) / voxel_sz).astype(int))
 
 
 class UAVScenesDataset(Dataset):
@@ -541,8 +541,8 @@ class UAVScenesDataset(Dataset):
         R = self._quaternion_to_rotation_matrix(quat)
 
         xyz = points[:, :3].astype(np.float32)
-        # Assume pose maps ego -> world; invert for world -> ego.
-        xyz_ego = (xyz - position) @ R
+        # Pose maps ego -> world; invert for world -> ego (R is orthogonal, so R^-1 = R^T).
+        xyz_ego = (xyz - position) @ R.T
 
         if points.shape[1] > 3:
             return np.concatenate([xyz_ego, points[:, 3:]], axis=1)
@@ -648,9 +648,10 @@ class UAVScenesDataset(Dataset):
         if len(xyz) == 0:
             return np.zeros(grid_size, dtype=np.uint8)
 
-        # Convert to voxel indices
-        voxel_coords = ((xyz - pc_range[:3]) / voxel_size).astype(np.int32)
-        voxel_coords = np.clip(voxel_coords, 0, grid_size - 1)
+        # Convert to voxel indices (clip before int conversion to prevent overflow)
+        voxel_coords_float = (xyz - pc_range[:3]) / voxel_size
+        voxel_coords_float = np.clip(voxel_coords_float, 0, np.array(grid_size) - 1)
+        voxel_coords = voxel_coords_float.astype(np.int32)
 
         # Create occupancy grid
         occupancy = np.zeros(grid_size, dtype=np.uint8)
@@ -680,11 +681,12 @@ class UAVScenesDataset(Dataset):
         else:
             ang_vel = np.zeros(3)
 
-        # Update pose with computed velocities
-        pose_curr[7:10] = lin_vel
-        pose_curr[10:13] = ang_vel
+        # Return a copy with computed velocities to avoid in-place mutation
+        result = pose_curr.copy()
+        result[7:10] = lin_vel
+        result[10:13] = ang_vel
 
-        return pose_curr
+        return result
 
     def __len__(self) -> int:
         return len(self.samples)

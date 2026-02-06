@@ -21,7 +21,9 @@ class VoxelConfig:
 
     @property
     def grid_size(self) -> Tuple[int, int, int]:
-        """Calculate grid dimensions from range and voxel size."""
+        """Calculate grid dimensions from range and voxel size (floor division)."""
+        if any(v <= 0 for v in self.voxel_size):
+            raise ValueError(f"voxel_size must be positive, got {self.voxel_size}")
         return (
             int((self.point_cloud_range[3] - self.point_cloud_range[0]) / self.voxel_size[0]),
             int((self.point_cloud_range[4] - self.point_cloud_range[1]) / self.voxel_size[1]),

@@ -933,14 +933,20 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     num_batches = 0
 
     for batch_idx, batch in enumerate(dataloader):
+        optimizer.zero_grad()
+
+        # Validate batch has required keys
+        required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
+        missing = [k for k in required_keys if k not in batch]
+        if missing:
+            print(f"  [WARN] Batch {batch_idx} missing keys: {missing}, skipping")
+            continue
+
         # Move to device
         history_occ = batch['history_occupancy'].to(device)
         future_occ = batch['future_occupancy'].to(device)
         history_poses = batch['history_poses'].to(device)
         future_poses = batch['future_poses'].to(device)
-
-        # Forward pass with optional mixed precision
-        optimizer.zero_grad()
 
         # Use autocast for mixed precision if scaler is provided
         use_amp = scaler is not None
@@ -1043,6 +1049,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
                 wandb.log(log_dict, commit=False)
 
+        # Check for NaN/Inf BEFORE backward to prevent corrupting model weights
+        if not torch.isfinite(loss):
+            print(f"  [WARN] Non-finite loss at batch {batch_idx}: {loss.item()}, skipping")
+            optimizer.zero_grad()
+            continue
+
         # Backward pass with optional mixed precision scaling
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -1104,7 +1116,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 'train/global_step': global_step,
             })
 
-    avg_loss = total_loss / num_batches
+    avg_loss = total_loss / max(num_batches, 1)
     return avg_loss
 
 
@@ -1116,6 +1128,10 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
 
     with torch.no_grad():
         for batch in dataloader:
+            required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
+            if any(k not in batch for k in required_keys):
+                continue
+
             history_occ = batch['history_occupancy'].to(device)
             future_occ = batch['future_occupancy'].to(device)
             history_poses = batch['history_poses'].to(device)

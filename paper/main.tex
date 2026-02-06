@@ -89,6 +89,16 @@ World models~\cite{ha2018worldmodels} learn to predict future states of an envir
 
 \textbf{RoboOccWorld}~\cite{robooccworld} generalizes occupancy world models to robotics applications, introducing Conditional Causal State Attention for pose-conditioned prediction.
 
+\textbf{Drive-OccWorld}~\cite{driveoccworld} extends OccWorld with semantic and motion-conditional normalization, enabling action-controllable generation of future occupancy states conditioned on planned ego trajectories.
+
+\textbf{OccSora}~\cite{occsora} introduces the first diffusion-based 4D occupancy generation model, demonstrating that diffusion processes can produce temporally coherent occupancy sequences with improved diversity over autoregressive approaches.
+
+\textbf{OccLLaMA}~\cite{occllama} unifies vision, language, and action through a LLaMA-based occupancy model, tokenizing 3D scenes alongside text and demonstrating that large language model architectures can effectively reason about occupancy.
+
+\textbf{SparseOcc}~\cite{sparseocc} proposes the first fully sparse occupancy network, eliminating dense feature volumes entirely and introducing the RayIoU metric for more faithful evaluation of occupancy predictions.
+
+\textbf{GaussianFormer}~\cite{gaussianformer} represents scenes as sparse semantic 3D Gaussians for occupancy prediction, achieving 17--25\% memory reduction compared to dense voxel methods while maintaining competitive accuracy.
+
 All these works focus on ground-vehicle scenarios. \ours{} is the first to extend occupancy world models to aerial navigation.
 
 \paragraph{Distinguishing from Related Aerial Works.}
@@ -98,7 +108,9 @@ Two recent works address related but distinct problems:
 
 \textbf{ANWM}~\cite{anwm} (Aerial Navigation World Model) predicts future RGB images from aerial viewpoints, following the image-forecasting paradigm of DreamerV3~\cite{dreamer}. While effective for end-to-end policy learning, image prediction operates in pixel space without explicit 3D structure. \ours{} instead predicts explicit 3D voxel occupancy, providing geometric representations directly usable for collision checking, path planning, and multi-agent coordination.
 
-Our unique contribution combines: (1) \textit{temporal} occupancy forecasting (vs. current-frame mapping in MCOP), (2) \textit{3D geometric} representation (vs. 2D image forecasting in ANWM), and (3) \textit{6DoF pose prediction} with uncertainty estimation for aerial navigation.
+\textbf{AirScape}~\cite{airscape} is a concurrent work that proposes the first 6DoF aerial world model; however, it operates entirely in 2D image space without explicit 3D geometric structure, predicting future RGB frames rather than volumetric occupancy. This limits its utility for collision checking and path planning in 3D.
+
+Our unique contribution combines: (1) \textit{temporal} occupancy forecasting (vs. current-frame mapping in MCOP), (2) \textit{3D geometric} representation (vs. 2D image forecasting in ANWM and AirScape), and (3) \textit{6DoF pose prediction} with uncertainty estimation for aerial navigation.
 
 \subsection{Drone Navigation}
 
@@ -114,6 +126,10 @@ Autonomous drone navigation has traditionally relied on different paradigms:
 
 \textbf{Vision transformers} like AceFormer~\cite{aceformer} enable GNSS-denied navigation through visual exploration.
 
+\textbf{AirScape}~\cite{airscape} proposes the first 6DoF aerial world model for drone navigation, but operates in image space rather than 3D occupancy, limiting its applicability to geometric planning tasks.
+
+\textbf{UAVScenes}~\cite{uavscenes} introduces the first UAV benchmark with both image and LiDAR annotations, providing a potential future evaluation resource for aerial 3D perception methods.
+
 However, none of these approaches use occupancy world models for predictive scene understanding---the paradigm that has proven highly effective for autonomous driving.
 
 \subsection{Urban 3D Datasets}
@@ -127,6 +143,12 @@ Training data availability has been a critical bottleneck:
 \textbf{VisDrone}~\cite{visdrone} provides aerial imagery but lacks 3D occupancy annotations.
 
 \textbf{PLATEAU}~\cite{plateau} offers high-fidelity 3D city models under CC BY 4.0, enabling commercial applications. We leverage this dataset to generate aerial occupancy training data.
+
+\textbf{SkyScenes}~\cite{skyscenes} provides a synthetic aerial dataset generated from the CARLA simulator, containing 33,600 annotated images with dense semantic and depth labels for aerial perception research.
+
+\textbf{TrueCity}~\cite{truecity} introduces the first simulation-to-real benchmark for urban 3D understanding, pairing CityGML-derived synthetic point clouds with real-world scans to evaluate domain transfer.
+
+\textbf{GaussianCity}~\cite{gaussiancity} demonstrates generative Gaussian splatting for unbounded 3D city generation, enabling procedural creation of large-scale urban environments that could serve as additional training data sources.
 
 %==============================================================================
 \section{Method}
@@ -574,6 +596,63 @@ Multi-modal fusion transformer for end-to-end autonomous driving.
 Tobin, J., Fong, R., Ray, A., Schneider, J., Zaremba, W., \& Abbeel, P. (2017).
 Domain randomization for transferring deep neural networks from simulation to the real world.
 \textit{IROS}.
+
+\bibitem{driveoccworld}
+Yu, Y., Zuo, Z., Zhao, H., \& Hu, J. (2025).
+Drive-OccWorld: Driving in the Occupancy World with Action-Conditioned Normalization.
+\textit{AAAI Conference on Artificial Intelligence}.
+arXiv preprint arXiv:2408.14197.
+
+\bibitem{occsora}
+Wang, L., Zhang, Z., \& Zhu, Z. (2024).
+OccSora: 4D Occupancy Generation Models as World Simulators for Autonomous Driving.
+\textit{arXiv preprint arXiv:2405.20337}.
+
+\bibitem{occllama}
+Wei, S., Zhu, S., \& Wang, Y. (2024).
+OccLLaMA: An Occupancy-Language-Action Generative World Model for Autonomous Driving.
+\textit{arXiv preprint arXiv:2409.03272}.
+
+\bibitem{sparseocc}
+Liu, P., Deng, J., Tong, W., Shi, B., Yang, S., Wang, D., Shi, B., \& Wang, L. (2024).
+Fully Sparse 3D Occupancy Prediction.
+\textit{ECCV}.
+arXiv preprint arXiv:2312.17118.
+
+\bibitem{gaussianformer}
+Huang, Y., Zheng, W., Zhang, Y., Zhou, J., \& Lu, J. (2024).
+GaussianFormer: Scene as Gaussians for Vision-Based 3D Semantic Occupancy Prediction.
+\textit{ECCV}.
+arXiv preprint arXiv:2405.17429.
+
+\bibitem{airscape}
+Chen, X., Wang, K., Ma, Z., Gao, P., Li, T., \& Zhao, H. (2025).
+AirScape: 6DoF Aerial World Model with Any-View Rendering.
+\textit{ACM Multimedia}.
+arXiv preprint arXiv:2507.08885.
+
+\bibitem{uavscenes}
+Wang, X., Li, Y., Zheng, Z., \& Yang, Y. (2025).
+UAVScenes: A Multi-Modal Multi-Task UAV Benchmark with LiDAR and Image Annotations.
+\textit{ICCV}.
+arXiv preprint arXiv:2507.22412.
+
+\bibitem{skyscenes}
+Ahmed, K.S., Elhoseiny, M., \& Afifi, M. (2024).
+SkyScenes: A Synthetic Dataset for Aerial Scene Understanding.
+\textit{ECCV}.
+arXiv preprint arXiv:2312.06719.
+
+\bibitem{truecity}
+Zhang, H., Zhang, Y., \& Li, Z. (2024).
+TrueCity: A Sim-to-Real Benchmark for Urban Scene Understanding with CityGML.
+\textit{arXiv preprint arXiv:2511.07007}.
+
+\bibitem{gaussiancity}
+Wu, H., Li, Z., Huang, S., Chen, T., Zhao, H., \& Li, Z. (2025).
+GaussianCity: Generative Gaussian Splatting for Unbounded 3D City Generation.
+\textit{CVPR}.
+arXiv preprint arXiv:2406.06526.
 
 \end{thebibliography}
 

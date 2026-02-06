@@ -1,429 +1,155 @@
-# VeryLargeWeebModel
+# AerialWorld (VeryLargeWeebModel)
 
-Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data using Gazebo simulation for 4D occupancy forecasting.
+Occupancy world models for urban aerial navigation. Fine-tune [OccWorld](https://github.com/wzzheng/OccWorld) on Tokyo PLATEAU 3D city data with Gazebo simulation for 4D occupancy forecasting.
 
-## Training Data Options
+**Paper:** [AerialWorld: Occupancy World Models for Urban Aerial Navigation](paper/main.tex)
 
-This project supports two training data sources:
+## Key Contributions
 
-### 1. nuScenes Dataset (Recommended for Quick Start)
+1. First occupancy world model for aerial urban navigation
+2. Data generation pipeline using Tokyo PLATEAU 3D city data (CC BY 4.0)
+3. Multi-agent training (drone + rover perspectives)
+4. Anti-collapse loss design for extreme sparsity (~1% occupied voxels)
+5. Full open-source release
 
-Real-world autonomous driving data from nuScenes. OccWorld was originally trained on this dataset, so it works out of the box.
-
-| Pros | Cons |
-|------|------|
-| Real sensor data (camera, LiDAR) | Ground-level driving only |
-| Proven to work with OccWorld | No aerial/drone perspectives |
-| Well-documented format | Fixed environments (Boston, Singapore) |
+## Quick Start
 
 ```bash
-# Setup nuScenes
-./scripts/setup_training_data.sh --nuscenes
+# Clone
+git clone https://github.com/zitterbewegung/VeryLargeWeebModel.git
+cd VeryLargeWeebModel
 
-# Train on nuScenes
-python train.py --config config/finetune_nuscenes.py --work-dir /workspace/checkpoints
+# Option A: Cloud GPU (recommended)
+python scripts/vlwm_cli.py setup        # Auto-detects Vast.ai/Lambda/RunPod
+python scripts/vlwm_cli.py download     # Download data and pretrained models
+python scripts/vlwm_cli.py train        # Train with auto GPU detection
+
+# Option B: Manual
+pip install torch torchvision tqdm scipy opencv-python wandb
+python train.py --config config/finetune_tokyo.py --work-dir ./checkpoints
 ```
-
-### 2. Tokyo PLATEAU + Gazebo Simulation (Custom Urban Data)
-
-Simulated data using Tokyo's official 3D city models in Gazebo. Supports drones and custom trajectories.
-
-| Pros | Cons |
-|------|------|
-| Tokyo urban environment | Simulated (not real sensors) |
-| Aerial drone perspectives | Requires Gazebo setup |
-| Custom flight patterns | Data generation takes time |
-| Scalable to all Japan | |
-
-```bash
-# Setup Gazebo + PLATEAU models
-./scripts/setup_training_data.sh --gazebo
-
-# Generate training data (1000 frames × 5 sessions = 5000 samples)
-python scripts/gazebo_data_collector.py --frames 1000 --sessions 5
-
-# Train on Tokyo data
-python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
-```
-
-### Combined Setup
-
-Run both data sources:
-```bash
-./scripts/setup_training_data.sh --all
-```
-
----
 
 ## Architecture
 
-### What are Voxels?
-
-**Voxels are 3D pixels.** Just like pixels divide a 2D image into a grid of colored squares, voxels divide 3D space into a grid of small cubes. Each voxel stores a binary value:
-- `1` = occupied (there's something there - building, car, person)
-- `0` = empty (free space, air)
-
 ```
-2D Image (Pixels)              3D Space (Voxels)
-┌───┬───┬───┬───┐             ┌───┬───┬───┐
-│ ░ │ ▓ │ ▓ │ ░ │             │░░░│▓▓▓│░░░│  ← Top layer (sky)
-├───┼───┼───┼───┤            ┌┴───┼───┼───┴┐
-│ ░ │ ▓ │ ▓ │ ░ │            │░░░│▓▓▓│░░░│  ← Middle layer (buildings)
-├───┼───┼───┼───┤           ┌┴───┼───┼───┴┐
-│ ░ │ ░ │ ░ │ ░ │           │░░░│░░░│░░░│  ← Bottom layer (ground)
-└───┴───┴───┴───┘           └───┴───┴───┘
-```
-
-### Voxel Grid Configuration
-
-VeryLargeWeebModel uses a **200 × 200 × 121** voxel grid:
-
-```
-                    ┌─────────────────────────────────────────┐
-                    │             121 voxels (Z)              │
-                    │              = ~151 meters              │
-                    │            (-2m to +150m)               │
-        80m ────────┼──────────────────┼──────────────────────┤
-                    │                  │                      │
-                    │     200 voxels (Y) = 80 meters         │
-                    │        (-40m to +40m)                  │
-                    │                  │                      │
-       -40m ────────┼──────────────────┼──────────────────────┤
-                    │                  │                      │
-                    └──────────────────┼──────────────────────┘
-                   -40m               0m                    +40m
-                              200 voxels (X) = 80 meters
+Input: 4 history frames                    Output: 6 future frames
+[200×200×121 voxel grids]                  [200×200×121 voxel grids]
+         │                                          ▲
+         ▼                                          │
+┌─────────────────┐  ┌──────────────────┐  ┌───────────────┐
+│  VQVAE Encoder  │─▶│   Transformer    │─▶│ VQVAE Decoder │
+│  (frozen)       │  │   (trainable)    │  │ (frozen)      │
+└─────────────────┘  └──────────────────┘  └───────────────┘
+                            │
+                     ┌──────┴──────┐
+                     │ Pose Module │  ←── 13D pose (xyz + quat + vel)
+                     │ (trainable) │
+                     └─────────────┘
 ```
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| **Grid Size** | 200 × 200 × 121 | Number of voxels in X, Y, Z |
-| **Voxel Size** | 0.4m × 0.4m × 1.25m | Physical size of each voxel |
-| **X Range** | -40m to +40m | 80 meters left/right |
-| **Y Range** | -40m to +40m | 80 meters front/back |
-| **Z Range** | -2m to +150m | ~152 meters vertical (below ground to tall buildings) |
-| **Total Voxels** | 4,840,000 | 200 × 200 × 121 per frame |
-| **Total Volume** | ~970,000 m³ | Coverage area per prediction |
+### Voxel Grid
 
-### Training Pipeline
+| Parameter | Value |
+|-----------|-------|
+| Grid Size | 200 × 200 × 121 |
+| Voxel Size | 0.4m × 0.4m × 1.25m |
+| Range | 80m × 80m × 152m (X, Y, Z) |
+| Z Range | -2m to +150m (aerial) |
+| Occupancy Rate | ~0.83% |
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        VeryLargeWeebModel Training Pipeline                 │
-└─────────────────────────────────────────────────────────────────────────────┘
+### Loss Function
 
-┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐
-│   PLATEAU   │     │   Gazebo    │     │    LiDAR Point      │
-│ 3D City     │────▶│ Simulation  │────▶│    Cloud (N × 4)    │
-│   Models    │     │ (Drone)     │     │   [x, y, z, intensity]
-└─────────────┘     └─────────────┘     └──────────┬──────────┘
-                                                   │
-                                                   ▼
-                                        ┌─────────────────────┐
-                                        │   Voxelization      │
-                                        │   (200 × 200 × 121) │
-                                        └──────────┬──────────┘
-                                                   │
-         ┌─────────────────────────────────────────┴──────────────────────┐
-         │                                                                 │
-         ▼                                                                 ▼
-┌─────────────────────┐                                    ┌─────────────────────┐
-│ Current Occupancy   │                                    │  Ground Truth       │
-│ (Input to Model)    │                                    │  (Future Frames)    │
-└──────────┬──────────┘                                    └──────────┬──────────┘
-           │                                                          │
-           ▼                                                          │
-┌─────────────────────┐                                               │
-│    OccWorld Model   │                                               │
-│   (Transformer)     │                                               │
-└──────────┬──────────┘                                               │
-           │                                                          │
-           ▼                                                          │
-┌─────────────────────┐     ┌─────────────────────┐                   │
-│ Predicted Future    │────▶│   OccupancyLoss     │◀──────────────────┘
-│    Occupancy        │     │ (BCE + Dice Loss)   │
-└─────────────────────┘     └─────────────────────┘
-```
+Focal Loss + Dice Loss + Mean-Matching to handle extreme class imbalance:
+- **Focal Loss** (alpha=0.99, gamma=2): Focus on rare occupied voxels
+- **Dice Loss**: Overlap-based, robust to imbalance
+- **Mean-Matching** (weight=10): Prevents all-zero collapse
 
-### OccupancyLoss Function
+## Training Data
 
-Occupancy grids are **extremely sparse** - typically less than 1% of voxels are occupied. Standard BCE loss would cause the model to predict all zeros (achieving 99% accuracy by doing nothing).
+| Dataset | Type | Use Case |
+|---------|------|----------|
+| Tokyo PLATEAU + Gazebo | Simulated urban | Aerial drone navigation |
+| nuScenes | Real driving | Ground vehicle baseline |
+| UAVScenes | Real aerial | Drone validation |
+| Mid-Air | Simulated flight | Multi-environment pretraining |
 
-**Solution: Weighted BCE + Dice Loss**
+## Hardware
 
-```python
-class OccupancyLoss(nn.Module):
-    """
-    Combined loss for sparse occupancy prediction:
-    - Weighted BCE: 10× penalty for missing occupied voxels
-    - Dice Loss: Measures overlap, robust to class imbalance
-    """
-    def __init__(self, pos_weight=10.0):
-        self.pos_weight = pos_weight  # Weight for occupied voxels
-
-    def forward(self, pred, target):
-        # Weighted BCE - penalize missing occupied voxels more
-        weight = target * (self.pos_weight - 1) + 1
-        bce_loss = F.binary_cross_entropy(pred, target, weight=weight)
-
-        # Dice loss - overlap-based, handles imbalance
-        intersection = (pred * target).sum()
-        dice_loss = 1 - (2 * intersection) / (pred.sum() + target.sum())
-
-        return bce_loss + dice_loss
-```
-
-| Loss Component | Purpose | Effect |
-|----------------|---------|--------|
-| **Weighted BCE** | Penalize false negatives | Model learns to find occupied voxels |
-| **Dice Loss** | Measure set overlap | Robust to extreme class imbalance |
-| **pos_weight=10** | 10× penalty for missed objects | Prevents all-zero predictions |
-
-### Data Format
-
-Each training sample contains:
-
-```python
-sample = {
-    'lidar': np.ndarray,      # Shape: (N, 4) - [x, y, z, intensity]
-    'occupancy': np.ndarray,  # Shape: (200, 200, 121) - binary voxel grid
-    'pose': {
-        'position': {'x': float, 'y': float, 'z': float},
-        'orientation': {'x': float, 'y': float, 'z': float, 'w': float}
-    },
-    'timestamp': float        # Unix timestamp
-}
-```
-
-### Model Architecture
-
-VeryLargeWeebModel is based on [OccWorld](https://github.com/wzzheng/OccWorld), a transformer-based model for 4D occupancy forecasting:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     OccWorld Architecture                    │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │  3D Encoder  │───▶│  World Model │───▶│  3D Decoder  │  │
-│  │ (Voxel→Latent)│   │ (Transformer)│   │ (Latent→Voxel)│  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
-│         │                   │                    │          │
-│         ▼                   ▼                    ▼          │
-│    VQ-VAE Encoder     Temporal Attention    VQ-VAE Decoder │
-│    (Compression)       (Forecasting)        (Reconstruction)│
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-
-Input: Current occupancy grid (200×200×121)
-Output: Predicted future occupancy grids (T×200×200×121)
-```
-
----
-
-## Quick Start (Vast.ai - Recommended)
-
-**Cost: ~$15 | Time: ~30 hours | GPU: A100 40GB**
-
-```bash
-# 1. Rent A100 40GB on vast.ai (~$0.50/hr)
-#    - Image: vastai/pytorch
-#    - Disk: 50GB+
-#    - Reliability: >95%
-
-# 2. SSH into your instance
-ssh -p PORT root@ssh.vast.ai
-
-# 3. Clone and setup
-git clone https://github.com/YOUR_USERNAME/VeryLargeWeebModel.git
-cd VeryLargeWeebModel
-./scripts/vastai_setup.sh
-
-# 4. Download data
-./scripts/download_and_prepare_data.sh --all
-
-# 5. Train (use screen to keep alive)
-screen -S training
-python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
-# Detach: Ctrl+A, then D
-
-# 6. Download results (from local machine)
-scp -P PORT root@ssh.vast.ai:/workspace/checkpoints/best.pth ./
-
-# 7. DESTROY INSTANCE (stop billing!)
-```
-
-## Training Options
-
-| Provider | GPU | $/hr | Time | Total Cost |
-|----------|-----|------|------|------------|
-| **Vast.ai** | A100 40GB | $0.50 | ~30 hrs | **~$15** |
-| Vast.ai | A100 80GB | $0.79 | ~24 hrs | ~$19 |
-| Vast.ai | RTX 3090 | $0.25 | ~48 hrs | ~$12 |
-| Lambda Cloud | A100 | $1.79 | ~24 hrs | ~$43 |
-| Local Mac | M1/M2/M3 | $0 | 5-7 days | $0 |
-
-### Vast.ai (Cheapest)
-```bash
-./scripts/vastai_setup.sh
-python train.py --config config/finetune_tokyo.py --work-dir /workspace/checkpoints
-```
-
-### Lambda Cloud (Easiest)
-```bash
-./scripts/lambda_setup.sh
-python train.py --config config/finetune_tokyo.py --work-dir ~/checkpoints
-```
-
-### Local Mac (Free)
-```bash
-pip install torch torchvision tqdm scipy opencv-python
-python train.py --config config/finetune_tokyo.py --work-dir ./out --batch-size 1
-```
-
-## GPU Comparison
-
-| GPU | VRAM | Est. Time | Notes |
-|-----|------|-----------|-------|
-| A100 80GB | 80GB | ~24 hrs | Fastest, batch 2-4 |
-| A100 40GB | 40GB | ~30 hrs | Best value, batch 1-2 |
-| RTX 4090 | 24GB | ~36 hrs | Batch 1 |
-| RTX 3090 | 24GB | ~48 hrs | Batch 1 |
-| RTX 3080 | 10GB | ~60-80 hrs | Tight on VRAM |
-| Mac M3 Max | 64GB unified | 5-7 days | CPU/MPS training |
+| GPU | VRAM | Batch Size | ~Training Time |
+|-----|------|------------|----------------|
+| A100 80GB | 80GB | 6-8 | ~8 hours |
+| A100 40GB | 40GB | 3-4 | ~12 hours |
+| RTX 4090 | 24GB | 2 | ~20 hours |
+| RTX 3090 | 24GB | 1-2 | ~24 hours |
 
 ## Project Structure
 
 ```
 VeryLargeWeebModel/
-├── train.py                     # Training script
-├── config/
-│   ├── finetune_tokyo.py        # Tokyo/Gazebo dataset config
-│   └── finetune_nuscenes.py     # nuScenes dataset config
-├── dataset/
-│   ├── gazebo_occworld_dataset.py   # Tokyo/Gazebo dataset loader
-│   └── nuscenes_occworld_dataset.py # nuScenes dataset loader
-├── scripts/
-│   ├── vastai_setup.sh          # Vast.ai environment setup
-│   ├── lambda_setup.sh          # Lambda Cloud setup
-│   ├── setup_training_data.sh   # Setup nuScenes + Gazebo data
-│   ├── download_and_prepare_data.sh  # Download PLATEAU models
-│   ├── gazebo_data_collector.py # Generate simulation data
-│   ├── integration_test.py      # Validate pipeline
-│   ├── create_dummy_data.py     # Create test data
-│   └── sanity_check.sh          # Validate codebase
-├── docs/
-│   ├── training_guide.md        # Detailed training guide
-│   ├── vastai_deployment.md     # Vast.ai deployment
-│   ├── lambda_cloud_deployment.md  # Lambda deployment
-│   └── ...
-├── HOW_TO_TRAIN.md              # Quick training reference
-├── ATTRIBUTION.md               # Data licensing info
-└── README.md                    # This file
+├── train.py                        # Main training script
+├── train_6dof.py                   # 6DoF training variant
+├── config/                         # Training configurations
+│   ├── finetune_tokyo.py           # Tokyo PLATEAU (primary)
+│   ├── finetune_nuscenes.py        # nuScenes baseline
+│   ├── finetune_uavscenes.py       # UAVScenes aerial
+│   └── finetune_6dof.py            # 6DoF pose model
+├── dataset/                        # Dataset loaders
+│   ├── gazebo_occworld_dataset.py  # Tokyo Gazebo loader
+│   ├── uavscenes_dataset.py        # UAVScenes loader
+│   ├── midair_dataset.py           # Mid-Air loader
+│   └── nuscenes_*.py               # nuScenes loaders
+├── models/                         # Model architectures
+│   └── occworld_6dof.py            # 6DoF OccWorld model
+├── scripts/                        # Utilities and CLI
+│   ├── vlwm_cli.py                 # Unified CLI (setup/download/train/deploy)
+│   └── utils/                      # Shared utilities
+├── tests/                          # Test suite
+├── paper/                          # LaTeX paper
+└── docs/                           # Detailed documentation
 ```
-
-## Training Commands
-
-### Basic
-```bash
-python train.py --config config/finetune_tokyo.py --work-dir ./checkpoints
-```
-
-### With Options
-```bash
-python train.py \
-    --config config/finetune_tokyo.py \
-    --work-dir ./checkpoints \
-    --batch-size 1 \
-    --lr 0.0001 \
-    --epochs 50
-```
-
-### Resume Training
-```bash
-python train.py \
-    --config config/finetune_tokyo.py \
-    --work-dir ./checkpoints \
-    --resume
-```
-
-## Monitoring
-
-```bash
-# GPU usage
-watch -n 1 nvidia-smi
-
-# TensorBoard
-tensorboard --logdir ./checkpoints --port 6006
-
-# Reattach to training
-screen -r training
-```
-
-## Expected Results
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Val Loss | 0.45 | 0.28 |
-| mIoU | 0.32 | 0.47 |
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| CUDA out of memory | Use `--batch-size 1` |
-| Training too slow | Use A100 instead of consumer GPU |
-| Connection dropped | Use `screen`, reattach with `screen -r` |
-| NaN loss | Lower learning rate: `--lr 0.00001` |
-| Import errors | Run setup script again |
-| Safari certificate error | See [Jupyter SSL Certificate Setup](#jupyter-ssl-certificate-safari) below |
-
-### Jupyter SSL Certificate (Safari)
-
-When using Vast.ai's direct Jupyter access, Safari blocks the self-signed certificate. To fix:
-
-1. Open the Jupyter URL in Safari → "This Connection Is Not Private" appears
-2. Click **"Show Details"** → **"visit this website"** → enter password
-
-**If that doesn't work**, add the certificate to Keychain:
-
-1. In Safari, click the lock icon in the address bar
-2. Click **"Show Certificate"**
-3. Drag the certificate icon to your Desktop (creates a `.cer` file)
-4. **Double-click the `.cer` file** - Keychain Access opens automatically
-5. Enter your password to add the certificate
-6. In Keychain Access, double-click the certificate → expand **"Trust"**
-7. Set **"When using this certificate"** to **"Always Trust"**
-8. Close and enter your password to confirm
-9. Restart Safari and revisit the Jupyter URL
-
-**Chrome/Firefox users**: Click "Advanced" → "Proceed anyway" when prompted.
-
-## Sanity Check
-
-Validate the codebase before deploying:
-
-```bash
-./scripts/sanity_check.sh
-./scripts/sanity_check.sh --full    # Include dependency checks
-./scripts/sanity_check.sh --fix     # Auto-fix common issues
-```
-
-## Data Attribution
-
-This project uses Tokyo PLATEAU 3D city data, licensed under **CC BY 4.0** (commercial use allowed).
-
-> 3D city model data provided by Ministry of Land, Infrastructure, Transport and Tourism (MLIT), Japan - Project PLATEAU.
-
-See [ATTRIBUTION.md](ATTRIBUTION.md) for full licensing details.
 
 ## Documentation
 
-- [HOW_TO_TRAIN.md](HOW_TO_TRAIN.md) - Quick training reference
-- [docs/training_guide.md](docs/training_guide.md) - Detailed training guide
-- [docs/vastai_deployment.md](docs/vastai_deployment.md) - Vast.ai deployment
-- [docs/lambda_cloud_deployment.md](docs/lambda_cloud_deployment.md) - Lambda Cloud deployment
-- [ATTRIBUTION.md](ATTRIBUTION.md) - Data licensing and attribution
+| Document | Description |
+|----------|-------------|
+| [docs/TRAINING.md](docs/TRAINING.md) | Complete training guide (commands, configs, troubleshooting) |
+| [docs/vastai_deployment.md](docs/vastai_deployment.md) | Vast.ai cloud deployment |
+| [docs/lambda_cloud_deployment.md](docs/lambda_cloud_deployment.md) | Lambda Cloud deployment |
+| [TRAINING_LOG.md](TRAINING_LOG.md) | Development notes (loss collapse fix, W&B setup) |
+| [ATTRIBUTION.md](ATTRIBUTION.md) | Data licensing and citations |
+| [paper/](paper/) | Academic paper source |
+
+## CLI Tool
+
+```bash
+python scripts/vlwm_cli.py <command> [options]
+
+Commands:
+  setup       Environment setup (auto-detects cloud provider)
+  download    Download data and pretrained models
+  train       Run training with GPU auto-detection
+  deploy      Deploy to remote GPU instance
+  sanity      Pre-flight checks (syntax, configs, data)
+  info        Show GPU, data, and environment info
+```
+
+## Tests
+
+```bash
+python -m pytest tests/ -v --tb=short
+```
+
+## Citation
+
+```bibtex
+@article{aerialworld2025,
+  title={AerialWorld: Occupancy World Models for Urban Aerial Navigation},
+  author={Anonymous},
+  journal={arXiv preprint},
+  year={2025},
+  url={https://github.com/zitterbewegung/VeryLargeWeebModel}
+}
+```
 
 ## License
 

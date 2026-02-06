@@ -154,6 +154,15 @@ class MidAirDataset(Dataset):
         print(f"Mid-Air {config.split}: {len(self.samples)} samples")
         print(f"  Grid size: {config.grid_size}")
 
+    def __del__(self):
+        """Close cached HDF5 file handles."""
+        for f in self._hdf5_cache.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        self._hdf5_cache.clear()
+
     def _build_sample_index(self) -> List[Dict]:
         """Build index of all valid temporal windows."""
         samples = []

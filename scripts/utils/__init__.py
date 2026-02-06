@@ -24,3 +24,9 @@ from .dependencies import (
 from .dependencies import (
     trimesh, o3d, CubicSpline, jit, prange, tqdm, requests, torch,
 )
+
+# New utility modules
+from .gpu import GPUInfo, detect_gpu_info, gpu_tier, auto_batch_size, select_precision
+from .environment import CloudEnvironment, detect_cloud_environment, work_dir_for_provider
+from .download import fast_download, verify_download, available_download_tool
+from .system_packages import install_system_packages
