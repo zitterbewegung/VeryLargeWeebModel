@@ -8,7 +8,7 @@ from typing import Optional
 from .logging import log_info, log_success, log_warn, log_error
 
 
-def _run_download(cmd: list[str], description: str) -> bool:
+def _run_download(cmd, description: str) -> bool:
     """Run a download command, return True on success."""
     try:
         result = subprocess.run(cmd, timeout=3600)
