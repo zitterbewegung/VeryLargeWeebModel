@@ -258,7 +258,9 @@ def download_file(
         return True
 
     try:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        dirname = os.path.dirname(local_path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         kwargs = {}  # type: Dict[str, Any]
         if transfer_config:
             kwargs['Config'] = transfer_config

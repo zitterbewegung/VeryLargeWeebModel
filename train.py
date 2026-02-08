@@ -1114,9 +1114,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         # Log at start and every debug_freq batches to track potential collapse
         if batch_idx % debug_freq == 0:
             occ_rate = (future_occ > 0).float().mean().item() * 100
-            if occ_rate == 0.0:
-                print(f"  [WARN] Batch {batch_idx} has 0% occupancy — "
-                      f"empty grid may indicate data loading or transform issue")
+            if occ_rate < 0.01:
+                print(f"  [WARN] Batch {batch_idx} has {occ_rate:.4f}% occupancy — "
+                      f"nearly empty grid may indicate data loading or transform issue")
             pred_mean = pred_occ.mean().item()
             pred_max = pred_occ.max().item()
             pred_min = pred_occ.min().item()
@@ -1602,15 +1602,16 @@ def main():
         prefetch_factor=2 if num_workers > 0 else None,
     )
 
+    val_has_data = len(val_dataset) > 0
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=num_workers if val_has_data else 0,
         collate_fn=dataset_collate_fn,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None,
+        pin_memory=pin_memory and val_has_data,
+        persistent_workers=num_workers > 0 and val_has_data,
+        prefetch_factor=2 if num_workers > 0 and val_has_data else None,
     )
 
     print(f"Train samples: {len(train_dataset)}")
@@ -1893,8 +1894,11 @@ def main():
         # Validate
         val_loss = validate(model, val_loader, criterion, device, is_6dof)
 
-        # Update scheduler
-        scheduler.step()
+        # Update scheduler (skip if training failed to avoid incorrect LR decay)
+        if train_loss != float('inf'):
+            scheduler.step()
+        else:
+            print(f"  [WARN] Skipping scheduler step (training failed this epoch)")
 
         # Log
         epoch_time = time.time() - epoch_start

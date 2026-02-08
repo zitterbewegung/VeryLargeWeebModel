@@ -433,7 +433,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     ]
     if key:
         rsync_cmd.extend(["-e", f"ssh -i {shlex.quote(key)}"])
-    rsync_cmd.extend([str(PROJECT_ROOT) + "/", f"{host}:{remote_dir}/"])
+    import re
+    if not re.match(r'^[\w.\-]+@[\w.\-]+$', host):
+        log_error(f"Invalid host format: {host}. Expected: user@hostname")
+        return 1
+    rsync_cmd.extend([str(PROJECT_ROOT) + "/", f"{host}:{shlex.quote(remote_dir)}/"])
 
     try:
         result = subprocess.run(rsync_cmd)
@@ -793,7 +797,7 @@ def _decompress_archive(archive_path, target_dir, dry_run):
                     continue
                 # Skip path traversal
                 normalized = os.path.normpath(member.name)
-                if normalized.startswith("..") or "/.." in normalized:
+                if normalized.startswith("..") or "/.." in normalized or "\\.." in normalized:
                     skipped += 1
                     continue
                 safe_members.append(member)
@@ -1047,7 +1051,10 @@ def cmd_pack(args):
 
             if not keep_archive:
                 log_info(f"Removing archive: {archive_path}")
-                os.remove(archive_path)
+                try:
+                    os.remove(archive_path)
+                except OSError as e:
+                    log_warn(f"Could not remove archive (operation still succeeded): {e}")
 
         log_success("Download and extract complete")
         return 0
@@ -1076,7 +1083,10 @@ def cmd_pack(args):
 
             if not dry_run and not keep_archive:
                 log_info(f"Removing local archive: {archive_path}")
-                os.remove(archive_path)
+                try:
+                    os.remove(archive_path)
+                except OSError as e:
+                    log_warn(f"Could not remove archive (operation still succeeded): {e}")
 
             log_success("Compress and upload complete")
         else:

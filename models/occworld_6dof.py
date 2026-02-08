@@ -454,7 +454,10 @@ class OccWorld6DoF(nn.Module):
         )
         
         # Feature to spatial projection for decoder
-        self.to_spatial = nn.Linear(config.latent_dim, config.latent_dim * self.encoded_size[0] * self.encoded_size[1] * self.encoded_size[2])
+        self.to_spatial = nn.Sequential(
+            nn.Linear(config.latent_dim, config.latent_dim * self.encoded_size[0] * self.encoded_size[1] * self.encoded_size[2]),
+            nn.ReLU(inplace=True),
+        )
         
         # Future pose prediction (autoregressive)
         self.future_pose_rnn = FuturePoseRNN(

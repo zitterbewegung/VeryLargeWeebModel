@@ -287,9 +287,13 @@ class UAVScenesDataset(Dataset):
     def _load_sampleinfos(self, scene_folder: str, path: Path):
         """Load and cache sampleinfos_interpolated.json."""
         if scene_folder not in self._sampleinfos_cache:
-            with open(path) as f:
-                self._sampleinfos_cache[scene_folder] = json.load(f)
-            print(f"  Loaded {len(self._sampleinfos_cache[scene_folder])} poses from sampleinfos")
+            try:
+                with open(path) as f:
+                    self._sampleinfos_cache[scene_folder] = json.load(f)
+                print(f"  Loaded {len(self._sampleinfos_cache[scene_folder])} poses from sampleinfos")
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Warning: Failed to load sampleinfos from {path}: {e}")
+                self._sampleinfos_cache[scene_folder] = []
 
     def _apply_split(self):
         """Apply train/val/test split."""
@@ -369,7 +373,7 @@ class UAVScenesDataset(Dataset):
                 else:
                     # ASCII PCD
                     lines = f.read().decode('utf-8', errors='ignore').strip().split('\n')
-                    points = np.array([[float(x) for x in line.split()[:3]] for line in lines])
+                    points = np.array([[float(x) for x in line.split()[:3]] for line in lines if line.strip()])
 
                 return points.astype(np.float32)
 
