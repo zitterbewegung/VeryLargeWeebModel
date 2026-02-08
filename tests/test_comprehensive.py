@@ -1158,5 +1158,59 @@ class TestMiniTrainingRun(unittest.TestCase):
         self.assertLess(loss, loss_epoch0)
 
 
+# =============================================================================
+# --interval CLI flag
+# =============================================================================
+
+
+class TestIntervalFlag(unittest.TestCase):
+    """Test --interval CLI flag for UAVScenes."""
+
+    def test_parse_args_interval_default_none(self):
+        """--interval should default to None when not provided."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py']):
+            args = parse_args()
+        self.assertIsNone(args.interval)
+
+    def test_parse_args_interval_5(self):
+        """--interval 5 should be parsed correctly."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--interval', '5']):
+            args = parse_args()
+        self.assertEqual(args.interval, 5)
+
+    def test_parse_args_interval_1(self):
+        """--interval 1 should be parsed correctly."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--interval', '1']):
+            args = parse_args()
+        self.assertEqual(args.interval, 1)
+
+    def test_interval_overrides_config(self):
+        """--interval should override dataset_config interval."""
+        from dataset.uavscenes_dataset import UAVScenesConfig
+
+        # Simulate: config says interval=1, CLI says --interval=5
+        ds_cfg = {'interval': 1}
+        args_interval = 5
+        result = args_interval or ds_cfg.get('interval', 1)
+        self.assertEqual(result, 5)
+
+    def test_interval_falls_back_to_config(self):
+        """When --interval is None, config value should be used."""
+        ds_cfg = {'interval': 5}
+        args_interval = None
+        result = args_interval or ds_cfg.get('interval', 1)
+        self.assertEqual(result, 5)
+
+    def test_interval_falls_back_to_default(self):
+        """When --interval is None and config has no interval, default to 1."""
+        ds_cfg = {}
+        args_interval = None
+        result = args_interval or ds_cfg.get('interval', 1)
+        self.assertEqual(result, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

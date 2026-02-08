@@ -572,6 +572,8 @@ def parse_args():
     # Data validation
     parser.add_argument('--skip-validation', action='store_true',
                         help='Skip data and model validation (use with caution)')
+    parser.add_argument('--interval', type=int, default=None,
+                        help='UAVScenes interval (1=full, 5=keyframes)')
     parser.add_argument('--no-auto-download', action='store_true',
                         help='Disable auto-download from S3 for missing data/models')
 
@@ -1250,7 +1252,7 @@ def main():
 
         uavscenes_cfg = UAVScenesConfig(
             scenes=ds_cfg.get('scenes', ['AMtown', 'AMvalley', 'HKairport', 'HKisland']),
-            interval=ds_cfg.get('interval', 1),
+            interval=args.interval or ds_cfg.get('interval', 1),
             history_frames=getattr(config, 'history_frames', 4),
             future_frames=getattr(config, 'future_frames', 6),
             frame_skip=ds_cfg.get('frame_skip', 1),
