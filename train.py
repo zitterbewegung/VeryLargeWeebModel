@@ -1560,6 +1560,13 @@ def main():
         print("Then set OCCWORLD_PATH environment variable, or install to ~/OccWorld (default)")
         sys.exit(1)
 
+    if args.use_occworld and args.model_type == '6dof':
+        print("ERROR: --use-occworld and --model-type 6dof are incompatible.")
+        print("  External OccWorld produces occupancy-only outputs,")
+        print("  but 6DoF mode requires pose predictions (future_poses, global_pose).")
+        print("  Use --model-type simple with --use-occworld, or remove --use-occworld for 6dof.")
+        sys.exit(1)
+
     # Create dataset
     print("Creating dataset...")
     data_root = getattr(config, 'data_root', 'data/tokyo_gazebo')
@@ -1892,17 +1899,25 @@ def main():
         model = OccWorldModel(**model_cfg)
         print(f"  [MODEL] Using external OccWorld (TransVQVAE) from {os.environ.get('OCCWORLD_PATH', '~/OccWorld')}")
     elif args.model_type == '6dof':
-        # Use 6DoF model with full pose prediction
+        # Use 6DoF model — read from config if available, else use defaults
         grid_size = tuple(getattr(config, 'grid_size', [200, 200, 121]))
+        model_cfg = getattr(config, 'model', {})
         model_config = OccWorld6DoFConfig(
             grid_size=grid_size,
             history_frames=getattr(config, 'history_frames', 4),
             future_frames=getattr(config, 'future_frames', 6),
             use_transformer=args.use_transformer,
-            pose_dim=13,  # x,y,z + quat(4) + lin_vel(3) + ang_vel(3)
-            enable_uncertainty=True,
-            enable_relocalization=True,
-            enable_place_recognition=True,
+            pose_dim=model_cfg.get('pose_dim', 13),
+            encoder_channels=model_cfg.get('encoder_channels', (64, 128, 256)),
+            num_transformer_layers=model_cfg.get('num_transformer_layers', 4),
+            num_heads=model_cfg.get('num_heads', 8),
+            transformer_dim=model_cfg.get('transformer_dim', 256),
+            dropout=model_cfg.get('dropout', 0.1),
+            uncertainty_dim=model_cfg.get('uncertainty_dim', 6),
+            place_embedding_dim=model_cfg.get('place_embedding_dim', 256),
+            enable_uncertainty=model_cfg.get('enable_uncertainty', True),
+            enable_relocalization=model_cfg.get('enable_relocalization', True),
+            enable_place_recognition=model_cfg.get('enable_place_recognition', True),
         )
         model = OccWorld6DoF(model_config)
         print(f"  6DoF Config: grid={grid_size}, transformer={args.use_transformer}")
@@ -2046,19 +2061,20 @@ def main():
 
     # Loss function - depends on model type
     if args.model_type == '6dof':
-        # 6DoF loss with anti-collapse safeguards
+        # 6DoF loss — read weights from config if available, else use defaults
+        loss_cfg = getattr(config, 'loss', {})
         criterion = OccWorld6DoFLoss(
-            occ_weight=1.0,
-            pose_weight=0.5,
-            uncertainty_weight=0.1,
-            reloc_weight=0.2,
-            place_weight=0.1,
-            focal_alpha=0.99,
-            focal_gamma=2.0,
-            dice_weight=1.0,
-            mean_weight=10.0,
-            pose_variance_weight=1.0,
-            min_pose_std=0.01,
+            occ_weight=loss_cfg.get('occ_weight', 1.0),
+            pose_weight=loss_cfg.get('pose_weight', 0.5),
+            uncertainty_weight=loss_cfg.get('uncertainty_weight', 0.1),
+            reloc_weight=loss_cfg.get('reloc_weight', 0.2),
+            place_weight=loss_cfg.get('place_weight', 0.1),
+            focal_alpha=loss_cfg.get('focal_alpha', 0.99),
+            focal_gamma=loss_cfg.get('focal_gamma', 2.0),
+            dice_weight=loss_cfg.get('dice_weight', 1.0),
+            mean_weight=loss_cfg.get('mean_weight', 10.0),
+            pose_variance_weight=loss_cfg.get('pose_variance_weight', 1.0),
+            min_pose_std=loss_cfg.get('min_pose_std', 0.01),
         )
         print("  Using OccWorld6DoFLoss with anti-collapse safeguards")
     else:

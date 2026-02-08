@@ -345,6 +345,21 @@ class PlaceRecognitionHead(nn.Module):
         return embeddings
 
 
+def safe_quat_normalize(q: torch.Tensor) -> torch.Tensor:
+    """Normalize quaternion to unit length, with safe handling of zero vectors.
+
+    When the quaternion norm is near zero (e.g. from zero-initialized poses),
+    falls back to identity quaternion [1, 0, 0, 0] to avoid NaN from division
+    by zero.  The fallback is differentiable (uses torch.where).
+    """
+    norm = q.norm(p=2, dim=-1, keepdim=True)
+    # Identity quaternion [1, 0, 0, 0] as fallback
+    identity = torch.zeros_like(q)
+    identity[..., 0] = 1.0
+    # Use identity when norm is too small
+    return torch.where(norm > 1e-8, q / (norm + 1e-12), identity)
+
+
 def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """Hamilton product of two quaternions.
 
@@ -428,10 +443,11 @@ class FuturePoseRNN(nn.Module):
 
             # Orientation: quaternion multiplication (proper group operation)
             # Treat delta as a small rotation quaternion, normalize to unit length
-            delta_quat = F.normalize(pose_delta[..., 3:7], p=2, dim=-1)
-            current_quat = F.normalize(current_pose[..., 3:7], p=2, dim=-1)
+            # Use safe normalize to handle zero-initialized poses without NaN
+            delta_quat = safe_quat_normalize(pose_delta[..., 3:7])
+            current_quat = safe_quat_normalize(current_pose[..., 3:7])
             new_quat = quaternion_multiply(current_quat, delta_quat)
-            new_quat = F.normalize(new_quat, p=2, dim=-1)
+            new_quat = safe_quat_normalize(new_quat)
 
             # Velocity: additive residual
             new_vel = current_pose[..., 7:] + pose_delta[..., 7:]
@@ -933,58 +949,44 @@ class OccWorld6DoFLoss(nn.Module):
 
     def _compute_triplet_loss(self, embeddings: torch.Tensor) -> torch.Tensor:
         """
-        Compute triplet loss with in-batch hard negative mining.
+        Compute triplet loss with in-batch hard positive/negative mining.
 
-        For each anchor, the positive is an adjacent sample (assuming temporal
-        ordering in batch), and the negative is the hardest non-adjacent sample.
+        Since DataLoader shuffles batches, we cannot assume adjacent samples
+        are semantically related. Instead we use embedding-space similarity:
+        - Positive: closest non-identical sample (hard positive)
+        - Negative: farthest sample that violates the margin (hard negative)
+
+        This encourages the embedding space to spread out while keeping
+        genuinely similar embeddings close, without requiring batch ordering.
         """
         B, D = embeddings.shape
-        if B < 4:
-            # Need at least 4 samples for meaningful triplets (B=3 only yields 1/3)
+        if B < 3:
             return torch.tensor(0.0, device=embeddings.device)
 
-        # Compute pairwise distances
-        distances = torch.cdist(embeddings, embeddings, p=2)  # [B, B]
+        # Pairwise distances [B, B]
+        distances = torch.cdist(embeddings, embeddings, p=2)
 
-        total_loss = torch.tensor(0.0, device=embeddings.device)
-        num_triplets = 0
+        # Mask out self-distances
+        self_mask = torch.eye(B, dtype=torch.bool, device=embeddings.device)
 
-        for i in range(B):
-            # Anchor
-            anchor_idx = i
+        # Hard positive: closest sample (smallest distance, excluding self)
+        pos_distances = distances.clone()
+        pos_distances[self_mask] = float('inf')
+        pos_idx = pos_distances.argmin(dim=1)  # [B]
+        d_ap = distances[torch.arange(B, device=embeddings.device), pos_idx]
 
-            # Positive: adjacent sample (circular)
-            pos_idx = (i + 1) % B
+        # Hard negative: closest sample that is NOT the positive (semi-hard mining)
+        neg_distances = distances.clone()
+        neg_distances[self_mask] = float('inf')
+        neg_distances[torch.arange(B, device=embeddings.device), pos_idx] = float('inf')
 
-            # Negative: hardest non-adjacent sample
-            # Mask out anchor and positive
-            neg_mask = torch.ones(B, dtype=torch.bool, device=embeddings.device)
-            neg_mask[anchor_idx] = False
-            neg_mask[pos_idx] = False
-            prev_idx = (i - 1) % B
-            if prev_idx != pos_idx:  # Don't double-exclude
-                neg_mask[prev_idx] = False  # Also exclude other adjacent
-
-            if neg_mask.sum() == 0:
-                continue
-
-            # Hard negative: closest non-adjacent sample
-            neg_distances = distances[anchor_idx].clone()
-            neg_distances[~neg_mask] = float('inf')
-            neg_idx = neg_distances.argmin()
-
-            # Triplet loss: max(0, d(a,p) - d(a,n) + margin)
-            d_ap = distances[anchor_idx, pos_idx]
-            d_an = distances[anchor_idx, neg_idx]
-
+        if (neg_distances < float('inf')).any(dim=1).all():
+            neg_idx = neg_distances.argmin(dim=1)  # [B]
+            d_an = distances[torch.arange(B, device=embeddings.device), neg_idx]
             triplet = F.relu(d_ap - d_an + self.triplet_margin)
-            total_loss = total_loss + triplet
-            num_triplets += 1
+            return triplet.mean()
 
-        if num_triplets > 0:
-            total_loss = total_loss / num_triplets
-
-        return total_loss
+        return torch.tensor(0.0, device=embeddings.device)
 
     def get_debug_metrics(self) -> Dict[str, float]:
         """Return current debug metrics for logging."""

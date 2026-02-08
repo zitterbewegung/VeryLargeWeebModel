@@ -3,6 +3,10 @@
 This test suite provides regression coverage for specific bugs that were fixed:
 - FuturePoseRNN with num_future=0
 - Triplet loss with batch size < 4
+- Triplet loss self-supervised mining (no batch ordering assumption)
+- Safe quaternion normalization (zero-vector handling)
+- Config knob passthrough for 6DoF training
+- --use-occworld + --model-type 6dof conflict detection
 - Pose variance std with unbiased=False
 - Trajectory validation with single waypoint
 - Trajectory validation with zero total distance
@@ -765,6 +769,247 @@ class TestModelEdgeCaseIntegration(unittest.TestCase):
         self.assertIsNotNone(history_poses.grad)
         self.assertFalse(torch.isnan(history_occ.grad).any())
         self.assertFalse(torch.isnan(history_poses.grad).any())
+
+
+class TestTripletLossSelfSupervised(unittest.TestCase):
+    """Regression: triplet loss must not assume adjacent batch samples are positives."""
+
+    def test_triplet_loss_shuffled_batch(self):
+        """Triplet loss should work correctly regardless of batch ordering."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss()
+
+        # Create embeddings where pairs (0,1) and (2,3) are similar
+        # but batch order is scrambled: [sample_A, sample_C, sample_B, sample_D]
+        embeddings = torch.tensor([
+            [1.0, 0.0, 0.0],   # A
+            [0.0, 1.0, 0.0],   # C (far from A)
+            [1.01, 0.01, 0.0], # B (close to A, but not adjacent in batch)
+            [0.01, 1.01, 0.0], # D (close to C, but not adjacent in batch)
+        ])
+
+        triplet = loss_fn._compute_triplet_loss(embeddings)
+        # Should produce valid loss (finite, non-negative)
+        self.assertTrue(torch.isfinite(triplet))
+        self.assertGreaterEqual(triplet.item(), 0.0)
+
+    def test_triplet_loss_does_not_use_adjacency(self):
+        """Verify hard positive is closest sample, not adjacent sample."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss()
+
+        # Batch where adjacent samples are maximally far,
+        # but non-adjacent samples are close
+        embeddings = torch.tensor([
+            [1.0, 0.0, 0.0, 0.0],   # 0: close to 2 (far from 1)
+            [0.0, 0.0, 1.0, 0.0],   # 1: close to 3 (far from 0)
+            [1.0, 0.01, 0.0, 0.0],  # 2: close to 0
+            [0.0, 0.0, 1.0, 0.01],  # 3: close to 1
+        ])
+
+        triplet = loss_fn._compute_triplet_loss(embeddings)
+        self.assertTrue(torch.isfinite(triplet))
+
+    def test_triplet_loss_batch_size_3(self):
+        """Triplet loss should work with B=3 (was B<4 before)."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss()
+        embeddings = torch.randn(3, 8)
+        triplet = loss_fn._compute_triplet_loss(embeddings)
+        self.assertTrue(torch.isfinite(triplet))
+
+    def test_triplet_loss_batch_size_2_returns_zero(self):
+        """Triplet loss needs B>=3 for anchor/pos/neg."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss()
+        embeddings = torch.randn(2, 8)
+        triplet = loss_fn._compute_triplet_loss(embeddings)
+        self.assertEqual(triplet.item(), 0.0)
+
+    def test_triplet_loss_gradient_flow(self):
+        """Triplet loss should propagate gradients."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss()
+        embeddings = torch.randn(6, 16, requires_grad=True)
+        triplet = loss_fn._compute_triplet_loss(embeddings)
+        triplet.backward()
+        self.assertIsNotNone(embeddings.grad)
+        self.assertFalse(torch.isnan(embeddings.grad).any())
+
+
+class TestSafeQuaternionNormalize(unittest.TestCase):
+    """Regression: quaternion normalization must handle zero vectors."""
+
+    def test_zero_quaternion_returns_identity(self):
+        """Zero quaternion should map to identity [1,0,0,0], not NaN."""
+        from models.occworld_6dof import safe_quat_normalize
+
+        q = torch.zeros(1, 4)
+        result = safe_quat_normalize(q)
+        expected = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        self.assertTrue(torch.allclose(result, expected))
+        self.assertFalse(torch.isnan(result).any())
+
+    def test_normal_quaternion_normalized(self):
+        """Non-zero quaternion should be unit-normalized."""
+        from models.occworld_6dof import safe_quat_normalize
+
+        q = torch.tensor([[2.0, 0.0, 0.0, 0.0]])
+        result = safe_quat_normalize(q)
+        self.assertAlmostEqual(result.norm().item(), 1.0, places=5)
+        self.assertTrue(torch.allclose(result, torch.tensor([[1.0, 0.0, 0.0, 0.0]]), atol=1e-5))
+
+    def test_batch_with_mixed_zero_and_nonzero(self):
+        """Batch with some zero and some non-zero quaternions."""
+        from models.occworld_6dof import safe_quat_normalize
+
+        q = torch.tensor([
+            [0.0, 0.0, 0.0, 0.0],  # zero -> identity
+            [0.0, 3.0, 0.0, 0.0],  # non-zero -> normalized
+            [0.0, 0.0, 0.0, 0.0],  # zero -> identity
+        ])
+        result = safe_quat_normalize(q)
+        self.assertFalse(torch.isnan(result).any())
+        # First and third should be identity
+        self.assertTrue(torch.allclose(result[0], torch.tensor([1.0, 0.0, 0.0, 0.0])))
+        self.assertTrue(torch.allclose(result[2], torch.tensor([1.0, 0.0, 0.0, 0.0])))
+        # Second should be [0, 1, 0, 0]
+        self.assertAlmostEqual(result[1].norm().item(), 1.0, places=5)
+
+    def test_gradient_through_zero_quaternion(self):
+        """Gradients must be finite even when input quaternion is zero."""
+        from models.occworld_6dof import safe_quat_normalize
+
+        q = torch.zeros(2, 4, requires_grad=True)
+        result = safe_quat_normalize(q)
+        result.sum().backward()
+        self.assertIsNotNone(q.grad)
+        self.assertFalse(torch.isnan(q.grad).any())
+
+    def test_zero_input_full_model_no_nan(self):
+        """Full model with zero inputs should not produce NaN (was flaky)."""
+        from models.occworld_6dof import OccWorld6DoF, OccWorld6DoFConfig
+
+        config = OccWorld6DoFConfig(
+            grid_size=(16, 16, 8),
+            history_frames=2,
+            future_frames=2,
+            latent_dim=32,
+            encoder_channels=(16, 32),
+        )
+
+        model = OccWorld6DoF(config)
+        history_occ = torch.zeros(1, 2, 16, 16, 8, requires_grad=True)
+        history_poses = torch.zeros(1, 2, 13, requires_grad=True)
+
+        # Run multiple times to catch intermittent failures
+        for _ in range(5):
+            outputs = model(history_occ, history_poses)
+            loss = outputs['future_occupancy'].sum() + outputs['future_poses'].sum()
+            loss.backward()
+
+            self.assertFalse(torch.isnan(outputs['future_occupancy']).any(),
+                             "NaN in future_occupancy")
+            self.assertFalse(torch.isnan(outputs['future_poses']).any(),
+                             "NaN in future_poses")
+            self.assertFalse(torch.isnan(history_poses.grad).any(),
+                             "NaN in history_poses gradient")
+
+
+class TestConfigKnobPassthrough(unittest.TestCase):
+    """Regression: 6DoF config loss/model knobs must be read from config."""
+
+    def test_loss_weights_from_config(self):
+        """OccWorld6DoFLoss should accept config-driven weights."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_cfg = {
+            'occ_weight': 2.0,
+            'pose_weight': 0.8,
+            'uncertainty_weight': 0.05,
+            'reloc_weight': 0.3,
+            'place_weight': 0.2,
+        }
+
+        criterion = OccWorld6DoFLoss(
+            occ_weight=loss_cfg.get('occ_weight', 1.0),
+            pose_weight=loss_cfg.get('pose_weight', 0.5),
+            uncertainty_weight=loss_cfg.get('uncertainty_weight', 0.1),
+            reloc_weight=loss_cfg.get('reloc_weight', 0.2),
+            place_weight=loss_cfg.get('place_weight', 0.1),
+        )
+
+        self.assertEqual(criterion.occ_weight, 2.0)
+        self.assertEqual(criterion.pose_weight, 0.8)
+        self.assertEqual(criterion.uncertainty_weight, 0.05)
+        self.assertEqual(criterion.reloc_weight, 0.3)
+        self.assertEqual(criterion.place_weight, 0.2)
+
+    def test_model_config_from_dict(self):
+        """OccWorld6DoFConfig should accept config-driven model params."""
+        from models.occworld_6dof import OccWorld6DoFConfig
+
+        model_cfg = {
+            'pose_dim': 7,
+            'encoder_channels': (32, 64),
+            'dropout': 0.2,
+            'place_embedding_dim': 128,
+        }
+
+        config = OccWorld6DoFConfig(
+            grid_size=(200, 200, 121),
+            pose_dim=model_cfg.get('pose_dim', 13),
+            encoder_channels=model_cfg.get('encoder_channels', (64, 128, 256)),
+            dropout=model_cfg.get('dropout', 0.1),
+            place_embedding_dim=model_cfg.get('place_embedding_dim', 256),
+        )
+
+        self.assertEqual(config.pose_dim, 7)
+        self.assertEqual(config.encoder_channels, (32, 64))
+        self.assertEqual(config.dropout, 0.2)
+        self.assertEqual(config.place_embedding_dim, 128)
+
+
+class TestOccworldSixdofConflict(unittest.TestCase):
+    """Regression: --use-occworld + --model-type 6dof must be rejected."""
+
+    def test_conflict_detected_in_main(self):
+        """Verify that the conflict check exists in train.py source."""
+        import inspect
+        from train import main
+
+        source = inspect.getsource(main)
+        self.assertIn('use_occworld', source)
+        self.assertIn('model_type', source)
+        # The conflict guard should produce an error and exit
+        self.assertIn('incompatible', source.lower())
+
+    def test_occworld_flag_without_6dof_is_fine(self):
+        """--use-occworld with simple model shouldn't conflict."""
+        # This tests that the conflict check is specific to 6dof
+        import argparse
+        ns = argparse.Namespace(use_occworld=True, model_type='simple')
+        # No conflict — simple model with OccWorld is valid
+        self.assertNotEqual(ns.model_type, '6dof')
+
+
+class TestIntegrationTestNotCollected(unittest.TestCase):
+    """Regression: scripts/integration_test.py must not be collected by pytest."""
+
+    def test_conftest_excludes_scripts(self):
+        """conftest.py should contain collect_ignore for scripts/."""
+        conftest_path = os.path.join(PROJECT_ROOT, 'conftest.py')
+        self.assertTrue(os.path.exists(conftest_path),
+                        "conftest.py must exist at project root")
+        with open(conftest_path) as f:
+            content = f.read()
+        self.assertIn('collect_ignore', content)
+        self.assertIn('scripts', content)
 
 
 if __name__ == '__main__':

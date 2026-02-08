@@ -413,9 +413,10 @@ class NuScenes6DoFDataset(Dataset):
         if len(xyz) == 0:
             return np.zeros(grid_size, dtype=np.uint8)
 
-        # Convert to voxel indices
-        voxel_coords = ((xyz - pc_range[:3]) / voxel_size).astype(np.int32)
-        voxel_coords = np.clip(voxel_coords, 0, grid_size - 1)
+        # Convert to voxel indices (clip before int conversion to prevent overflow)
+        voxel_coords_float = (xyz - pc_range[:3]) / voxel_size
+        voxel_coords_float = np.clip(voxel_coords_float, 0, np.array(grid_size) - 1)
+        voxel_coords = voxel_coords_float.astype(np.int32)
 
         # Create occupancy grid
         occupancy = np.zeros(grid_size, dtype=np.uint8)

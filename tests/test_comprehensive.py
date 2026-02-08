@@ -90,11 +90,13 @@ class TestUncertaintyHead(unittest.TestCase):
         uncertainty = self.head(features)
         self.assertEqual(uncertainty.shape, (2, 4, 6))
 
-    def test_positive_output(self):
-        """Softplus ensures positive covariance."""
+    def test_output_is_raw_logits(self):
+        """UncertaintyHead outputs raw logits; bounding happens in the loss."""
         features = torch.randn(2, 4, 128)
         uncertainty = self.head(features)
-        self.assertTrue((uncertainty > 0).all())
+        # Raw logits can be any real value — positivity is enforced via sigmoid
+        # in OccWorld6DoFLoss, not in the head itself
+        self.assertTrue(torch.isfinite(uncertainty).all())
 
     def test_single_timestep(self):
         features = torch.randn(1, 1, 128)
