@@ -139,13 +139,21 @@ def _download_uavscenes(data_dir: Path, scene: str = None) -> bool:
             allow_patterns=patterns,
         )
 
-        # Extract zips
+        # Extract zips with path traversal protection
         for pattern in patterns:
             zip_path = uav_dir / pattern
             if zip_path.exists():
                 log_info(f"Extracting {pattern}...")
                 with zipfile.ZipFile(zip_path, 'r') as zf:
-                    zf.extractall(str(uav_dir))
+                    safe_members = []
+                    for member in zf.namelist():
+                        normalized = os.path.normpath(member)
+                        if normalized.startswith('..') or os.path.isabs(normalized):
+                            log_warn(f"Skipping unsafe path in zip: {member}")
+                            continue
+                        safe_members.append(member)
+                    for member in safe_members:
+                        zf.extract(member, str(uav_dir))
 
         log_success(f"UAVScenes downloaded and extracted to {uav_dir}")
         return True

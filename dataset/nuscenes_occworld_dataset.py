@@ -149,8 +149,9 @@ class NuScenesOccWorldDataset(Dataset):
         points = points[mask]
 
         # Convert to voxel indices
-        voxel_coords = ((points[:, :3] - pc_range[:3]) / voxel_size).astype(np.int32)
-        voxel_coords = np.clip(voxel_coords, 0, grid_size - 1)
+        voxel_coords_float = (points[:, :3] - pc_range[:3]) / voxel_size
+        voxel_coords_float = np.clip(voxel_coords_float, 0, grid_size - 1)
+        voxel_coords = voxel_coords_float.astype(np.int32)
 
         # Create occupancy grid
         occupancy = np.zeros(grid_size, dtype=np.uint8)

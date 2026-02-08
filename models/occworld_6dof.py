@@ -762,8 +762,9 @@ class OccWorld6DoFLoss(nn.Module):
 
         # === ANTI-COLLAPSE: Pose variance regularization ===
         # Penalize if predictions have very low variance (constant output collapse)
-        pred_pos_std = pred_pos.std(unbiased=False)
-        pred_vel_std = pred_vel.std(unbiased=False)
+        # Compute std per spatial dimension across (batch, time), then average
+        pred_pos_std = pred_pos.reshape(-1, pred_pos.shape[-1]).std(dim=0, unbiased=False).mean()
+        pred_vel_std = pred_vel.reshape(-1, pred_vel.shape[-1]).std(dim=0, unbiased=False).mean()
 
         # Differentiable penalty when std drops below threshold
         min_std = torch.tensor(self.min_pose_std, device=pred_poses.device)
@@ -871,8 +872,9 @@ class OccWorld6DoFLoss(nn.Module):
             neg_mask = torch.ones(B, dtype=torch.bool, device=embeddings.device)
             neg_mask[anchor_idx] = False
             neg_mask[pos_idx] = False
-            if (i - 1) >= 0:
-                neg_mask[i - 1] = False  # Also exclude other adjacent
+            prev_idx = (i - 1) % B
+            if prev_idx != pos_idx:  # Don't double-exclude
+                neg_mask[prev_idx] = False  # Also exclude other adjacent
 
             if neg_mask.sum() == 0:
                 continue
