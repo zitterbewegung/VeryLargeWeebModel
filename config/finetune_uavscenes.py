@@ -43,8 +43,8 @@ uavscenes_scenes = ['AMtown']
 # For full training with all scenes:
 # uavscenes_scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
 
-# Interval: 1 = full data, 5 = keyframes only (smaller)
-uavscenes_interval = 1
+# Interval: 5 = keyframes (available on HuggingFace), 1 = full data (not on HF)
+uavscenes_interval = 5
 
 # Aerial-friendly occupancy range (larger Z range for flight altitude)
 point_cloud_range = [-40.0, -40.0, -10.0, 40.0, 40.0, 50.0]

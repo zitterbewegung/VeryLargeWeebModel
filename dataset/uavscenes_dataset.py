@@ -57,8 +57,8 @@ class UAVScenesConfig:
     # Run selection (None = all runs)
     runs: Optional[List[str]] = None  # e.g., ['run01', 'run02']
 
-    # Interval: 1 = full data, 5 = keyframes only
-    interval: int = 1
+    # Interval: 5 = keyframes (available on HuggingFace), 1 = full data (not on HF)
+    interval: int = 5
 
     # Temporal settings
     history_frames: int = 4

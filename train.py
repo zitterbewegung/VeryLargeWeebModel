@@ -384,31 +384,70 @@ def _download_dataset_from_s3(data_root: str, dataset_type: str, interval: int =
         return False
 
 
-def _download_uavscenes_from_hf(data_root: str, interval: int = 1) -> bool:
-    """Download UAVScenes dataset from HuggingFace Hub.
+def _download_uavscenes_from_hf(data_root: str, interval: int = 5) -> bool:
+    """Download UAVScenes dataset from HuggingFace Hub and extract zips.
 
     Args:
         data_root: Path to data directory (files saved to data_root/ directly)
-        interval: UAVScenes interval (1=full, 5=keyframes). Filters by prefix.
+        interval: UAVScenes interval (5=keyframes available on HF, 1=not on HF).
 
     Returns:
         True if download succeeded, False otherwise.
     """
+    import zipfile
+
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         print("[WARN] huggingface_hub not installed. Install with: pip install huggingface_hub")
         return False
 
+    # HF repo only has interval5_* files
+    if interval not in (1, 5):
+        print(f"[WARN] Unknown interval {interval}, using 5")
+        interval = 5
+
     try:
         print(f"Downloading UAVScenes from HuggingFace ({UAVSCENES_HF_REPO})...")
-        print(f"  Interval filter: interval{interval}_*")
+        # Download the LiDAR+CAM zip (has both LiDAR point clouds and camera images)
+        pattern = f"interval{interval}_CAM_LIDAR.zip"
+        print(f"  Downloading: {pattern}")
         snapshot_download(
             repo_id=UAVSCENES_HF_REPO,
             repo_type="dataset",
             local_dir=data_root,
-            allow_patterns=[f"interval{interval}_*"],
+            allow_patterns=[pattern],
         )
+
+        # Extract downloaded zips
+        zip_path = Path(data_root) / pattern
+        if zip_path.exists():
+            print(f"  Extracting {pattern}...")
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(data_root)
+            print(f"  Extracted to {data_root}")
+        else:
+            print(f"[WARN] Expected zip not found: {zip_path}")
+            return False
+
+        # Also download the label zip (semantic labels)
+        label_pattern = f"interval{interval}_LIDAR_label.zip"
+        print(f"  Downloading: {label_pattern}")
+        try:
+            snapshot_download(
+                repo_id=UAVSCENES_HF_REPO,
+                repo_type="dataset",
+                local_dir=data_root,
+                allow_patterns=[label_pattern],
+            )
+            label_zip = Path(data_root) / label_pattern
+            if label_zip.exists():
+                print(f"  Extracting {label_pattern}...")
+                with zipfile.ZipFile(label_zip, 'r') as zf:
+                    zf.extractall(data_root)
+        except Exception:
+            print(f"  [INFO] Label download optional, continuing without it")
+
         print("[OK] UAVScenes download complete!")
         return True
     except Exception as e:
@@ -1305,7 +1344,7 @@ def main():
     # This will auto-download from S3 if data is missing (unless --no-auto-download)
     if not args.skip_validation:
         auto_download = not args.no_auto_download
-        uav_interval = args.interval or 1
+        uav_interval = args.interval or 5
         if not validate_data(data_root, dataset_type, auto_download=auto_download, interval=uav_interval):
             print("\n" + "=" * 60)
             print("DATA VALIDATION FAILED")
@@ -1339,7 +1378,7 @@ def main():
 
         uavscenes_cfg = UAVScenesConfig(
             scenes=ds_cfg.get('scenes', ['AMtown', 'AMvalley', 'HKairport', 'HKisland']),
-            interval=args.interval or ds_cfg.get('interval', 1),
+            interval=args.interval or ds_cfg.get('interval', 5),
             history_frames=getattr(config, 'history_frames', 4),
             future_frames=getattr(config, 'future_frames', 6),
             frame_skip=ds_cfg.get('frame_skip', 1),

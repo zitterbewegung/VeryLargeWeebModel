@@ -306,38 +306,45 @@ class TestValidateData(unittest.TestCase):
 class TestDownloadUAVScenesFromHF(unittest.TestCase):
     """Test HuggingFace download for UAVScenes."""
 
+    @patch('zipfile.ZipFile')
     @patch('train.snapshot_download', create=True)
-    def test_hf_download_default_interval(self, mock_snapshot):
-        """HF download with default interval=1 uses correct allow_patterns."""
-        # Mock the import inside the function
+    def test_hf_download_default_interval(self, mock_snapshot, mock_zipfile):
+        """HF download with default interval=5 downloads and extracts zips."""
+        import tempfile, os
         mock_module = MagicMock()
         mock_module.snapshot_download = mock_snapshot
-        with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
-            from train import _download_uavscenes_from_hf
-            result = _download_uavscenes_from_hf("/tmp/data", interval=1)
-        self.assertTrue(result)
-        mock_snapshot.assert_called_once_with(
-            repo_id="sijieaaa/UAVScenes",
-            repo_type="dataset",
-            local_dir="/tmp/data",
-            allow_patterns=["interval1_*"],
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create fake zip so extraction path exists
+            zip_path = os.path.join(tmpdir, "interval5_CAM_LIDAR.zip")
+            open(zip_path, 'w').close()
+            with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
+                from train import _download_uavscenes_from_hf
+                result = _download_uavscenes_from_hf(tmpdir)
+            self.assertTrue(result)
+            # Should download CAM_LIDAR zip first
+            first_call = mock_snapshot.call_args_list[0]
+            self.assertEqual(first_call.kwargs.get('allow_patterns')
+                             or first_call[1].get('allow_patterns'),
+                             ["interval5_CAM_LIDAR.zip"])
 
+    @patch('zipfile.ZipFile')
     @patch('train.snapshot_download', create=True)
-    def test_hf_download_interval5(self, mock_snapshot):
-        """HF download with interval=5 uses correct allow_patterns."""
+    def test_hf_download_interval5(self, mock_snapshot, mock_zipfile):
+        """HF download with interval=5 downloads correct files."""
+        import tempfile, os
         mock_module = MagicMock()
         mock_module.snapshot_download = mock_snapshot
-        with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
-            from train import _download_uavscenes_from_hf
-            result = _download_uavscenes_from_hf("/tmp/data", interval=5)
-        self.assertTrue(result)
-        mock_snapshot.assert_called_once_with(
-            repo_id="sijieaaa/UAVScenes",
-            repo_type="dataset",
-            local_dir="/tmp/data",
-            allow_patterns=["interval5_*"],
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "interval5_CAM_LIDAR.zip")
+            open(zip_path, 'w').close()
+            with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
+                from train import _download_uavscenes_from_hf
+                result = _download_uavscenes_from_hf(tmpdir, interval=5)
+            self.assertTrue(result)
+            first_call = mock_snapshot.call_args_list[0]
+            self.assertEqual(first_call.kwargs.get('allow_patterns')
+                             or first_call[1].get('allow_patterns'),
+                             ["interval5_CAM_LIDAR.zip"])
 
     def test_hf_download_missing_package(self):
         """Returns False when huggingface_hub is not installed."""

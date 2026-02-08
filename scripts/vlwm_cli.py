@@ -119,28 +119,35 @@ def _download_uavscenes(data_dir: Path, scene: str = None) -> bool:
     Returns:
         True if download succeeded.
     """
+    import zipfile
+
     uav_dir = data_dir / "uavscenes"
     uav_dir.mkdir(parents=True, exist_ok=True)
 
     # Try HuggingFace Hub first (preferred — no quota limits)
+    # HF repo has: interval5_CAM_LIDAR.zip, interval5_LIDAR_label.zip, etc.
     try:
         from huggingface_hub import snapshot_download
         log_info(f"Downloading UAVScenes from HuggingFace ({UAVSCENES_HF_REPO})...")
-        if scene:
-            log_info(f"Scene filter: {scene}")
-            snapshot_download(
-                repo_id=UAVSCENES_HF_REPO,
-                repo_type="dataset",
-                local_dir=str(uav_dir),
-                allow_patterns=[f"*{scene}*"],
-            )
-        else:
-            snapshot_download(
-                repo_id=UAVSCENES_HF_REPO,
-                repo_type="dataset",
-                local_dir=str(uav_dir),
-            )
-        log_success(f"UAVScenes downloaded to {uav_dir}")
+
+        # Download main data zip (LiDAR + Camera)
+        patterns = ["interval5_CAM_LIDAR.zip", "interval5_LIDAR_label.zip"]
+        snapshot_download(
+            repo_id=UAVSCENES_HF_REPO,
+            repo_type="dataset",
+            local_dir=str(uav_dir),
+            allow_patterns=patterns,
+        )
+
+        # Extract zips
+        for pattern in patterns:
+            zip_path = uav_dir / pattern
+            if zip_path.exists():
+                log_info(f"Extracting {pattern}...")
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    zf.extractall(str(uav_dir))
+
+        log_success(f"UAVScenes downloaded and extracted to {uav_dir}")
         return True
     except ImportError:
         log_warn("huggingface_hub not installed, trying gdown...")

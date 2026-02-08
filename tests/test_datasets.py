@@ -96,7 +96,7 @@ class TestUAVScenesConfig(unittest.TestCase):
 
         self.assertEqual(config.history_frames, 4)
         self.assertEqual(config.future_frames, 6)
-        self.assertEqual(config.interval, 1)
+        self.assertEqual(config.interval, 5)
         self.assertIn('AMtown', config.scenes)
 
     def test_grid_size_property(self):
