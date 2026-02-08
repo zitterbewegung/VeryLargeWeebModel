@@ -1833,7 +1833,7 @@ def main():
             frame_skip=ds_cfg.get('frame_skip', 1),
             point_cloud_range=tuple(getattr(config, 'point_cloud_range', (-40, -40, -10, 40, 40, 50))),
             voxel_size=tuple(getattr(config, 'voxel_size', (0.4, 0.4, 0.5))),
-            ego_frame=ds_cfg.get('ego_frame', True),
+            ego_frame=ds_cfg.get('ego_frame', False),
             fallback_to_lidar_center=ds_cfg.get('fallback_to_lidar_center', True),
             min_in_range_ratio=ds_cfg.get('min_in_range_ratio', 0.01),
             normalize_pose_to_first_frame=ds_cfg.get('normalize_pose_to_first_frame', True),
