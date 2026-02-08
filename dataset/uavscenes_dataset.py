@@ -538,7 +538,13 @@ class UAVScenesDataset(Dataset):
         ], dtype=np.float32)
 
     def _transform_points_to_ego(self, points: np.ndarray, pose: np.ndarray) -> np.ndarray:
-        """Transform world-frame points into ego frame using pose."""
+        """Transform world-frame points into ego frame using pose.
+
+        Convention: pose = [x, y, z, qw, qx, qy, qz, ...] defines the
+        ego-to-world transform T4x4 = [R | t; 0 | 1].  To go from world
+        to ego we apply the inverse: p_ego = R^T @ (p_world - t).
+        R is orthogonal so R^-1 = R^T — no matrix inversion needed.
+        """
         if points.shape[0] == 0:
             return points
 
@@ -547,7 +553,7 @@ class UAVScenesDataset(Dataset):
         R = self._quaternion_to_rotation_matrix(quat)
 
         xyz = points[:, :3].astype(np.float32)
-        # Pose maps ego -> world; invert for world -> ego (R is orthogonal, so R^-1 = R^T).
+        # Apply world→ego: p_ego = R^T @ (p_world - t)
         xyz_ego = (xyz - position) @ R.T
 
         if points.shape[1] > 3:
@@ -772,13 +778,18 @@ class UAVScenesDataset(Dataset):
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Collate function for DataLoader."""
-    return {
-        'history_occupancy': torch.stack([b['history_occupancy'] for b in batch]),
-        'future_occupancy': torch.stack([b['future_occupancy'] for b in batch]),
-        'history_poses': torch.stack([b['history_poses'] for b in batch]),
-        'future_poses': torch.stack([b['future_poses'] for b in batch]),
-        'agent_type': torch.stack([b['agent_type'] for b in batch]),
-    }
+    collated = {}
+    for key in ('history_occupancy', 'future_occupancy', 'history_poses', 'future_poses', 'agent_type'):
+        tensors = [b[key] for b in batch]
+        try:
+            collated[key] = torch.stack(tensors)
+        except RuntimeError as e:
+            shapes = [list(t.shape) for t in tensors]
+            raise RuntimeError(
+                f"Cannot stack '{key}': shapes {shapes}. "
+                f"All samples must have the same shape for '{key}'."
+            ) from e
+    return collated
 
 
 def create_dataloader(

@@ -1011,6 +1011,20 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         history_poses = batch['history_poses'].to(device)
         future_poses = batch['future_poses'].to(device)
 
+        # Validate tensor shapes
+        if history_occ.ndim < 3 or future_occ.ndim < 3:
+            print(f"  [WARN] Batch {batch_idx} bad occupancy ndim: "
+                  f"history={history_occ.ndim}, future={future_occ.ndim}, skipping")
+            continue
+        if history_poses.ndim < 2 or history_poses.shape[-1] < 7:
+            print(f"  [WARN] Batch {batch_idx} bad pose shape: "
+                  f"history_poses={list(history_poses.shape)}, need [..., >=7], skipping")
+            continue
+        if future_poses.ndim < 2 or future_poses.shape[-1] < 7:
+            print(f"  [WARN] Batch {batch_idx} bad pose shape: "
+                  f"future_poses={list(future_poses.shape)}, need [..., >=7], skipping")
+            continue
+
         # Use autocast for mixed precision
         use_amp = scaler is not None or amp_dtype is not None
         if use_amp and torch.cuda.is_available():
@@ -1063,6 +1077,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         # Log at start and every debug_freq batches to track potential collapse
         if batch_idx % debug_freq == 0:
             occ_rate = (future_occ > 0).float().mean().item() * 100
+            if occ_rate == 0.0:
+                print(f"  [WARN] Batch {batch_idx} has 0% occupancy — "
+                      f"empty grid may indicate data loading or transform issue")
             pred_mean = pred_occ.mean().item()
             pred_max = pred_occ.max().item()
             pred_min = pred_occ.min().item()

@@ -691,7 +691,16 @@ class OccWorld6DoFLoss(nn.Module):
             Dict of individual losses and 'total' combined loss
         """
         losses = {}
-        
+
+        # Validate pose dimensions: need at least 7 (pos xyz + quat wxyz)
+        for label, src in [('outputs', outputs), ('targets', targets)]:
+            if 'future_poses' in src:
+                p = src['future_poses']
+                assert p.shape[-1] >= 7, (
+                    f"{label}['future_poses'] last dim is {p.shape[-1]}, "
+                    f"expected >= 7 (pos[3] + quat[4]). Shape: {list(p.shape)}"
+                )
+
         # Occupancy loss (Focal + Dice + Mean-matching)
         pred_occ = outputs['future_occupancy']
         target_occ = targets['future_occupancy']
