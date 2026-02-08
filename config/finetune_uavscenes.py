@@ -38,10 +38,8 @@ dataset_type = 'uavscenes'
 # Scene selection
 # Available: AMtown, AMvalley, HKairport, HKisland
 # Note: Dataset gracefully handles missing scenes (warns and continues)
-# Start with AMtown (most commonly downloaded), add more as they become available
-uavscenes_scenes = ['AMtown']
-# For full training with all scenes:
-# uavscenes_scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
+# The HF zip (interval5_CAM_LIDAR.zip) contains all 4 scenes
+uavscenes_scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
 
 # Interval: 5 = keyframes (available on HuggingFace), 1 = full data (not on HF)
 uavscenes_interval = 5

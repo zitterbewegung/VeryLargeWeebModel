@@ -186,33 +186,61 @@ class UAVScenesDataset(Dataset):
         return samples
 
     def _find_scene_folder(self, scene: str) -> List[str]:
-        """Find actual folder name for a scene (handles different naming conventions)."""
+        """Find actual folder name for a scene (handles different naming conventions).
+
+        Searches both data_root directly and inside the interval{N}_CAM_LIDAR
+        subdirectory (the HuggingFace zip extracts with this wrapper folder).
+        Returns paths relative to data_root.
+        """
+        interval = self.config.interval
         folders = []
+        seen = set()
 
-        # Pattern 1: interval{N}_{scene}01 (HuggingFace format)
-        pattern1 = f"interval{self.config.interval}_{scene}01"
-        if (self.data_root / pattern1).exists():
-            folders.append(pattern1)
+        # Directories to search: data_root itself and the CAM_LIDAR subfolder
+        search_roots = [self.data_root]
+        cam_lidar_dir = self.data_root / f"interval{interval}_CAM_LIDAR"
+        if cam_lidar_dir.is_dir():
+            search_roots.append(cam_lidar_dir)
 
-        # Pattern 2: interval{N}_{scene} (without run number)
-        pattern2 = f"interval{self.config.interval}_{scene}"
-        if (self.data_root / pattern2).exists():
-            folders.append(pattern2)
+        for search_root in search_roots:
+            # Relative prefix for paths under search_root
+            if search_root == self.data_root:
+                prefix = ""
+            else:
+                prefix = f"{search_root.name}/"
 
-        # Pattern 3: {scene}/interval{N}_CAM_LIDAR (original expected format)
-        pattern3 = scene
-        if (self.data_root / pattern3 / f'interval{self.config.interval}_CAM_LIDAR').exists():
-            folders.append(pattern3)
+            # Pattern 1: interval{N}_{scene}01 (HuggingFace format)
+            p1 = f"interval{interval}_{scene}01"
+            if (search_root / p1).exists():
+                rel = prefix + p1
+                if rel not in seen:
+                    folders.append(rel)
+                    seen.add(rel)
 
-        # Pattern 4: Just {scene} (simple structure)
-        if (self.data_root / scene).exists() and scene not in folders:
-            folders.append(scene)
+            # Pattern 2: interval{N}_{scene} (without run number)
+            p2 = f"interval{interval}_{scene}"
+            if (search_root / p2).exists():
+                rel = prefix + p2
+                if rel not in seen:
+                    folders.append(rel)
+                    seen.add(rel)
 
-        # Pattern 5: Glob for any matching pattern
-        if not folders:
-            for d in self.data_root.iterdir():
-                if d.is_dir() and scene.lower() in d.name.lower():
-                    folders.append(d.name)
+            # Pattern 3: Just {scene}
+            if (search_root / scene).exists():
+                rel = prefix + scene
+                if rel not in seen:
+                    folders.append(rel)
+                    seen.add(rel)
+
+            # Pattern 4: Fuzzy match — find all dirs containing scene name
+            # Catches variants like HKairport_GNSS01, HKairport_GNSS_Evening
+            if search_root.is_dir():
+                for d in sorted(search_root.iterdir()):
+                    if d.is_dir() and scene.lower() in d.name.lower():
+                        rel = prefix + d.name
+                        if rel not in seen:
+                            folders.append(rel)
+                            seen.add(rel)
 
         return folders
 

@@ -274,51 +274,49 @@ def _validate_nuscenes_data(data_path: Path, issues: list, warnings: list) -> bo
 
 def _validate_uavscenes_data(data_path: Path, issues: list, warnings: list) -> bool:
     """Validate UAVScenes dataset structure."""
-    # Expected structure:
+    # Expected structure (after HF zip extraction):
     # data_root/
-    #   interval1_AMtown01/
-    #     interval1_LIDAR/  (*.txt files)
-    #     interval1_CAM/    (*.jpg files)
-    #     sampleinfos_interpolated.json
+    #   interval5_CAM_LIDAR/          <- zip wrapper folder
+    #     interval5_AMtown01/
+    #       interval5_LIDAR/*.txt
+    #       interval5_CAM/*.jpg
+    #       sampleinfos_interpolated.json
+    # OR (flat):
+    #   interval5_AMtown01/
+    #     interval5_LIDAR/*.txt
 
     scenes = ['AMtown', 'AMvalley', 'HKairport', 'HKisland']
     found_scenes = []
 
+    # Search both data_root and inside interval{N}_CAM_LIDAR/ wrapper
+    search_roots = [data_path]
+    for wrapper in data_path.iterdir():
+        if wrapper.is_dir() and wrapper.name.startswith('interval') and 'CAM_LIDAR' in wrapper.name:
+            search_roots.append(wrapper)
+
     for scene in scenes:
-        # Check multiple naming patterns
-        patterns = [
-            f"interval1_{scene}01",
-            f"interval1_{scene}",
-            f"interval5_{scene}01",
-            scene,
-        ]
-
-        for pattern in patterns:
-            scene_path = data_path / pattern
-            if scene_path.exists():
+        scene_found = False
+        for search_root in search_roots:
+            if scene_found:
+                break
+            # Check dirs that contain the scene name (handles GNSS variants etc.)
+            for d in sorted(search_root.iterdir()) if search_root.is_dir() else []:
+                if not d.is_dir() or scene.lower() not in d.name.lower():
+                    continue
                 # Check for LiDAR data
-                lidar_dirs = [
-                    scene_path / 'interval1_LIDAR',
-                    scene_path / 'interval5_LIDAR',
-                    scene_path / 'lidar',
-                ]
-
-                has_lidar = False
-                for lidar_dir in lidar_dirs:
+                for lidar_name in ['interval5_LIDAR', 'interval1_LIDAR', 'lidar']:
+                    lidar_dir = d / lidar_name
                     if lidar_dir.exists():
                         lidar_files = list(lidar_dir.glob('*.txt')) + list(lidar_dir.glob('*.pcd'))
                         if lidar_files:
-                            print(f"  Found {scene}: {len(lidar_files)} LiDAR files")
-                            found_scenes.append(scene)
-                            has_lidar = True
+                            print(f"  Found {scene} ({d.name}): {len(lidar_files)} LiDAR files")
+                            if scene not in found_scenes:
+                                found_scenes.append(scene)
+                            scene_found = True
                             break
 
-                if not has_lidar:
-                    warnings.append(f"Scene {pattern} exists but no LiDAR data found")
-                break
-
     if not found_scenes:
-        issues.append("No UAVScenes data found. Expected interval1_*/interval1_LIDAR/*.txt")
+        issues.append("No UAVScenes data found. Expected interval5_CAM_LIDAR/interval5_*/interval5_LIDAR/*.txt")
         return False
 
     print(f"  Found {len(found_scenes)}/4 scenes: {found_scenes}")
