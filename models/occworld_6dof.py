@@ -599,15 +599,21 @@ class OccWorld6DoF(nn.Module):
         history_occupancy: torch.Tensor,
         history_poses: torch.Tensor,
         future_poses: Optional[torch.Tensor] = None,
+        planned_trajectory: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
-        
+
         Args:
             history_occupancy: [B, T_h, X, Y, Z] - past occupancy grids
             history_poses: [B, T_h, 13] - past poses
             future_poses: [B, T_f, 13] - future poses (for training, optional)
-        
+            planned_trajectory: [B, T_f, 13] - planned/commanded trajectory for
+                action-conditioned generation (optional). When provided, this
+                trajectory is used for FiLM conditioning instead of the predicted
+                poses, enabling "what will I see if I fly along this path?" queries.
+                The pose predictor still runs and its output is included in results.
+
         Returns:
             Dict containing:
                 - future_occupancy: [B, T_f, X, Y, Z]
@@ -671,8 +677,10 @@ class OccWorld6DoF(nn.Module):
             self.encoded_size[0], self.encoded_size[1], self.encoded_size[2]
         )
 
-        # FiLM: modulate spatial features with predicted pose information
-        pose_flat = predicted_future_poses.reshape(B, -1)  # [B, T_f * pose_dim]
+        # FiLM: modulate spatial features with pose information
+        # Use planned trajectory for conditioning if provided (action-conditioned generation)
+        film_poses = planned_trajectory if planned_trajectory is not None else predicted_future_poses
+        pose_flat = film_poses.reshape(B, -1)  # [B, T_f * pose_dim]
         film_params = self.pose_film(pose_flat)  # [B, latent_dim * 2]
         gamma = film_params[:, :self.config.latent_dim].view(B, self.config.latent_dim, 1, 1, 1)
         beta = film_params[:, self.config.latent_dim:].view(B, self.config.latent_dim, 1, 1, 1)

@@ -675,6 +675,8 @@ def parse_args():
                         help='Override learning rate')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Override max epochs')
+    parser.add_argument('--uncertainty-weight', type=float, default=None,
+                        help='Override 6DoF uncertainty loss weight (e.g., 0.05)')
 
     # Mode
     parser.add_argument('--eval-only', action='store_true',
@@ -1213,6 +1215,11 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     epoch_target_occ_sum = 0.0
     epoch_voxel_count = 0
 
+    # Loss spike detection (EMA-based)
+    loss_ema = None
+    loss_ema_alpha = 0.02  # Smoothing factor — slow EMA for stable baseline
+    spike_threshold = 5.0  # Alert when loss > 5x the running average
+
     for batch_idx, batch in enumerate(dataloader):
         # Validate batch has required keys
         required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
@@ -1424,6 +1431,49 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 if components:
                     loss_str += f" ({', '.join(components)})"
             print(f"  Epoch {epoch} [{batch_idx}/{len(dataloader)}] {loss_str}")
+
+        # --- Loss spike detection ---
+        loss_val_for_ema = loss.item()
+        if loss_ema is None:
+            loss_ema = loss_val_for_ema
+        else:
+            # Detect spike BEFORE updating EMA so the threshold is against the prior baseline
+            if loss_ema > 0 and loss_val_for_ema > spike_threshold * loss_ema:
+                ratio = loss_val_for_ema / loss_ema
+                print(f"  [SPIKE] Epoch {epoch} batch {batch_idx}: loss {loss_val_for_ema:.4f} "
+                      f"is {ratio:.1f}x running avg ({loss_ema:.4f})")
+
+                # Identify dominant loss component
+                if is_6dof:
+                    component_vals = {k: v.item() for k, v in losses.items() if k != 'total'}
+                    if component_vals:
+                        dominant = max(component_vals, key=component_vals.get)
+                        pct = component_vals[dominant] / max(loss_val_for_ema, 1e-8) * 100
+                        print(f"  [SPIKE]   Dominant component: {dominant}={component_vals[dominant]:.4f} "
+                              f"({pct:.1f}% of total)")
+                        # Show all components sorted by magnitude
+                        sorted_comps = sorted(component_vals.items(), key=lambda x: -x[1])
+                        comp_str = ', '.join(f"{k}={v:.4f}" for k, v in sorted_comps)
+                        print(f"  [SPIKE]   All components: {comp_str}")
+
+                # Batch diagnostics: pose stats, occupancy, scene info
+                with torch.no_grad():
+                    occ_rate = (future_occ > 0).float().mean().item() * 100
+                    pos_mag = future_poses[:, :, :3].norm(dim=-1)
+                    quat_norms = future_poses[:, :, 3:7].norm(dim=-1)
+                    vel_mag = future_poses[:, :, 7:10].norm(dim=-1) if future_poses.shape[-1] >= 10 else None
+                    print(f"  [SPIKE]   Occ rate: {occ_rate:.3f}%, "
+                          f"pose_pos: min={pos_mag.min().item():.2f} max={pos_mag.max().item():.2f}, "
+                          f"quat_norm: min={quat_norms.min().item():.4f} max={quat_norms.max().item():.4f}"
+                          + (f", vel: max={vel_mag.max().item():.2f}" if vel_mag is not None else ""))
+
+                # Scene names if available
+                if 'scene' in batch:
+                    scenes = batch['scene'] if isinstance(batch['scene'], (list, tuple)) else [batch['scene']]
+                    print(f"  [SPIKE]   Scenes: {list(set(scenes))}")
+
+            # Update EMA
+            loss_ema = loss_ema_alpha * loss_val_for_ema + (1 - loss_ema_alpha) * loss_ema
 
         # TensorBoard
         global_step = epoch * len(dataloader) + batch_idx
@@ -2217,10 +2267,15 @@ def main():
     if args.model_type == '6dof':
         # 6DoF loss — read weights from config if available, else use defaults
         loss_cfg = getattr(config, 'loss', {})
+        uncertainty_weight = (
+            args.uncertainty_weight
+            if args.uncertainty_weight is not None
+            else loss_cfg.get('uncertainty_weight', 0.1)
+        )
         criterion = OccWorld6DoFLoss(
             occ_weight=loss_cfg.get('occ_weight', 1.0),
             pose_weight=loss_cfg.get('pose_weight', 0.5),
-            uncertainty_weight=loss_cfg.get('uncertainty_weight', 0.1),
+            uncertainty_weight=uncertainty_weight,
             reloc_weight=loss_cfg.get('reloc_weight', 0.2),
             place_weight=loss_cfg.get('place_weight', 0.1),
             focal_alpha=loss_cfg.get('focal_alpha', 0.99),
@@ -2233,6 +2288,8 @@ def main():
             uncertainty_max=loss_cfg.get('uncertainty_max', 10.0),
         )
         print("  Using OccWorld6DoFLoss with anti-collapse safeguards")
+        if args.uncertainty_weight is not None:
+            print(f"  CLI override: uncertainty_weight={uncertainty_weight}")
     else:
         # Simple occupancy loss - Focal + Dice + Mean-matching
         # focal_alpha=0.99 for ~1% occupancy, mean_weight=10 prevents all-zero collapse

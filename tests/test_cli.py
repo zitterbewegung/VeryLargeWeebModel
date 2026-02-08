@@ -494,6 +494,14 @@ class TestCLIMainFunction:
         assert args.dry_run is True
         assert args.epochs == 10
 
+    def test_build_parser_train_uncertainty_weight(self):
+        """train parser should accept --uncertainty-weight."""
+        from vlwm_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["train", "--uncertainty-weight", "0.05"])
+        assert args.command == "train"
+        assert args.uncertainty_weight == 0.05
+
     def test_build_parser_pack(self):
         """build_parser() should parse pack subcommand."""
         from vlwm_cli import build_parser

@@ -331,6 +331,7 @@ def cmd_train(args: argparse.Namespace) -> int:
     config = args.config
     epochs = args.epochs
     work_dir = args.work_dir
+    uncertainty_weight = getattr(args, 'uncertainty_weight', None)
 
     log_info(f"Config: {config}")
     log_info(f"Batch size: {batch_size}")
@@ -338,6 +339,8 @@ def cmd_train(args: argparse.Namespace) -> int:
     log_info(f"GPUs: {num_gpus}")
     log_info(f"Epochs: {epochs}")
     log_info(f"Work dir: {work_dir}")
+    if uncertainty_weight is not None:
+        log_info(f"Uncertainty weight: {uncertainty_weight}")
 
     if args.dry_run:
         log_info("[DRY RUN] Would start training with above settings")
@@ -367,6 +370,9 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     if epochs:
         cmd.extend(["--epochs", str(epochs)])
+
+    if uncertainty_weight is not None:
+        cmd.extend(["--uncertainty-weight", str(uncertainty_weight)])
 
     if args.resume:
         cmd.extend(["--resume-from", args.resume])
@@ -1258,6 +1264,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--gpus", type=int, help="Number of GPUs")
     p_train.add_argument("--resume", help="Resume from checkpoint path")
     p_train.add_argument("--interval", type=int, help="UAVScenes interval (5=keyframes, 1=full)")
+    p_train.add_argument("--uncertainty-weight", type=float,
+                         help="Override 6DoF uncertainty loss weight (e.g., 0.05)")
     p_train.add_argument("--dry-run", action="store_true", help="Show config without training")
 
     # --- deploy ---

@@ -75,8 +75,11 @@ class UAVScenesConfig:
     point_cloud_range: Tuple[float, ...] = (-40.0, -40.0, -10.0, 40.0, 40.0, 50.0)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 0.5)
 
-    # Transform LiDAR points into ego frame using pose
-    ego_frame: bool = True
+    # Transform LiDAR points into ego frame using pose.
+    # UAVScenes LiDAR is already in sensor-local frame (standard for LiDAR
+    # hardware), so ego_frame should be False.  The ego transform assumes
+    # world-frame input and will always fail on sensor-local data.
+    ego_frame: bool = False
     fallback_to_lidar_center: bool = True
     min_in_range_ratio: float = 0.01
 
@@ -669,6 +672,13 @@ class UAVScenesDataset(Dataset):
             aligned_points, updated_sequence_origin, used_lidar_center
         """
         self._total_align_calls += 1
+
+        # If ego_frame is disabled, points are assumed to already be in
+        # sensor-local frame (e.g. UAVScenes LiDAR).  Pass through as-is.
+        # The centering fallback is only useful when ego_frame is True but
+        # the transform fails, so we skip it here too.
+        if not self.config.ego_frame:
+            return points, sequence_origin, False
 
         # If this sequence already fell back to LiDAR centering, keep using
         # that frame for all subsequent timesteps to avoid mixing coordinate

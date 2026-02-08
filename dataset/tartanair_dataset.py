@@ -105,9 +105,10 @@ class TartanAirDataset(Dataset):
     Converts depth images to point clouds/occupancy grids for OccWorld training.
     """
 
-    def __init__(self, data_root: str, config: TartanAirConfig):
+    def __init__(self, data_root: str, config: TartanAirConfig, transform=None):
         self.data_root = Path(data_root)
         self.config = config
+        self.transform = transform
 
         if not self.data_root.exists():
             raise FileNotFoundError(
@@ -356,7 +357,7 @@ class TartanAirDataset(Dataset):
             pose = self._pose_to_tensor(frame['pose'])
             future_poses.append(pose)
 
-        return {
+        result = {
             'history_occupancy': torch.from_numpy(np.stack(history_occupancy)),
             'history_poses': torch.from_numpy(np.stack(history_poses)),
             'future_occupancy': torch.from_numpy(np.stack(future_occupancy)),
@@ -366,6 +367,11 @@ class TartanAirDataset(Dataset):
             'trajectory': sample['trajectory'],
             'domain_tag': 'sim',
         }
+
+        if self.transform is not None:
+            result = self.transform(result)
+
+        return result
 
 
 def create_tartanair_dataloader(

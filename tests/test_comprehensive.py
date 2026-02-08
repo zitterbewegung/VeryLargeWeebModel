@@ -835,10 +835,32 @@ class TestCLISubcommandHandlers(unittest.TestCase):
             dry_run=True, config='config/finetune_tokyo.py',
             batch_size=None, lr=None, epochs=None,
             precision=None, gpus=None, work_dir='work_dirs/test',
-            resume=None,
+            resume=None, interval=None, uncertainty_weight=None,
         )
         result = cmd_train(args)
         self.assertEqual(result, 0)
+
+    @patch('subprocess.run')
+    def test_cmd_train_passes_uncertainty_weight(self, mock_run):
+        """train should forward --uncertainty-weight to train.py."""
+        from scripts.vlwm_cli import cmd_train
+        import argparse
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                dry_run=False, config='config/finetune_uavscenes.py',
+                batch_size=6, lr=None, epochs=1,
+                precision='bf16', gpus=1, work_dir=tmpdir,
+                resume=None, interval=None, uncertainty_weight=0.05,
+            )
+            result = cmd_train(args)
+
+        self.assertEqual(result, 0)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn('--uncertainty-weight', cmd)
+        idx = cmd.index('--uncertainty-weight')
+        self.assertEqual(cmd[idx + 1], '0.05')
 
     def test_main_type_annotation(self):
         """main() should accept None argument (Python 3.8 compat)."""
@@ -1346,6 +1368,20 @@ class TestIntervalFlag(unittest.TestCase):
         with patch('sys.argv', ['train.py', '--interval', '1']):
             args = parse_args()
         self.assertEqual(args.interval, 1)
+
+    def test_parse_args_uncertainty_weight_default_none(self):
+        """--uncertainty-weight should default to None."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py']):
+            args = parse_args()
+        self.assertIsNone(args.uncertainty_weight)
+
+    def test_parse_args_uncertainty_weight_value(self):
+        """--uncertainty-weight should parse float values."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--uncertainty-weight', '0.05']):
+            args = parse_args()
+        self.assertAlmostEqual(args.uncertainty_weight, 0.05, places=6)
 
     def test_interval_overrides_config(self):
         """--interval should override dataset_config interval."""

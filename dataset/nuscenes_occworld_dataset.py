@@ -40,12 +40,13 @@ class NuScenesConfig:
 class NuScenesOccWorldDataset(Dataset):
     """nuScenes dataset for OccWorld training."""
 
-    def __init__(self, data_root: str, config: NuScenesConfig):
+    def __init__(self, data_root: str, config: NuScenesConfig, transform=None):
         if not HAS_NUSCENES:
             raise ImportError("nuscenes-devkit required. Install with: pip install nuscenes-devkit")
 
         self.data_root = data_root
         self.config = config
+        self.transform = transform
 
         # Calculate grid size from range and voxel size
         pc_range = np.array(config.point_cloud_range)
@@ -237,7 +238,7 @@ class NuScenesOccWorldDataset(Dataset):
         history_poses = all_poses[:n_hist]
         future_poses = all_poses[n_hist:]
 
-        return {
+        result = {
             'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
             'future_occupancy': torch.from_numpy(np.stack(future_occ)).float(),
             'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
@@ -245,6 +246,11 @@ class NuScenesOccWorldDataset(Dataset):
             'scene_name': sample_info['scene_name'],
             'domain_tag': 'real',
         }
+
+        if self.transform is not None:
+            result = self.transform(result)
+
+        return result
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:

@@ -251,7 +251,7 @@ class NuScenes6DoFDataset(Dataset):
     - Transforms point clouds before voxelization (not occupancy)
     """
 
-    def __init__(self, data_root: str, config: NuScenes6DoFConfig):
+    def __init__(self, data_root: str, config: NuScenes6DoFConfig, transform=None):
         if not HAS_NUSCENES:
             raise ImportError(
                 "nuscenes-devkit required.\n"
@@ -260,6 +260,7 @@ class NuScenes6DoFDataset(Dataset):
 
         self.data_root = data_root
         self.config = config
+        self.transform = transform
         self.transformer = Transform6DoF(config)
 
         # Initialize nuScenes API
@@ -479,7 +480,7 @@ class NuScenes6DoFDataset(Dataset):
             future_poses.append(pose)
             prev_token = token
 
-        return {
+        result = {
             'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
             'future_occupancy': torch.from_numpy(np.stack(future_occ)).float(),
             'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
@@ -488,6 +489,11 @@ class NuScenes6DoFDataset(Dataset):
             'scene_name': sample_info['scene_name'],
             'domain_tag': 'real',
         }
+
+        if self.transform is not None:
+            result = self.transform(result)
+
+        return result
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
