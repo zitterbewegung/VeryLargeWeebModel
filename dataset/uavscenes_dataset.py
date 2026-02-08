@@ -105,9 +105,10 @@ class UAVScenesDataset(Dataset):
     Provides real aerial LiDAR with 6DoF poses from UAV platform.
     """
 
-    def __init__(self, data_root: str, config: UAVScenesConfig):
+    def __init__(self, data_root: str, config: UAVScenesConfig, transform=None):
         self.data_root = Path(data_root)
         self.config = config
+        self.transform = transform
 
         # Validate data exists
         if not self.data_root.exists():
@@ -665,6 +666,20 @@ class UAVScenesDataset(Dataset):
         """
         self._total_align_calls += 1
 
+        # If this sequence already fell back to LiDAR centering, keep using
+        # that frame for all subsequent timesteps to avoid mixing coordinate
+        # conventions within one sample.
+        if self.config.fallback_to_lidar_center and sequence_origin is not None:
+            self._fallback_count += 1
+            if self._fallback_count <= 5:
+                warnings.warn(
+                    f"UAVScenes _align_points: ego-frame alignment fallback activated "
+                    f"({self._fallback_count}/{self._total_align_calls} calls). "
+                    f"LiDAR-center centering used instead.",
+                    stacklevel=2,
+                )
+            return self._center_points(points, sequence_origin), sequence_origin, True
+
         if self.config.ego_frame:
             points_pose = self._transform_points_to_ego(points, pose)
             ratio = self._in_range_ratio(points_pose[:, :3])
@@ -852,7 +867,7 @@ class UAVScenesDataset(Dataset):
             future_poses.append(pose)
             prev_pose = pose.copy()
 
-        return {
+        result = {
             'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
             'future_occupancy': torch.from_numpy(np.stack(future_occ)).float(),
             'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
@@ -862,6 +877,11 @@ class UAVScenesDataset(Dataset):
             'scene_folder': scene_folder,
             'domain_tag': 'real',
         }
+
+        if self.transform is not None:
+            result = self.transform(result)
+
+        return result
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:

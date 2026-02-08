@@ -275,6 +275,27 @@ class TestValidateFunction(unittest.TestCase):
         self.assertEqual(metrics['loss'], float('inf'))
 
 
+class TestBuild6DoFTargets(unittest.TestCase):
+    """Test 6DoF target construction helper."""
+
+    def test_global_pose_translation_is_sequence_local(self):
+        """global_pose translation should be relative to first history frame."""
+        from train import build_6dof_targets
+
+        history_poses = torch.zeros(1, 3, 13)
+        history_poses[0, 0, :7] = torch.tensor([1000.0, 2000.0, 3000.0, 1.0, 0.0, 0.0, 0.0])
+        history_poses[0, 2, :7] = torch.tensor([1012.5, 1992.0, 3010.0, 0.0, 1.0, 0.0, 0.0])
+        future_occ = torch.randint(0, 2, (1, 2, 4, 4, 4), dtype=torch.int64)
+        future_poses = torch.randn(1, 2, 13)
+
+        targets = build_6dof_targets(history_poses, future_occ, future_poses)
+
+        self.assertTrue(torch.allclose(targets['global_pose'][0, :3], torch.tensor([12.5, -8.0, 10.0])))
+        self.assertTrue(torch.allclose(targets['global_pose'][0, 3:7], history_poses[0, 2, 3:7]))
+        self.assertEqual(targets['future_occupancy'].dtype, torch.float32)
+        self.assertTrue(torch.equal(targets['future_poses'], future_poses))
+
+
 # =============================================================================
 # Data Validation Tests
 # =============================================================================
@@ -1369,6 +1390,24 @@ class TestUAVScenesFallbackWarning(unittest.TestCase):
 
         self.assertEqual(ds._fallback_count, 1)
         self.assertEqual(ds._total_align_calls, 1)
+
+    def test_fallback_stays_in_lidar_center_frame_for_sequence(self):
+        """Once sequence_origin exists, alignment should keep LiDAR-center frame."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds._fallback_count = 0
+        ds._total_align_calls = 0
+        ds.config = UAVScenesConfig(ego_frame=True, fallback_to_lidar_center=True, min_in_range_ratio=0.0)
+
+        points = np.array([[10.0, 0.0, 0.0]], dtype=np.float32)
+        pose = np.array([5.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        sequence_origin = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+        aligned, new_origin, used_lidar_center = ds._align_points(points, pose, sequence_origin)
+
+        self.assertTrue(used_lidar_center)
+        self.assertTrue(np.allclose(aligned[:, :3], np.array([[9.0, 0.0, 0.0]], dtype=np.float32)))
+        self.assertTrue(np.allclose(new_origin, sequence_origin))
 
 
 # =============================================================================

@@ -1187,6 +1187,20 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
+def build_6dof_targets(history_poses: torch.Tensor, future_occ: torch.Tensor, future_poses: torch.Tensor) -> dict:
+    """Build 6DoF targets with sequence-local global pose translation."""
+    global_pose_target = history_poses[:, -1, :7].clone()
+    if history_poses.shape[1] > 0:
+        # Keep relocalization target translation local to avoid large absolute
+        # coordinate scales dominating total loss.
+        global_pose_target[:, :3] = global_pose_target[:, :3] - history_poses[:, 0, :3]
+    return {
+        'future_occupancy': future_occ.float(),
+        'future_poses': future_poses,
+        'global_pose': global_pose_target,
+    }
+
+
 def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500, amp_dtype=None, grad_accum_steps=1):
     """Train for one epoch with optional mixed precision and gradient accumulation."""
     model.train()
@@ -1251,11 +1265,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 pred_occ = outputs['future_occupancy']
 
                 # 6DoF loss expects outputs and targets dicts
-                targets = {
-                    'future_occupancy': future_occ.float(),
-                    'future_poses': future_poses,
-                    'global_pose': history_poses[:, -1, :7],
-                }
+                targets = build_6dof_targets(history_poses, future_occ, future_poses)
                 losses = criterion(outputs, targets)
                 loss = losses['total']
 
@@ -1405,7 +1415,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             loss_val = loss.item()
             loss_str = f"Loss: {loss_val:.6f}"  # More precision to see small losses
             if is_6dof:
-                loss_str += f" (occ={losses['occ'].item():.3f}, pose={losses['pose'].item():.3f})"
+                components = []
+                for key in ('occ', 'pose', 'uncertainty', 'reloc', 'place'):
+                    if key in losses:
+                        components.append(f"{key}={losses[key].item():.3f}")
+                if components:
+                    loss_str += f" ({', '.join(components)})"
             print(f"  Epoch {epoch} [{batch_idx}/{len(dataloader)}] {loss_str}")
 
         # TensorBoard
@@ -1454,12 +1469,14 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     return total_loss / num_batches
 
 
-def validate(model, dataloader, criterion, device, is_6dof=False):
+def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_step=0.5):
     """Validate model with task-specific metrics (IoU, precision, recall, pose errors).
 
     When predictions have a time dimension (ndim >= 5), also computes:
     - Per-timestep IoU (iou_t0, iou_t1, ...)
     - Temporal consistency (cosine similarity of frame-to-frame voxel changes)
+    - Collision rates (predicted ego trajectory vs predicted occupancy)
+    - Time-based metric aliases (e.g., iou_0.5s, iou_1.0s, ...)
     """
     model.eval()
     total_loss = 0
@@ -1486,6 +1503,10 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
     pos_errors = []
     quat_errors = []
 
+    # Collision metric accumulators
+    collision_counts = [0.0] * MAX_T
+    collision_totals = [0] * MAX_T
+
     with torch.no_grad():
         for batch in dataloader:
             required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
@@ -1501,11 +1522,7 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
                 outputs = model(history_occ, history_poses, future_poses)
                 pred_occ = outputs['future_occupancy']
                 pred_poses_val = outputs.get('future_poses')
-                targets = {
-                    'future_occupancy': future_occ.float(),
-                    'future_poses': future_poses,
-                    'global_pose': history_poses[:, -1, :7],
-                }
+                targets = build_6dof_targets(history_poses, future_occ, future_poses)
                 losses = criterion(outputs, targets)
                 loss = losses['total']
             else:
@@ -1572,6 +1589,46 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
                 angle_rad = 2 * torch.acos(dot)
                 quat_errors.append(angle_rad.mean().item() * 180 / 3.14159)
 
+                # Collision checking: does predicted ego position intersect predicted occupancy?
+                if pred_binary.ndim >= 5:
+                    T = min(pred_poses_val.shape[1], pred_binary.shape[1])
+                    for t in range(T):
+                        pred_pos_t = pred_poses_val[:, t, :3]  # [B, 3]
+                        # Convert position to voxel coordinates
+                        # Use default ranges; these match the standard grid
+                        pc_range_min = torch.tensor([-40.0, -40.0, -10.0], device=pred_pos_t.device)
+                        voxel_size = torch.tensor([0.4, 0.4, 0.5], device=pred_pos_t.device)
+                        grid_size = pred_binary[:, t].shape[-3:]  # (X, Y, Z)
+
+                        voxel_coords = ((pred_pos_t - pc_range_min) / voxel_size).long()
+
+                        # Check bounds and occupancy
+                        in_bounds = (
+                            (voxel_coords[:, 0] >= 0) & (voxel_coords[:, 0] < grid_size[0]) &
+                            (voxel_coords[:, 1] >= 0) & (voxel_coords[:, 1] < grid_size[1]) &
+                            (voxel_coords[:, 2] >= 0) & (voxel_coords[:, 2] < grid_size[2])
+                        )
+
+                        # Check collision with safety radius (3x3x3 neighborhood)
+                        collisions = torch.zeros(pred_pos_t.shape[0], device=pred_pos_t.device)
+                        for b in range(pred_pos_t.shape[0]):
+                            if not in_bounds[b]:
+                                continue
+                            cx, cy, cz = voxel_coords[b]
+                            # Check 3x3x3 neighborhood
+                            x_lo = max(0, cx - 1)
+                            x_hi = min(grid_size[0], cx + 2)
+                            y_lo = max(0, cy - 1)
+                            y_hi = min(grid_size[1], cy + 2)
+                            z_lo = max(0, cz - 1)
+                            z_hi = min(grid_size[2], cz + 2)
+                            neighborhood = pred_binary[b, t, x_lo:x_hi, y_lo:y_hi, z_lo:z_hi]
+                            if neighborhood.sum() > 0:
+                                collisions[b] = 1.0
+
+                        collision_counts[t] += collisions.sum().item()
+                        collision_totals[t] += collisions.numel()
+
     # Compute final metrics
     metrics = {}
     if num_batches > 0:
@@ -1591,6 +1648,18 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
             for t in range(MAX_T):
                 if tp_per_t[t] + fp_per_t[t] + fn_per_t[t] > 0:
                     metrics[f'iou_t{t}'] = tp_per_t[t] / (tp_per_t[t] + fp_per_t[t] + fn_per_t[t] + eps)
+
+            # Also add time-based metric aliases
+            for t in range(MAX_T):
+                iou_key = f'iou_t{t}'
+                if iou_key in metrics:
+                    time_s = (t + 1) * seconds_per_step
+                    metrics[f'iou_{time_s:.1f}s'] = metrics[iou_key]
+
+            # Collision rates
+            for t in range(MAX_T):
+                if collision_totals[t] > 0:
+                    metrics[f'collision_rate_t{t}'] = collision_counts[t] / collision_totals[t]
 
             # Temporal consistency
             if temporal_consistency_count > 0:
