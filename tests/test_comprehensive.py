@@ -744,8 +744,8 @@ class TestCLISubcommandHandlers(unittest.TestCase):
         import argparse
 
         # Simulate pip failure
-        mock_run.return_value = MagicMock(returncode=1, stdout=b'', stderr=b'')
-        args = argparse.Namespace(provider=None, dry_run=False)
+        mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='error')
+        args = argparse.Namespace(provider=None, dry_run=False, full=False)
         result = cmd_setup(args)
         self.assertEqual(result, 1)
 

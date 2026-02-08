@@ -61,16 +61,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
     log_step("Installing system packages")
     install_system_packages(base_packages)
 
-    # Python dependencies
+    # Python dependencies — use requirements files
     log_step("Installing Python dependencies")
-    pip_cmd = [sys.executable, "-m", "pip", "install", "-q"]
-    core_deps = ["torch", "torchvision", "mmcv", "mmdet", "mmdet3d",
-                 "numpy", "pillow", "tqdm", "tensorboard"]
+    repo_root = Path(__file__).resolve().parent.parent
+    req_file = "requirements-full.txt" if args.full else "requirements.txt"
+    req_path = repo_root / req_file
+
+    if not req_path.exists():
+        log_error(f"{req_path} not found")
+        return 1
+
+    log_info(f"Installing from {req_file}")
+    pip_cmd = [sys.executable, "-m", "pip", "install", "-q", "-r", str(req_path)]
 
     try:
-        result = subprocess.run(pip_cmd + core_deps, check=False, capture_output=True)
+        result = subprocess.run(pip_cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             log_error(f"pip install failed (exit code {result.returncode})")
+            if result.stderr:
+                # Show last few lines of stderr for actionable context
+                err_lines = result.stderr.strip().split("\n")
+                for line in err_lines[-3:]:
+                    log_error(line)
             return 1
         log_success("Python dependencies installed")
     except OSError as e:
@@ -1197,6 +1209,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup = subparsers.add_parser("setup", help="Set up training environment")
     p_setup.add_argument("--provider", choices=["vastai", "lambda", "runpod", "generic"],
                          help="Override cloud provider detection")
+    p_setup.add_argument("--full", action="store_true",
+                         help="Install full environment (requirements-full.txt)")
     p_setup.add_argument("--dry-run", action="store_true", help="Show what would be done")
 
     # --- download ---
