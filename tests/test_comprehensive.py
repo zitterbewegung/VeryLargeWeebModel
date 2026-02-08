@@ -303,6 +303,88 @@ class TestValidateData(unittest.TestCase):
             self.assertFalse(result)
 
 
+class TestDownloadUAVScenesFromHF(unittest.TestCase):
+    """Test HuggingFace download for UAVScenes."""
+
+    @patch('train.snapshot_download', create=True)
+    def test_hf_download_default_interval(self, mock_snapshot):
+        """HF download with default interval=1 uses correct allow_patterns."""
+        # Mock the import inside the function
+        mock_module = MagicMock()
+        mock_module.snapshot_download = mock_snapshot
+        with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
+            from train import _download_uavscenes_from_hf
+            result = _download_uavscenes_from_hf("/tmp/data", interval=1)
+        self.assertTrue(result)
+        mock_snapshot.assert_called_once_with(
+            repo_id="sijieaaa/UAVScenes",
+            repo_type="dataset",
+            local_dir="/tmp/data",
+            allow_patterns=["interval1_*"],
+        )
+
+    @patch('train.snapshot_download', create=True)
+    def test_hf_download_interval5(self, mock_snapshot):
+        """HF download with interval=5 uses correct allow_patterns."""
+        mock_module = MagicMock()
+        mock_module.snapshot_download = mock_snapshot
+        with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
+            from train import _download_uavscenes_from_hf
+            result = _download_uavscenes_from_hf("/tmp/data", interval=5)
+        self.assertTrue(result)
+        mock_snapshot.assert_called_once_with(
+            repo_id="sijieaaa/UAVScenes",
+            repo_type="dataset",
+            local_dir="/tmp/data",
+            allow_patterns=["interval5_*"],
+        )
+
+    def test_hf_download_missing_package(self):
+        """Returns False when huggingface_hub is not installed."""
+        with patch.dict('sys.modules', {'huggingface_hub': None}):
+            from train import _download_uavscenes_from_hf
+            result = _download_uavscenes_from_hf("/tmp/data")
+        self.assertFalse(result)
+
+    @patch('train.snapshot_download', create=True)
+    def test_hf_download_exception(self, mock_snapshot):
+        """Returns False when snapshot_download raises an exception."""
+        mock_module = MagicMock()
+        mock_module.snapshot_download = mock_snapshot
+        mock_snapshot.side_effect = Exception("Network error")
+        with patch.dict('sys.modules', {'huggingface_hub': mock_module}):
+            from train import _download_uavscenes_from_hf
+            result = _download_uavscenes_from_hf("/tmp/data")
+        self.assertFalse(result)
+
+    def test_s3_download_tries_hf_first_for_uavscenes(self):
+        """_download_dataset_from_s3 tries HF first for uavscenes."""
+        from train import _download_dataset_from_s3
+        with patch('train._download_uavscenes_from_hf', return_value=True) as mock_hf:
+            result = _download_dataset_from_s3("/tmp/data", "uavscenes", interval=5)
+        self.assertTrue(result)
+        mock_hf.assert_called_once_with("/tmp/data", interval=5)
+
+    def test_s3_download_falls_back_when_hf_fails(self):
+        """_download_dataset_from_s3 falls back to S3 when HF fails for uavscenes."""
+        from train import _download_dataset_from_s3
+        with patch('train._download_uavscenes_from_hf', return_value=False), \
+             patch('subprocess.run') as mock_run:
+            # Simulate AWS CLI not found
+            mock_run.side_effect = FileNotFoundError
+            result = _download_dataset_from_s3("/tmp/data", "uavscenes")
+        self.assertFalse(result)
+
+    def test_s3_download_skips_hf_for_gazebo(self):
+        """_download_dataset_from_s3 does NOT try HF for non-uavscenes types."""
+        from train import _download_dataset_from_s3
+        with patch('train._download_uavscenes_from_hf') as mock_hf, \
+             patch('subprocess.run') as mock_run:
+            mock_run.side_effect = FileNotFoundError
+            _download_dataset_from_s3("/tmp/data", "gazebo")
+        mock_hf.assert_not_called()
+
+
 class TestValidatePretrainedModels(unittest.TestCase):
     """Test pretrained model validation."""
 

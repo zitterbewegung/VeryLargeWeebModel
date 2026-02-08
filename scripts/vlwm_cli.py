@@ -12,6 +12,7 @@ Usage:
     python scripts/vlwm_cli.py sanity      # Pre-flight sanity checks
     python scripts/vlwm_cli.py info        # Show environment info
     python scripts/vlwm_cli.py pack        # Pack/unpack dataset archives
+    python scripts/vlwm_cli.py sync        # Fast S3 sync (no compression)
 """
 
 import argparse
@@ -332,6 +333,10 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     if precision in ("fp16", "bf16"):
         cmd.append("--amp")
+        if precision == "bf16":
+            cmd.extend(["--amp-dtype", "bfloat16"])
+        else:
+            cmd.extend(["--amp-dtype", "float16"])
 
     if epochs:
         cmd.extend(["--epochs", str(epochs)])
@@ -1065,6 +1070,118 @@ def cmd_pack(args):
 
 
 # =============================================================================
+# Sync subcommand
+# =============================================================================
+
+# Files/patterns to always exclude from sync (not training data)
+SYNC_EXCLUDES = [
+    "*.DS_Store",
+    "*.zip",
+    "*.download_state",
+    "*.sh",
+    "*.claude/*",
+    "*__pycache__/*",
+    "*.pyc",
+    "*Thumbs.db",
+]
+
+
+def cmd_sync(args):
+    # type: (argparse.Namespace) -> int
+    """Fast S3 sync for large datasets using aws CLI.
+
+    Uses 'aws s3 sync' directly — no compression, parallel multipart
+    transfers, resumable, incremental. Much faster than tar+upload for
+    repeated transfers of large datasets.
+    """
+    log_step("Sync")
+
+    if not shutil.which("aws"):
+        log_error("AWS CLI not found. Install with: pip install awscli")
+        return 1
+
+    env = detect_cloud_environment()
+    data_dir = args.data_dir or os.path.join(env.work_dir, "data")
+    dataset_name, dataset_path = _resolve_dataset_path(args.dataset, data_dir)
+    bucket = args.bucket
+    prefix = args.prefix
+    s3_uri = "s3://{}/{}/{}".format(bucket, prefix, dataset_name)
+    dry_run = args.dry_run
+    delete = args.delete
+    max_concurrent = args.jobs
+
+    log_info("Dataset: {}".format(dataset_name))
+    log_info("Local:   {}".format(dataset_path))
+    log_info("Remote:  {}".format(s3_uri))
+    log_info("Jobs:    {}".format(max_concurrent))
+
+    # Build aws s3 sync command
+    cmd = ["aws", "s3", "sync"]
+
+    if args.download:
+        # S3 -> local
+        log_info("Direction: download (S3 -> local)")
+        cmd.extend([s3_uri + "/", dataset_path + "/"])
+    else:
+        # local -> S3 (default = upload)
+        log_info("Direction: upload (local -> S3)")
+        if not os.path.isdir(dataset_path):
+            log_error("Dataset directory not found: {}".format(dataset_path))
+            return 1
+        cmd.extend([dataset_path + "/", s3_uri + "/"])
+
+    # Exclude junk files
+    excludes = list(SYNC_EXCLUDES)
+    if args.exclude:
+        excludes.extend(args.exclude)
+    for pattern in excludes:
+        cmd.extend(["--exclude", pattern])
+
+    # Include filter (e.g. only specific subdirs)
+    if args.include:
+        for pattern in args.include:
+            cmd.extend(["--include", pattern])
+
+    if delete:
+        cmd.append("--delete")
+
+    if dry_run:
+        cmd.append("--dryrun")
+
+    # Set concurrency via AWS CLI config env var
+    cli_env = os.environ.copy()
+    cli_env["AWS_MAX_ATTEMPTS"] = "5"
+
+    log_step("Running sync")
+    log_info("Command: {}".format(" ".join(cmd)))
+
+    # Configure max concurrency via aws configure set (in a subprocess-safe way)
+    config_cmd = [
+        "aws", "configure", "set",
+        "default.s3.max_concurrent_requests", str(max_concurrent),
+    ]
+    subprocess.run(config_cmd, env=cli_env, check=False)
+
+    try:
+        result = subprocess.run(cmd, env=cli_env)
+        if result.returncode == 0:
+            log_success("Sync complete")
+            if not args.download:
+                log_info("To download on a GPU instance:")
+                log_info("  aws s3 sync {} ./data/{}/".format(
+                    s3_uri, dataset_name))
+        else:
+            log_error("Sync failed with exit code {}".format(result.returncode))
+        return result.returncode
+    except KeyboardInterrupt:
+        log_warn("Sync interrupted — re-run to resume (incremental)")
+        return 1
+    except OSError as e:
+        log_error("Sync failed: {}".format(e))
+        return 1
+
+
+# =============================================================================
 # Argument parsing
 # =============================================================================
 
@@ -1101,7 +1218,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Config file (default: config/finetune_tokyo.py)")
     p_train.add_argument("--work-dir", default="checkpoints",
                          help="Output directory (default: checkpoints)")
-    p_train.add_argument("--epochs", type=int, default=50, help="Number of epochs")
+    p_train.add_argument("--epochs", type=int, default=None,
+                         help="Number of epochs (default: use config value)")
     p_train.add_argument("--batch-size", type=int, help="Override batch size")
     p_train.add_argument("--precision", choices=["fp16", "bf16"], help="Override precision")
     p_train.add_argument("--gpus", type=int, help="Number of GPUs")
@@ -1153,6 +1271,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--dry-run", action="store_true",
                          help="Show what would be done")
 
+    # --- sync ---
+    p_sync = subparsers.add_parser("sync",
+        help="Fast S3 sync for large datasets (no compression)")
+    p_sync.add_argument("dataset",
+                         help="Dataset name ({}) or directory path".format(
+                             ", ".join(sorted(KNOWN_DATASETS.keys()))))
+    p_sync.add_argument("--download", action="store_true",
+                         help="Download from S3 (default is upload)")
+    p_sync.add_argument("--bucket", default="verylargeweebmodel",
+                         help="S3 bucket (default: verylargeweebmodel)")
+    p_sync.add_argument("--prefix", default="datasets",
+                         help="S3 key prefix (default: datasets)")
+    p_sync.add_argument("--data-dir",
+                         help="Base data directory override")
+    p_sync.add_argument("--exclude", action="append",
+                         help="Additional exclude patterns (can repeat)")
+    p_sync.add_argument("--include", action="append",
+                         help="Include patterns (can repeat)")
+    p_sync.add_argument("--delete", action="store_true",
+                         help="Delete files in destination not in source")
+    p_sync.add_argument("--jobs", "-j", type=int, default=50,
+                         help="Max concurrent requests (default: 50)")
+    p_sync.add_argument("--dry-run", action="store_true",
+                         help="Show what would be synced")
+
     return parser
 
 
@@ -1173,6 +1316,7 @@ def main(argv=None) -> int:
         "sanity": cmd_sanity,
         "info": cmd_info,
         "pack": cmd_pack,
+        "sync": cmd_sync,
     }
 
     handler = handlers.get(args.command)

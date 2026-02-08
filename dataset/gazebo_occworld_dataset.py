@@ -75,6 +75,10 @@ class DatasetConfig:
     point_cloud_range: Tuple[float, ...] = (-40, -40, -2, 40, 40, 150)
     voxel_size: Tuple[float, float, float] = (0.4, 0.4, 1.25)
 
+    # Optional data loading (set False to skip unused modalities for faster I/O)
+    load_images: bool = True         # Load camera images
+    load_lidar: bool = True          # Load LiDAR point clouds
+
     # Data quality validation
     validate_motion: bool = True     # Check for static sequences
     min_pose_delta: float = 0.1      # Minimum position change between frames (meters)
@@ -402,11 +406,20 @@ class GazeboOccWorldDataset(Dataset):
         future_frames = frames[n_history:]
 
         # Load all data sequentially (no threading to avoid deadlocks)
-        # History: images, lidar, poses, occupancy
-        history_images = [self._load_images(session_dir, fid) for fid in history_frames]
-        history_lidar = [self._load_lidar(session_dir, fid) for fid in history_frames]
+        # History: poses and occupancy (always needed)
         history_poses = [self._load_pose(session_dir, fid) for fid in history_frames]
         history_occupancy = [self._load_occupancy(session_dir, fid) for fid in history_frames]
+
+        # Images and LiDAR are optional — skip for faster training when unused
+        if self.config.load_images:
+            history_images = [self._load_images(session_dir, fid) for fid in history_frames]
+        else:
+            history_images = [{cam: torch.zeros(3, 1, 1) for cam in self.CAMERA_NAMES}
+                              for _ in history_frames]
+        if self.config.load_lidar:
+            history_lidar = [self._load_lidar(session_dir, fid) for fid in history_frames]
+        else:
+            history_lidar = [torch.zeros(0, 4) for _ in history_frames]
 
         # Future: poses and occupancy only
         future_poses = [self._load_pose(session_dir, fid) for fid in future_frames]

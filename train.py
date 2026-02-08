@@ -116,9 +116,10 @@ except ImportError:
 
 S3_BUCKET = "verylargeweebmodel"
 S3_REGION = "us-west-2"
+UAVSCENES_HF_REPO = "sijieaaa/UAVScenes"
 
 
-def validate_data(data_root: str, dataset_type: str, auto_download: bool = True) -> bool:
+def validate_data(data_root: str, dataset_type: str, auto_download: bool = True, interval: int = 1) -> bool:
     """
     Validate that required training data exists and is complete.
 
@@ -126,6 +127,7 @@ def validate_data(data_root: str, dataset_type: str, auto_download: bool = True)
         data_root: Path to data directory
         dataset_type: Type of dataset (gazebo, nuscenes, uavscenes, etc.)
         auto_download: If True, attempt to download missing data from S3
+        interval: UAVScenes interval (1=full, 5=keyframes)
 
     Returns:
         True if data is valid, False otherwise
@@ -144,8 +146,8 @@ def validate_data(data_root: str, dataset_type: str, auto_download: bool = True)
     if not data_path.exists():
         issues.append(f"Data directory does not exist: {data_path}")
         if auto_download:
-            print(f"\n[AUTO-DOWNLOAD] Creating directory and downloading from S3...")
-            return _download_dataset_from_s3(data_root, dataset_type)
+            print(f"\n[AUTO-DOWNLOAD] Creating directory and downloading...")
+            return _download_dataset_from_s3(data_root, dataset_type, interval=interval)
         return False
 
     # Dataset-specific validation
@@ -173,12 +175,16 @@ def validate_data(data_root: str, dataset_type: str, auto_download: bool = True)
             print(f"  [ERROR] {i}")
 
         if auto_download:
-            print(f"\n[AUTO-DOWNLOAD] Attempting to download missing data from S3...")
-            if _download_dataset_from_s3(data_root, dataset_type):
+            print(f"\n[AUTO-DOWNLOAD] Attempting to download missing data...")
+            if _download_dataset_from_s3(data_root, dataset_type, interval=interval):
                 # Re-validate after download
-                return validate_data(data_root, dataset_type, auto_download=False)
+                return validate_data(data_root, dataset_type, auto_download=False, interval=interval)
 
         print("\nTo fix manually:")
+        if dataset_type == 'uavscenes':
+            print("  pip install huggingface_hub")
+            print(f"  python -c \"from huggingface_hub import snapshot_download; snapshot_download('{UAVSCENES_HF_REPO}', repo_type='dataset', local_dir='{data_root}')\"")
+            print("  # Or via S3:")
         print(f"  aws s3 sync s3://{S3_BUCKET}/ {data_root}/ --region {S3_REGION}")
         return False
 
@@ -205,15 +211,20 @@ def _validate_gazebo_data(data_path: Path, issues: list, warnings: list) -> bool
     valid_sessions = 0
     for session in sessions:
         has_occupancy = (session / 'occupancy').exists() and any((session / 'occupancy').glob('*.npz'))
-        has_lidar = (session / 'lidar').exists() and any((session / 'lidar').glob('*.npy'))
+        has_poses = (session / 'poses').exists() and any((session / 'poses').glob('*.json'))
 
-        if has_occupancy or has_lidar:
+        if has_occupancy and has_poses:
             valid_sessions += 1
         else:
-            warnings.append(f"Session {session.name} missing occupancy/lidar data")
+            missing = []
+            if not has_occupancy:
+                missing.append('occupancy')
+            if not has_poses:
+                missing.append('poses')
+            warnings.append(f"Session {session.name} missing {', '.join(missing)} data")
 
     if valid_sessions == 0:
-        issues.append("No valid sessions with occupancy or lidar data")
+        issues.append("No valid sessions with required occupancy + poses data")
         return False
 
     print(f"  Found {valid_sessions}/{len(sessions)} valid sessions")
@@ -222,14 +233,21 @@ def _validate_gazebo_data(data_path: Path, issues: list, warnings: list) -> bool
 
 def _validate_nuscenes_data(data_path: Path, issues: list, warnings: list) -> bool:
     """Validate nuScenes dataset structure."""
-    # Check for required files
-    required_files = [
+    # Check for nuScenes raw data directories (used by raw-data loader)
+    nuscenes_dirs = ['v1.0-mini', 'v1.0-trainval', 'samples', 'sweeps']
+    has_raw_data = False
+    for d in nuscenes_dirs:
+        if (data_path / d).exists():
+            has_raw_data = True
+            print(f"  Found nuScenes directory: {d}")
+
+    # Check for OccWorld-style pickle files (optional if raw data exists)
+    pkl_files = [
         'nuscenes_infos_train_temporal_v3_scene.pkl',
         'nuscenes_infos_val_temporal_v3_scene.pkl',
     ]
-
-    # Check in data_path and parent
-    for req_file in required_files:
+    has_pkls = True
+    for req_file in pkl_files:
         found = False
         for check_path in [data_path / req_file, data_path.parent / req_file]:
             if check_path.exists():
@@ -241,18 +259,15 @@ def _validate_nuscenes_data(data_path: Path, issues: list, warnings: list) -> bo
                 found = True
                 break
         if not found:
-            issues.append(f"Missing: {req_file}")
+            if has_raw_data:
+                # Raw loader doesn't need pkl files — just warn
+                warnings.append(f"Missing {req_file} (not needed for raw-data loader)")
+            else:
+                issues.append(f"Missing: {req_file}")
+            has_pkls = False
 
-    # Check for nuScenes data directory
-    nuscenes_dirs = ['v1.0-mini', 'v1.0-trainval', 'samples', 'sweeps']
-    found_any = False
-    for d in nuscenes_dirs:
-        if (data_path / d).exists():
-            found_any = True
-            print(f"  Found nuScenes directory: {d}")
-
-    if not found_any:
-        warnings.append("nuScenes raw data directories not found (may not be needed if using pickle files)")
+    if not has_raw_data and not has_pkls:
+        issues.append("No nuScenes data found (need raw directories or pickle files)")
 
     return len(issues) == 0
 
@@ -310,9 +325,15 @@ def _validate_uavscenes_data(data_path: Path, issues: list, warnings: list) -> b
     return True
 
 
-def _download_dataset_from_s3(data_root: str, dataset_type: str) -> bool:
-    """Download dataset from S3."""
+def _download_dataset_from_s3(data_root: str, dataset_type: str, interval: int = 1) -> bool:
+    """Download dataset from S3 (or HuggingFace for UAVScenes)."""
     import subprocess
+
+    # For UAVScenes, try HuggingFace first (no credentials needed)
+    if dataset_type == 'uavscenes':
+        if _download_uavscenes_from_hf(data_root, interval=interval):
+            return True
+        print("[INFO] Falling back to S3 download...")
 
     # Map dataset types to S3 prefixes
     s3_prefixes = {
@@ -360,6 +381,38 @@ def _download_dataset_from_s3(data_root: str, dataset_type: str) -> bool:
         return False
     except Exception as e:
         print(f"[ERROR] Download failed: {e}")
+        return False
+
+
+def _download_uavscenes_from_hf(data_root: str, interval: int = 1) -> bool:
+    """Download UAVScenes dataset from HuggingFace Hub.
+
+    Args:
+        data_root: Path to data directory (files saved to data_root/ directly)
+        interval: UAVScenes interval (1=full, 5=keyframes). Filters by prefix.
+
+    Returns:
+        True if download succeeded, False otherwise.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        print("[WARN] huggingface_hub not installed. Install with: pip install huggingface_hub")
+        return False
+
+    try:
+        print(f"Downloading UAVScenes from HuggingFace ({UAVSCENES_HF_REPO})...")
+        print(f"  Interval filter: interval{interval}_*")
+        snapshot_download(
+            repo_id=UAVSCENES_HF_REPO,
+            repo_type="dataset",
+            local_dir=data_root,
+            allow_patterns=[f"interval{interval}_*"],
+        )
+        print("[OK] UAVScenes download complete!")
+        return True
+    except Exception as e:
+        print(f"[WARN] HuggingFace download failed: {e}")
         return False
 
 
@@ -548,6 +601,8 @@ def parse_args():
     # Performance optimizations
     parser.add_argument('--amp', action='store_true',
                         help='Enable automatic mixed precision (FP16/BF16) - much faster on A100')
+    parser.add_argument('--amp-dtype', type=str, default=None, choices=['float16', 'bfloat16'],
+                        help='AMP dtype (float16 or bfloat16). Auto-detected if not set.')
     parser.add_argument('--compile', action='store_true',
                         help='Use torch.compile() for faster training (PyTorch 2.0+)')
     parser.add_argument('--num-workers', type=int, default=1,
@@ -627,12 +682,18 @@ def try_import_occworld():
     try:
         # Try importing from installed OccWorld (configurable via OCCWORLD_PATH env var)
         occworld_path = os.environ.get('OCCWORLD_PATH', os.path.expanduser('~/OccWorld'))
-        sys.path.insert(0, occworld_path)
-        from models import TransVQVAE
-        from utils import get_logger
+        # Use importlib to avoid shadowing by our local 'models' package
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "occworld_models", os.path.join(occworld_path, "models", "__init__.py"))
+        if spec is None or spec.loader is None:
+            raise ImportError("OccWorld models package not found")
+        occworld_models = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(occworld_models)
+        TransVQVAE = getattr(occworld_models, 'TransVQVAE')
         print(f"Using OccWorld library from {occworld_path}")
         return True, TransVQVAE
-    except ImportError:
+    except (ImportError, FileNotFoundError, AttributeError, OSError):
         print("OccWorld library not found, using standalone mode")
         return False, None
 
@@ -928,7 +989,7 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500):
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500, amp_dtype=None):
     """Train for one epoch with optional mixed precision."""
     model.train()
     total_loss = 0
@@ -950,9 +1011,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         history_poses = batch['history_poses'].to(device)
         future_poses = batch['future_poses'].to(device)
 
-        # Use autocast for mixed precision if scaler is provided
-        use_amp = scaler is not None
-        amp_context = torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()
+        # Use autocast for mixed precision
+        use_amp = scaler is not None or amp_dtype is not None
+        if use_amp and torch.cuda.is_available():
+            amp_context = torch.amp.autocast('cuda', dtype=amp_dtype)
+        else:
+            amp_context = contextlib.nullcontext()
 
         with amp_context:
             if is_6dof:
@@ -1224,12 +1288,18 @@ def main():
     # This will auto-download from S3 if data is missing (unless --no-auto-download)
     if not args.skip_validation:
         auto_download = not args.no_auto_download
-        if not validate_data(data_root, dataset_type, auto_download=auto_download):
+        uav_interval = args.interval or 1
+        if not validate_data(data_root, dataset_type, auto_download=auto_download, interval=uav_interval):
             print("\n" + "=" * 60)
             print("DATA VALIDATION FAILED")
             print("=" * 60)
             print("Training cannot proceed without valid data.")
             print("\nTo download data manually:")
+            if dataset_type == 'uavscenes':
+                print("  pip install huggingface_hub")
+                print("  python -c \"from huggingface_hub import snapshot_download; "
+                      f"snapshot_download('{UAVSCENES_HF_REPO}', repo_type='dataset', local_dir='{data_root}')\"")
+                print("  # Or via S3:")
             print(f"  aws s3 sync s3://{S3_BUCKET}/ . --region {S3_REGION}")
             print("\nOr run the download script:")
             print("  python scripts/download_pretrained.py --all")
@@ -1374,6 +1444,9 @@ def main():
             exclude_dummy_sessions=ds_config.get('exclude_dummy_sessions', True),
             point_cloud_range=getattr(config, 'point_cloud_range', (-40, -40, -2, 40, 40, 150)),
             voxel_size=getattr(config, 'voxel_size', (0.4, 0.4, 1.25)),
+            # Training loop only uses occupancy + poses — skip images/lidar I/O
+            load_images=ds_config.get('load_images', False),
+            load_lidar=ds_config.get('load_lidar', False),
         )
 
         train_dataset = GazeboOccWorldDataset(data_root, dataset_cfg)
@@ -1535,6 +1608,13 @@ def main():
 
     model = model.to(device)
 
+    # Wrap in DataParallel if multiple GPUs
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        gpu_ids = [int(g) for g in args.gpu_ids.split(',') if g.strip()]
+        if len(gpu_ids) > 1:
+            model = nn.DataParallel(model, device_ids=gpu_ids)
+            print(f"  Using DataParallel on GPUs: {gpu_ids}")
+
     # Load pretrained weights or resume checkpoint
     resume_checkpoint = None
     if not args.from_scratch:
@@ -1589,10 +1669,20 @@ def main():
 
     # Mixed precision scaler (for --amp)
     scaler = None
+    amp_dtype = None
     if args.amp:
         if torch.cuda.is_available():
-            scaler = torch.cuda.amp.GradScaler()
-            print("Mixed precision (AMP) enabled - using FP16/BF16 for faster training")
+            # Determine AMP dtype
+            if args.amp_dtype:
+                amp_dtype = torch.bfloat16 if args.amp_dtype == 'bfloat16' else torch.float16
+            elif torch.cuda.is_bf16_supported():
+                amp_dtype = torch.bfloat16
+            else:
+                amp_dtype = torch.float16
+            # GradScaler is not needed for bfloat16 (it has sufficient dynamic range)
+            if amp_dtype == torch.float16:
+                scaler = torch.cuda.amp.GradScaler()
+            print(f"Mixed precision (AMP) enabled - using {amp_dtype}")
         else:
             print("WARNING: --amp requires CUDA, skipping")
 
@@ -1741,7 +1831,8 @@ def main():
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
                                   device, epoch, writer, use_wandb, is_6dof, dataset_type,
-                                  scaler=scaler, debug_freq=args.debug_freq)
+                                  scaler=scaler, debug_freq=args.debug_freq,
+                                  amp_dtype=amp_dtype)
 
         # Validate
         val_loss = validate(model, val_loader, criterion, device, is_6dof)

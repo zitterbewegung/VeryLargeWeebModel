@@ -127,8 +127,12 @@ class NuScenesOccWorldDataset(Dataset):
         pos = np.array(ego_pose['translation'])  # x, y, z
         rot = np.array(ego_pose['rotation'])     # qw, qx, qy, qz
 
-        # Combine into 7D pose
-        return np.concatenate([pos, rot])
+        # Combine into 13D pose for compatibility with model pose encoder:
+        # [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+        # nuScenes quaternion is (qw, qx, qy, qz), reorder to (qx, qy, qz, qw)
+        rot_reordered = np.array([rot[1], rot[2], rot[3], rot[0]])
+        vel = np.zeros(6)  # No velocity data in nuScenes ego pose
+        return np.concatenate([pos, rot_reordered, vel])
 
     def _points_to_occupancy(self, points: np.ndarray) -> np.ndarray:
         """Convert point cloud to occupancy grid."""
