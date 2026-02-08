@@ -128,11 +128,14 @@ class NuScenesOccWorldDataset(Dataset):
         rot = np.array(ego_pose['rotation'])     # qw, qx, qy, qz
 
         # Combine into 13D pose for compatibility with model pose encoder:
-        # [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
-        # nuScenes quaternion is (qw, qx, qy, qz), reorder to (qx, qy, qz, qw)
-        rot_reordered = np.array([rot[1], rot[2], rot[3], rot[0]])
-        vel = np.zeros(6)  # No velocity data in nuScenes ego pose
-        return np.concatenate([pos, rot_reordered, vel])
+        # [x, y, z, qw, qx, qy, qz, vx, vy, vz, wx, wy, wz]
+        # nuScenes quaternion is already (qw, qx, qy, qz) — keep as-is
+        # WARNING: nuScenes basic loader provides no velocity data.
+        # This zeros-out the velocity channels (linear_vel + angular_vel),
+        # which weakens motion forecasting quality. For velocity estimation,
+        # use NuScenes6DoFDataset instead (computes velocity from consecutive poses).
+        vel = np.zeros(6)
+        return np.concatenate([pos, rot, vel])
 
     def _points_to_occupancy(self, points: np.ndarray) -> np.ndarray:
         """Convert point cloud to occupancy grid."""

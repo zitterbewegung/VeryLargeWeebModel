@@ -27,6 +27,7 @@ Requirements:
 
 import os
 import sys
+import signal
 import argparse
 import contextlib
 import time
@@ -108,6 +109,59 @@ try:
     HAS_UAVSCENES = True
 except ImportError:
     HAS_UAVSCENES = False
+
+
+# =============================================================================
+# Graceful Shutdown Handler
+# =============================================================================
+
+class TrainingState:
+    """Global training state for graceful shutdown."""
+    model = None
+    optimizer = None
+    scheduler = None
+    epoch = 0
+    work_dir = None
+    best_val_loss = float('inf')
+    should_stop = False
+
+    @classmethod
+    def save_emergency_checkpoint(cls, signum=None, frame=None):
+        """Save checkpoint on SIGTERM/SIGINT for graceful shutdown."""
+        sig_name = signal.Signals(signum).name if signum else 'unknown'
+        print(f"\n  [SIGNAL] Received {sig_name}, saving emergency checkpoint...")
+        if cls.model is not None and cls.work_dir is not None:
+            ckpt_path = Path(cls.work_dir) / 'checkpoints' / 'emergency.pth'
+            try:
+                raw_sd = cls.model.state_dict()
+                clean_sd = {}
+                for k, v in raw_sd.items():
+                    k = k.replace('_orig_mod.', '').replace('module.', '', 1)
+                    clean_sd[k] = v
+                tmp_path = ckpt_path.with_suffix('.pth.tmp')
+                torch.save({
+                    'epoch': cls.epoch,
+                    'state_dict': clean_sd,
+                    'optimizer': cls.optimizer.state_dict() if cls.optimizer else None,
+                    'scheduler': cls.scheduler.state_dict() if cls.scheduler else None,
+                }, tmp_path)
+                tmp_path.replace(ckpt_path)
+                print(f"  [SIGNAL] Emergency checkpoint saved: {ckpt_path}")
+            except Exception as e:
+                print(f"  [SIGNAL] Failed to save emergency checkpoint: {e}")
+        cls.should_stop = True
+
+
+def cleanup_old_checkpoints(ckpt_dir: Path, max_keep: int):
+    """Delete old epoch checkpoints, keeping the N most recent + best.pth."""
+    if max_keep < 0:
+        return  # -1 = keep all
+    epoch_ckpts = sorted(ckpt_dir.glob('epoch_*.pth'), key=lambda p: p.stat().st_mtime)
+    # Always keep best.pth and emergency.pth
+    to_delete = epoch_ckpts[:-max_keep] if len(epoch_ckpts) > max_keep else []
+    for ckpt in to_delete:
+        ckpt.unlink()
+        print(f"  Cleaned up old checkpoint: {ckpt.name}")
 
 
 # =============================================================================
@@ -648,6 +702,12 @@ def parse_args():
                         help='Debug print frequency (default: 500, higher = faster)')
     parser.add_argument('--save-freq', type=int, default=1,
                         help='Checkpoint save frequency in epochs (default: 1 = every epoch)')
+    parser.add_argument('--grad-accum', type=int, default=1,
+                        help='Gradient accumulation steps (default: 1 = no accumulation)')
+    parser.add_argument('--max-keep-ckpts', type=int, default=5,
+                        help='Max checkpoints to keep (default: 5, -1 = keep all)')
+    parser.add_argument('--warmup-epochs', type=int, default=5,
+                        help='LR warmup epochs (default: 5)')
 
     # Weights & Biases
     parser.add_argument('--wandb', action='store_true',
@@ -763,15 +823,16 @@ class SimpleOccupancyModel(nn.Module):
         self.latent_dim = 256
 
         # Simple 3D encoder for occupancy
+        # GroupNorm: works with batch_size=1 and multi-GPU (no batch statistics)
         self.encoder = nn.Sequential(
             nn.Conv3d(self.history_frames, 64, kernel_size=3, padding=1),
-            nn.BatchNorm3d(64),
+            nn.GroupNorm(16, 64),
             nn.ReLU(inplace=True),
             nn.Conv3d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm3d(128),
+            nn.GroupNorm(32, 128),
             nn.ReLU(inplace=True),
             nn.Conv3d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm3d(256),
+            nn.GroupNorm(32, 256),
             nn.ReLU(inplace=True),
         )
 
@@ -809,10 +870,10 @@ class SimpleOccupancyModel(nn.Module):
         self.to_spatial = nn.Linear(self.latent_dim, 256 * 4 * 4 * 4)
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(128),
+            nn.GroupNorm(32, 128),
             nn.ReLU(inplace=True),
             nn.ConvTranspose3d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(64),
+            nn.GroupNorm(16, 64),
             nn.ReLU(inplace=True),
             nn.Conv3d(64, self.future_frames, kernel_size=3, padding=1),
         )
@@ -893,14 +954,20 @@ class SimpleOccupancyModel(nn.Module):
                 hidden = self.pose_gru(inp, hidden)
                 pose_delta = self.pose_out(hidden)
 
-                # Residual prediction
-                current_pose = last_pose + pose_delta
-                # Re-normalize quaternion to maintain unit length
-                current_pose = torch.cat([
-                    current_pose[..., :3],
-                    F.normalize(current_pose[..., 3:7], p=2, dim=-1),
-                    current_pose[..., 7:],
-                ], dim=-1)
+                # Position: additive residual
+                new_pos = last_pose[..., :3] + pose_delta[..., :3]
+
+                # Orientation: quaternion multiplication (proper group operation)
+                from models.occworld_6dof import quaternion_multiply
+                delta_quat = F.normalize(pose_delta[..., 3:7], p=2, dim=-1)
+                current_quat = F.normalize(last_pose[..., 3:7], p=2, dim=-1)
+                new_quat = quaternion_multiply(current_quat, delta_quat)
+                new_quat = F.normalize(new_quat, p=2, dim=-1)
+
+                # Velocity: additive residual
+                new_vel = last_pose[..., 7:] + pose_delta[..., 7:]
+
+                current_pose = torch.cat([new_pos, new_quat, new_vel], dim=-1)
                 predicted_poses.append(current_pose)
                 last_pose = current_pose
 
@@ -1032,14 +1099,16 @@ class OccupancyLoss(nn.Module):
         return total_loss
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500, amp_dtype=None):
-    """Train for one epoch with optional mixed precision."""
+def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, use_wandb=False, is_6dof=False, dataset_type='unknown', scaler=None, debug_freq=500, amp_dtype=None, grad_accum_steps=1):
+    """Train for one epoch with optional mixed precision and gradient accumulation."""
     model.train()
     total_loss = 0
     num_batches = 0
 
     for batch_idx, batch in enumerate(dataloader):
-        optimizer.zero_grad()
+        # Only zero gradients at accumulation boundaries
+        if batch_idx % grad_accum_steps == 0:
+            optimizer.zero_grad()
 
         # Validate batch has required keys
         required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
@@ -1066,6 +1135,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         if future_poses.ndim < 2 or future_poses.shape[-1] < 7:
             print(f"  [WARN] Batch {batch_idx} bad pose shape: "
                   f"future_poses={list(future_poses.shape)}, need [..., >=7], skipping")
+            continue
+
+        # Skip batches with all-zero future occupancy (would train model to predict nothing)
+        if future_occ.sum() == 0:
+            if batch_idx % debug_freq == 0:
+                print(f"  [WARN] Batch {batch_idx} has all-zero future occupancy, skipping")
             continue
 
         # Use autocast for mixed precision
@@ -1181,11 +1256,14 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             optimizer.zero_grad()
             continue
 
+        # Scale loss for gradient accumulation
+        scaled_loss = loss / grad_accum_steps
+
         # Backward pass with optional mixed precision scaling
         if scaler is not None:
-            scaler.scale(loss).backward()
+            scaler.scale(scaled_loss).backward()
         else:
-            loss.backward()
+            scaled_loss.backward()
 
         # Debug: Check if gradients exist and are non-zero
         if batch_idx % debug_freq == 0:
@@ -1206,15 +1284,16 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                     'debug/params_with_grad': num_params_with_grad,
                 }, commit=False)
 
-        # Gradient clipping and optimizer step with optional scaling
-        if scaler is not None:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
-            optimizer.step()
+        # Only step optimizer at accumulation boundaries
+        if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+                optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -1249,10 +1328,20 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
 
 def validate(model, dataloader, criterion, device, is_6dof=False):
-    """Validate model."""
+    """Validate model with task-specific metrics (IoU, precision, recall, pose errors)."""
     model.eval()
     total_loss = 0
     num_batches = 0
+
+    # Occupancy metrics accumulators
+    tp_sum = 0  # true positives
+    fp_sum = 0  # false positives
+    fn_sum = 0  # false negatives
+    tn_sum = 0  # true negatives
+
+    # Pose metrics accumulators
+    pos_errors = []
+    quat_errors = []
 
     with torch.no_grad():
         for batch in dataloader:
@@ -1267,6 +1356,8 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
 
             if is_6dof:
                 outputs = model(history_occ, history_poses, future_poses)
+                pred_occ = outputs['future_occupancy']
+                pred_poses_val = outputs.get('future_poses')
                 targets = {
                     'future_occupancy': future_occ.float(),
                     'future_poses': future_poses,
@@ -1278,21 +1369,64 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
 
                 if isinstance(output, dict):
                     pred_occ = output['future_occupancy']
-                    pred_poses = output.get('future_poses')
+                    pred_poses_val = output.get('future_poses')
                     occ_loss = criterion(pred_occ, future_occ.float())
-                    if pred_poses is not None:
-                        pose_loss = F.smooth_l1_loss(pred_poses, future_poses)
+                    if pred_poses_val is not None:
+                        pose_loss = F.smooth_l1_loss(pred_poses_val, future_poses)
                         loss = occ_loss + 0.1 * pose_loss
                     else:
                         loss = occ_loss
                 else:
                     pred_occ = output
+                    pred_poses_val = None
                     loss = criterion(pred_occ, future_occ.float())
 
             total_loss += loss.item()
             num_batches += 1
 
-    return total_loss / num_batches if num_batches > 0 else float('inf')
+            # Compute occupancy metrics (binarize predictions at 0.5 threshold)
+            pred_binary = (pred_occ > 0.5).float()
+            target_binary = (future_occ > 0).float()
+            tp_sum += (pred_binary * target_binary).sum().item()
+            fp_sum += (pred_binary * (1 - target_binary)).sum().item()
+            fn_sum += ((1 - pred_binary) * target_binary).sum().item()
+            tn_sum += ((1 - pred_binary) * (1 - target_binary)).sum().item()
+
+            # Compute pose metrics
+            if pred_poses_val is not None:
+                # Position error (Euclidean distance in meters)
+                pos_err = (pred_poses_val[..., :3] - future_poses[..., :3]).norm(dim=-1).mean().item()
+                pos_errors.append(pos_err)
+
+                # Orientation error (geodesic distance in degrees)
+                pred_q = F.normalize(pred_poses_val[..., 3:7], p=2, dim=-1)
+                target_q = F.normalize(future_poses[..., 3:7], p=2, dim=-1)
+                dot = (pred_q * target_q).sum(dim=-1).abs().clamp(max=1.0)
+                angle_rad = 2 * torch.acos(dot)
+                quat_errors.append(angle_rad.mean().item() * 180 / 3.14159)
+
+    # Compute final metrics
+    metrics = {}
+    if num_batches > 0:
+        metrics['loss'] = total_loss / num_batches
+        eps = 1e-8
+        precision = tp_sum / (tp_sum + fp_sum + eps)
+        recall = tp_sum / (tp_sum + fn_sum + eps)
+        iou = tp_sum / (tp_sum + fp_sum + fn_sum + eps)
+        f1 = 2 * precision * recall / (precision + recall + eps)
+        metrics['iou'] = iou
+        metrics['precision'] = precision
+        metrics['recall'] = recall
+        metrics['f1'] = f1
+
+        if pos_errors:
+            metrics['pos_error_m'] = sum(pos_errors) / len(pos_errors)
+        if quat_errors:
+            metrics['orient_error_deg'] = sum(quat_errors) / len(quat_errors)
+    else:
+        metrics['loss'] = float('inf')
+
+    return metrics
 
 
 def main():
@@ -1650,6 +1784,7 @@ def main():
         # Use OccWorld model
         model_cfg = getattr(config, 'model', {})
         model = OccWorldModel(**model_cfg)
+        print(f"  [MODEL] Using external OccWorld (TransVQVAE) from {os.environ.get('OCCWORLD_PATH', '~/OccWorld')}")
     elif args.model_type == '6dof':
         # Use 6DoF model with full pose prediction
         grid_size = tuple(getattr(config, 'grid_size', [200, 200, 121]))
@@ -1712,10 +1847,21 @@ def main():
         if load_from and os.path.exists(load_from):
             print(f"Loading weights from: {load_from}")
             checkpoint = torch.load(load_from, map_location=device)
-            if 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'], strict=False)
+            ckpt_sd = checkpoint.get('state_dict', checkpoint)
+            result = model.load_state_dict(ckpt_sd, strict=False)
+            # Warn about mismatched keys so partial loads don't go unnoticed
+            if result.missing_keys:
+                print(f"  [WARN] Missing keys ({len(result.missing_keys)}): "
+                      f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+            if result.unexpected_keys:
+                print(f"  [WARN] Unexpected keys ({len(result.unexpected_keys)}): "
+                      f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
+            loaded_pct = 1.0 - len(result.missing_keys) / max(len(ckpt_sd), 1)
+            if loaded_pct < 0.5:
+                print(f"  [WARN] Only {loaded_pct*100:.0f}% of model weights loaded! "
+                      f"Check checkpoint compatibility (DataParallel prefix mismatch?)")
             else:
-                model.load_state_dict(checkpoint, strict=False)
+                print(f"  Loaded {loaded_pct*100:.0f}% of model weights")
 
     # Optional: Compile model for faster training (PyTorch 2.0+)
     if args.compile:
@@ -1755,9 +1901,20 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Learning rate scheduler
+    # Learning rate scheduler with warmup
     max_epochs = args.epochs or getattr(config, 'max_epochs', 50)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
+    warmup_epochs = min(args.warmup_epochs, max_epochs // 2)  # Don't warmup more than half
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
+    if warmup_epochs > 0:
+        warmup_scheduler = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+        )
+        scheduler = optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs]
+        )
+        print(f"  LR warmup: {warmup_epochs} epochs (0.01x → 1.0x), then cosine decay")
+    else:
+        scheduler = cosine_scheduler
 
     # Loss function - depends on model type
     if args.model_type == '6dof':
@@ -1791,8 +1948,14 @@ def main():
 
     if args.eval_only:
         is_6dof = args.model_type == '6dof'
-        val_loss = validate(model, val_loader, criterion, device, is_6dof)
-        print(f"Eval-only: Val Loss = {val_loss:.6f}")
+        val_metrics = validate(model, val_loader, criterion, device, is_6dof)
+        print(f"Eval-only: Val Loss = {val_metrics['loss']:.6f}")
+        print(f"  IoU: {val_metrics.get('iou', 0):.4f}, "
+              f"Precision: {val_metrics.get('precision', 0):.4f}, "
+              f"Recall: {val_metrics.get('recall', 0):.4f}")
+        if 'pos_error_m' in val_metrics:
+            print(f"  Position Error: {val_metrics['pos_error_m']:.3f}m, "
+                  f"Orientation Error: {val_metrics.get('orient_error_deg', 0):.2f}°")
         writer.close()
         return
 
@@ -1881,6 +2044,14 @@ def main():
         if 'val_loss' in checkpoint:
             best_val_loss = checkpoint['val_loss']
 
+    # Register signal handlers for graceful shutdown
+    TrainingState.model = model
+    TrainingState.optimizer = optimizer
+    TrainingState.scheduler = scheduler
+    TrainingState.work_dir = work_dir
+    signal.signal(signal.SIGTERM, TrainingState.save_emergency_checkpoint)
+    signal.signal(signal.SIGINT, TrainingState.save_emergency_checkpoint)
+
     # Training loop
     print("=" * 60)
     print(f"Starting training on [{dataset_type.upper()}] for {max_epochs} epochs (from epoch {start_epoch})")
@@ -1889,16 +2060,24 @@ def main():
     is_6dof = args.model_type == '6dof'
 
     for epoch in range(start_epoch, max_epochs):
+        # Check for graceful shutdown
+        if TrainingState.should_stop:
+            print("  [STOP] Graceful shutdown requested, stopping training.")
+            break
         epoch_start = time.time()
+
+        # Update training state for signal handler
+        TrainingState.epoch = epoch
 
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
                                   device, epoch, writer, use_wandb, is_6dof, dataset_type,
                                   scaler=scaler, debug_freq=args.debug_freq,
-                                  amp_dtype=amp_dtype)
+                                  amp_dtype=amp_dtype, grad_accum_steps=args.grad_accum)
 
         # Validate
-        val_loss = validate(model, val_loader, criterion, device, is_6dof)
+        val_metrics = validate(model, val_loader, criterion, device, is_6dof)
+        val_loss = val_metrics['loss']
 
         # Update scheduler (skip if training failed to avoid incorrect LR decay)
         if train_loss != float('inf') and val_loss != float('inf'):
@@ -1912,20 +2091,38 @@ def main():
         print(f"Epoch {epoch}/{max_epochs} - "
               f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
               f"LR: {current_lr:.6f}, Time: {epoch_time:.1f}s")
+        print(f"  Val Metrics: IoU={val_metrics.get('iou', 0):.4f}, "
+              f"Prec={val_metrics.get('precision', 0):.4f}, "
+              f"Recall={val_metrics.get('recall', 0):.4f}, "
+              f"F1={val_metrics.get('f1', 0):.4f}")
+        if 'pos_error_m' in val_metrics:
+            print(f"  Pose: pos_err={val_metrics['pos_error_m']:.3f}m, "
+                  f"orient_err={val_metrics.get('orient_error_deg', 0):.2f}°")
 
         writer.add_scalar('Train/EpochLoss', train_loss, epoch)
         writer.add_scalar('Val/Loss', val_loss, epoch)
+        writer.add_scalar('Val/IoU', val_metrics.get('iou', 0), epoch)
+        writer.add_scalar('Val/Precision', val_metrics.get('precision', 0), epoch)
+        writer.add_scalar('Val/Recall', val_metrics.get('recall', 0), epoch)
         writer.add_scalar('Train/LR', current_lr, epoch)
 
         # Weights & Biases epoch logging
         if use_wandb:
-            wandb.log({
+            epoch_log = {
                 'epoch': epoch,
                 'epoch/train_loss': train_loss,
                 'epoch/val_loss': val_loss,
                 'epoch/lr': current_lr,
                 'epoch/time_seconds': epoch_time,
-            })
+                'epoch/val_iou': val_metrics.get('iou', 0),
+                'epoch/val_precision': val_metrics.get('precision', 0),
+                'epoch/val_recall': val_metrics.get('recall', 0),
+                'epoch/val_f1': val_metrics.get('f1', 0),
+            }
+            if 'pos_error_m' in val_metrics:
+                epoch_log['epoch/val_pos_error_m'] = val_metrics['pos_error_m']
+                epoch_log['epoch/val_orient_error_deg'] = val_metrics.get('orient_error_deg', 0)
+            wandb.log(epoch_log)
 
         # Save checkpoint
         if (epoch + 1) % args.save_freq == 0 or epoch == max_epochs - 1:
@@ -1948,6 +2145,9 @@ def main():
             }, tmp_path)
             tmp_path.replace(ckpt_path)
             print(f"  Saved checkpoint: {ckpt_path}")
+
+            # Clean up old checkpoints
+            cleanup_old_checkpoints(work_dir / 'checkpoints', args.max_keep_ckpts)
 
             # Log checkpoint as wandb artifact
             if use_wandb:

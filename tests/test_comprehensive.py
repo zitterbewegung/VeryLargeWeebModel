@@ -269,8 +269,8 @@ class TestValidateFunction(unittest.TestCase):
         dataloader = []
         criterion = MagicMock()
 
-        loss = validate(model, dataloader, criterion, 'cpu')
-        self.assertEqual(loss, float('inf'))
+        metrics = validate(model, dataloader, criterion, 'cpu')
+        self.assertEqual(metrics['loss'], float('inf'))
 
 
 # =============================================================================

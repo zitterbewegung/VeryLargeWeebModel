@@ -62,21 +62,23 @@ class OccWorld6DoFConfig:
 
 class SpatialEncoder3D(nn.Module):
     """3D convolutional encoder for occupancy grids."""
-    
+
     def __init__(self, in_channels: int, channels: Tuple[int, ...] = (64, 128, 256)):
         super().__init__()
-        
+
         layers = []
         prev_ch = in_channels
-        
+
         for ch in channels:
+            # GroupNorm: batch-size independent, works with batch_size=1 and multi-GPU
+            num_groups = min(32, ch)  # Standard: 32 groups, or fewer if ch < 32
             layers.extend([
                 nn.Conv3d(prev_ch, ch, kernel_size=3, stride=2, padding=1),
-                nn.BatchNorm3d(ch),
+                nn.GroupNorm(num_groups, ch),
                 nn.ReLU(inplace=True),
             ])
             prev_ch = ch
-        
+
         self.encoder = nn.Sequential(*layers)
         self.out_channels = channels[-1]
     
@@ -92,21 +94,22 @@ class SpatialEncoder3D(nn.Module):
 
 class SpatialDecoder3D(nn.Module):
     """3D convolutional decoder for occupancy grids."""
-    
-    def __init__(self, in_channels: int, out_channels: int, 
+
+    def __init__(self, in_channels: int, out_channels: int,
                  channels: Tuple[int, ...] = (256, 128, 64),
                  output_size: Tuple[int, int, int] = (200, 200, 121)):
         super().__init__()
-        
+
         self.output_size = output_size
-        
+
         layers = []
         prev_ch = in_channels
-        
+
         for ch in channels:
+            num_groups = min(32, ch)
             layers.extend([
                 nn.ConvTranspose3d(prev_ch, ch, kernel_size=4, stride=2, padding=1),
-                nn.BatchNorm3d(ch),
+                nn.GroupNorm(num_groups, ch),
                 nn.ReLU(inplace=True),
             ])
             prev_ch = ch
@@ -214,12 +217,35 @@ class TemporalLSTM(nn.Module):
         return output, (h_n, c_n)
 
 
+class SinusoidalPositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for temporal sequences."""
+
+    def __init__(self, d_model: int, max_len: int = 128, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add positional encoding to input. x: [B, T, D]"""
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
 class TemporalTransformer(nn.Module):
-    """Transformer-based temporal encoder."""
-    
+    """Transformer-based temporal encoder with positional encoding."""
+
     def __init__(self, d_model: int = 256, nhead: int = 8, num_layers: int = 4, dropout: float = 0.1):
         super().__init__()
-        
+
+        self.pos_encoding = SinusoidalPositionalEncoding(d_model, dropout=dropout)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -229,7 +255,7 @@ class TemporalTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.out_dim = d_model
-    
+
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
@@ -238,6 +264,7 @@ class TemporalTransformer(nn.Module):
         Returns:
             output: [B, T, D]
         """
+        x = self.pos_encoding(x)
         return self.transformer(x, mask=mask)
 
 
@@ -319,25 +346,51 @@ class PlaceRecognitionHead(nn.Module):
         return embeddings
 
 
+def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    """Hamilton product of two quaternions.
+
+    Supports both [w, x, y, z] and [x, y, z, w] conventions by detecting
+    which convention is used based on the pose format. In this codebase,
+    UAVScenes uses [w, x, y, z] (indices 3:7 of pose = [qw, qx, qy, qz]),
+    nuScenes uses [x, y, z, w] (indices 3:7 of pose = [qx, qy, qz, qw]).
+
+    We use [w, x, y, z] (Hamilton convention) as the canonical form since
+    it matches robotics convention and is used by pyquaternion/UAVScenes.
+
+    Args:
+        q1, q2: [..., 4] tensors in [w, x, y, z] order
+    Returns:
+        product: [..., 4] tensor in [w, x, y, z] order
+    """
+    w1, x1, y1, z1 = q1.unbind(-1)
+    w2, x2, y2, z2 = q2.unbind(-1)
+    return torch.stack([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ], dim=-1)
+
+
 class FuturePoseRNN(nn.Module):
     """Autoregressive RNN for future pose prediction."""
-    
+
     def __init__(self, pose_dim: int = 13, hidden_dim: int = 256, context_dim: int = 256):
         super().__init__()
-        
+
         self.pose_dim = pose_dim
         self.hidden_dim = hidden_dim
-        
+
         # Combine pose and context
         self.input_proj = nn.Linear(pose_dim + context_dim, hidden_dim)
-        
+
         # GRU cell for autoregressive prediction
         self.gru_cell = nn.GRUCell(hidden_dim, hidden_dim)
-        
-        # Output pose
+
+        # Output pose delta: position(3) + quat_delta(4) + velocity(6)
         self.pose_out = nn.Linear(hidden_dim, pose_dim)
-    
-    def forward(self, last_pose: torch.Tensor, context: torch.Tensor, 
+
+    def forward(self, last_pose: torch.Tensor, context: torch.Tensor,
                 num_future: int, hidden: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
@@ -349,10 +402,10 @@ class FuturePoseRNN(nn.Module):
             future_poses: [B, num_future, pose_dim]
         """
         B = last_pose.shape[0]
-        
+
         if hidden is None:
             hidden = torch.zeros(B, self.hidden_dim, device=last_pose.device)
-        
+
         future_poses = []
         current_pose = last_pose
 
@@ -364,23 +417,29 @@ class FuturePoseRNN(nn.Module):
             inp = torch.cat([current_pose, context], dim=-1)
             inp = self.input_proj(inp)
             inp = F.relu(inp)
-            
+
             # GRU step
             hidden = self.gru_cell(inp, hidden)
-            
-            # Predict pose delta and add to current
+
+            # Predict pose delta
             pose_delta = self.pose_out(hidden)
-            current_pose = current_pose + pose_delta  # Residual prediction
 
-            # Re-normalize quaternion to maintain unit length
-            current_pose = torch.cat([
-                current_pose[..., :3],
-                F.normalize(current_pose[..., 3:7], p=2, dim=-1),
-                current_pose[..., 7:],
-            ], dim=-1)
+            # Position: additive residual
+            new_pos = current_pose[..., :3] + pose_delta[..., :3]
 
+            # Orientation: quaternion multiplication (proper group operation)
+            # Treat delta as a small rotation quaternion, normalize to unit length
+            delta_quat = F.normalize(pose_delta[..., 3:7], p=2, dim=-1)
+            current_quat = F.normalize(current_pose[..., 3:7], p=2, dim=-1)
+            new_quat = quaternion_multiply(current_quat, delta_quat)
+            new_quat = F.normalize(new_quat, p=2, dim=-1)
+
+            # Velocity: additive residual
+            new_vel = current_pose[..., 7:] + pose_delta[..., 7:]
+
+            current_pose = torch.cat([new_pos, new_quat, new_vel], dim=-1)
             future_poses.append(current_pose)
-        
+
         return torch.stack(future_poses, dim=1)
 
 
@@ -468,7 +527,15 @@ class OccWorld6DoF(nn.Module):
             hidden_dim=config.latent_dim,
             context_dim=config.latent_dim,
         )
-        
+
+        # Pose-conditioned occupancy: FiLM modulation
+        # Encodes predicted future poses into scale/shift for spatial features
+        self.pose_film = nn.Sequential(
+            nn.Linear(config.pose_dim * config.future_frames, config.latent_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(config.latent_dim, config.latent_dim * 2),  # gamma + beta
+        )
+
         # Optional heads
         if config.enable_uncertainty:
             self.uncertainty_head = UncertaintyHead(
@@ -504,7 +571,7 @@ class OccWorld6DoF(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm3d):
+            elif isinstance(m, (nn.BatchNorm3d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
@@ -574,23 +641,30 @@ class OccWorld6DoF(nn.Module):
         
         # Combine contexts
         combined_context = context + temporal_context  # [B, latent_dim]
-        
-        # Decode future occupancy
-        # Project to spatial dimensions
-        spatial_for_decode = self.to_spatial(combined_context)  # [B, latent_dim * X' * Y' * Z']
-        spatial_for_decode = spatial_for_decode.view(
-            B, self.config.latent_dim, 
-            self.encoded_size[0], self.encoded_size[1], self.encoded_size[2]
-        )
-        
-        future_occ_logits = self.spatial_decoder(spatial_for_decode)  # [B, T_f, X, Y, Z]
-        future_occupancy = torch.sigmoid(future_occ_logits)
-        
-        # Predict future poses autoregressively
+
+        # Predict future poses FIRST (needed for occupancy conditioning)
         last_pose = history_poses[:, -1, :]  # [B, 13]
         predicted_future_poses = self.future_pose_rnn(
             last_pose, combined_context, self.config.future_frames
         )  # [B, T_f, 13]
+
+        # Decode future occupancy, conditioned on predicted poses via FiLM
+        # Project to spatial dimensions
+        spatial_for_decode = self.to_spatial(combined_context)  # [B, latent_dim * X' * Y' * Z']
+        spatial_for_decode = spatial_for_decode.view(
+            B, self.config.latent_dim,
+            self.encoded_size[0], self.encoded_size[1], self.encoded_size[2]
+        )
+
+        # FiLM: modulate spatial features with predicted pose information
+        pose_flat = predicted_future_poses.reshape(B, -1)  # [B, T_f * pose_dim]
+        film_params = self.pose_film(pose_flat)  # [B, latent_dim * 2]
+        gamma = film_params[:, :self.config.latent_dim].view(B, self.config.latent_dim, 1, 1, 1)
+        beta = film_params[:, self.config.latent_dim:].view(B, self.config.latent_dim, 1, 1, 1)
+        spatial_for_decode = spatial_for_decode * (1 + gamma) + beta
+
+        future_occ_logits = self.spatial_decoder(spatial_for_decode)  # [B, T_f, X, Y, Z]
+        future_occupancy = torch.sigmoid(future_occ_logits)
         
         # Build output dict
         outputs = {
@@ -783,28 +857,28 @@ class OccWorld6DoFLoss(nn.Module):
         if 'uncertainty' in outputs and self.uncertainty_weight > 0:
             uncertainty = outputs['uncertainty']
 
-            # === ANTI-COLLAPSE: Clamp uncertainty to bounds ===
-            uncertainty_clamped = uncertainty.clamp(
-                min=self.uncertainty_min,
-                max=self.uncertainty_max
-            )
+            # === ANTI-COLLAPSE: Soft sigmoid bounds for uncertainty ===
+            # Maps unbounded network output to (uncertainty_min, uncertainty_max) with
+            # smooth gradients everywhere (no gradient death from hard clamping)
+            unc_range = self.uncertainty_max - self.uncertainty_min
+            uncertainty_bounded = self.uncertainty_min + unc_range * torch.sigmoid(uncertainty)
 
             # Negative log-likelihood with learned uncertainty
             # L = 0.5 * (error^2 / sigma^2 + log(sigma^2))
             pos_error = (pred_pos - target_pos) ** 2
-            pos_sigma = uncertainty_clamped[..., :3]
+            pos_sigma = uncertainty_bounded[..., :3]
             eps = 1e-8
             pos_nll = 0.5 * (pos_error / (pos_sigma + eps) + torch.log(pos_sigma.clamp(min=eps)))
 
-            # Regularize uncertainty to stay in reasonable range (not too large or small)
-            uncertainty_reg = ((uncertainty - 1.0) ** 2).mean() * 0.01
+            # Regularize uncertainty toward 1.0 (moderate confidence)
+            uncertainty_reg = ((uncertainty_bounded - 1.0) ** 2).mean() * 0.1
 
             losses['uncertainty'] = (pos_nll.mean() + uncertainty_reg) * self.uncertainty_weight
 
             # Track debug metrics
-            self.debug_metrics['uncertainty_mean'] = uncertainty.mean().item()
-            self.debug_metrics['uncertainty_min'] = uncertainty.min().item()
-            self.debug_metrics['uncertainty_max'] = uncertainty.max().item()
+            self.debug_metrics['uncertainty_mean'] = uncertainty_bounded.mean().item()
+            self.debug_metrics['uncertainty_min'] = uncertainty_bounded.min().item()
+            self.debug_metrics['uncertainty_max'] = uncertainty_bounded.max().item()
 
         # Relocalization loss (if available)
         if 'global_pose' in outputs and 'global_pose' in targets and self.reloc_weight > 0:
