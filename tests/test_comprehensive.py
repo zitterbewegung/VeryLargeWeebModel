@@ -614,6 +614,54 @@ class TestUAVScenesVelocity(unittest.TestCase):
         np.testing.assert_array_equal(result, pose_curr)
 
 
+class TestUAVScenesPoseNormalization(unittest.TestCase):
+    """Test sequence-local pose normalization in UAVScenes __getitem__."""
+
+    def test_pose_translation_normalized_to_first_history_frame(self):
+        """All pose positions should be translated by first history pose."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2,
+            future_frames=1,
+            ego_frame=False,
+            fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=True,
+        )
+        ds.transform = None
+        ds.samples = [{
+            'scene': 'AMtown',
+            'scene_folder': 'interval5_AMtown01',
+            'history_frames': [
+                {'idx': 0, 'path': Path('/tmp/f0.txt'), 'filename': 'f0'},
+                {'idx': 1, 'path': Path('/tmp/f1.txt'), 'filename': 'f1'},
+            ],
+            'future_frames': [
+                {'idx': 2, 'path': Path('/tmp/f2.txt'), 'filename': 'f2'},
+            ],
+        }]
+
+        poses = {
+            0: np.array([1000.0, 2000.0, 3000.0, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+            1: np.array([1001.5, 1999.0, 3002.0, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+            2: np.array([1003.0, 1998.5, 3005.5, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+        }
+
+        ds._load_pose = lambda scene_folder, frame_idx, frame_filename='': poses[frame_idx].copy()
+        ds._load_lidar = lambda lidar_path: np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        ds._align_points = lambda points, pose, sequence_origin: (points, sequence_origin, False)
+        ds._points_to_occupancy = lambda points: np.zeros((2, 2, 2), dtype=np.uint8)
+
+        sample = ds[0]
+        history_pos = sample['history_poses'][:, :3].numpy()
+        future_pos = sample['future_poses'][:, :3].numpy()
+
+        np.testing.assert_allclose(history_pos[0], np.array([0.0, 0.0, 0.0], dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(history_pos[1], np.array([1.5, -1.0, 2.0], dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(future_pos[0], np.array([3.0, -1.5, 5.5], dtype=np.float32), atol=1e-6)
+
+
 # =============================================================================
 # Dataset Loading Tests
 # =============================================================================

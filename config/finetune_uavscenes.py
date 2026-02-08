@@ -72,6 +72,7 @@ dataset_config = dict(
     ego_frame=True,
     fallback_to_lidar_center=True,
     min_in_range_ratio=0.01,
+    normalize_pose_to_first_frame=True,
     pose_dim=13,
     val_ratio=0.1,
     test_ratio=0.1,

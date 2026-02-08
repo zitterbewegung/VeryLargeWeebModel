@@ -82,6 +82,10 @@ class UAVScenesConfig:
 
     # Pose format: 13D = position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
     pose_dim: int = 13
+    # Normalize pose translation to the first history frame in each sample.
+    # This keeps position scales stable across scenes and avoids very large
+    # absolute coordinates dominating regression/NLL losses.
+    normalize_pose_to_first_frame: bool = True
 
     # LiDAR settings
     max_points: int = 100000
@@ -866,6 +870,14 @@ class UAVScenesDataset(Dataset):
             future_occ.append(occ)
             future_poses.append(pose)
             prev_pose = pose.copy()
+
+        # Keep all pose translations sequence-local to stabilize optimization.
+        if self.config.normalize_pose_to_first_frame and history_poses:
+            origin = history_poses[0][:3].copy()
+            for pose in history_poses:
+                pose[:3] = pose[:3] - origin
+            for pose in future_poses:
+                pose[:3] = pose[:3] - origin
 
         result = {
             'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
