@@ -365,20 +365,41 @@ class UAVScenesDataset(Dataset):
                 # Parse header
                 num_points = 0
                 data_format = 'ascii'
+                num_fields = 4  # Default: XYZI
                 for h in header:
-                    if h.startswith('POINTS'):
-                        num_points = int(h.split()[1])
-                    if h.startswith('DATA'):
-                        data_format = h.split()[1]
+                    parts = h.split()
+                    if h.startswith('POINTS') and len(parts) >= 2:
+                        num_points = int(parts[1])
+                    if h.startswith('DATA') and len(parts) >= 2:
+                        data_format = parts[1]
+                    if h.startswith('FIELDS'):
+                        num_fields = len(parts) - 1  # e.g. "FIELDS x y z intensity"
 
                 if data_format == 'binary':
                     # Binary PCD
                     data = np.frombuffer(f.read(), dtype=np.float32)
-                    points = data.reshape(-1, 4)[:, :3]  # Assume XYZI
+                    cols = max(num_fields, 3)
+                    if len(data) % cols != 0:
+                        # Try common column counts
+                        for try_cols in [4, 3, 5, 6]:
+                            if len(data) % try_cols == 0:
+                                cols = try_cols
+                                break
+                    points = data.reshape(-1, cols)[:, :3]
                 else:
                     # ASCII PCD
                     lines = f.read().decode('utf-8', errors='ignore').strip().split('\n')
-                    points = np.array([[float(x) for x in line.split()[:3]] for line in lines if line.strip()])
+                    parsed = []
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            coords = [float(x) for x in line.split()[:3]]
+                            if len(coords) == 3:
+                                parsed.append(coords)
+                        except (ValueError, IndexError):
+                            continue
+                    points = np.array(parsed) if parsed else np.zeros((0, 3))
 
                 return points.astype(np.float32)
 

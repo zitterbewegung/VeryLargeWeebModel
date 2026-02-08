@@ -355,7 +355,10 @@ class FuturePoseRNN(nn.Module):
         
         future_poses = []
         current_pose = last_pose
-        
+
+        if num_future == 0:
+            return torch.empty(B, 0, self.pose_dim, device=last_pose.device, dtype=last_pose.dtype)
+
         for _ in range(num_future):
             # Combine pose and context
             inp = torch.cat([current_pose, context], dim=-1)
