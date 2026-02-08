@@ -762,8 +762,8 @@ class OccWorld6DoFLoss(nn.Module):
 
         # === ANTI-COLLAPSE: Pose variance regularization ===
         # Penalize if predictions have very low variance (constant output collapse)
-        pred_pos_std = pred_pos.std()
-        pred_vel_std = pred_vel.std()
+        pred_pos_std = pred_pos.std(unbiased=False)
+        pred_vel_std = pred_vel.std(unbiased=False)
 
         # Differentiable penalty when std drops below threshold
         min_std = torch.tensor(self.min_pose_std, device=pred_poses.device)
@@ -849,8 +849,8 @@ class OccWorld6DoFLoss(nn.Module):
         ordering in batch), and the negative is the hardest non-adjacent sample.
         """
         B, D = embeddings.shape
-        if B < 3:
-            # Need at least 3 samples for triplet
+        if B < 4:
+            # Need at least 4 samples for meaningful triplets (B=3 only yields 1/3)
             return torch.tensor(0.0, device=embeddings.device)
 
         # Compute pairwise distances

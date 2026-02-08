@@ -1041,9 +1041,6 @@ def cmd_pack(args):
             return 1
 
         if not dry_run:
-            # Ensure parent directory exists
-            os.makedirs(os.path.dirname(archive_path) or ".", exist_ok=True)
-
             # Extract to data_dir (archive contains dataset_name/ as top dir)
             extract_dir = os.path.dirname(dataset_path) or data_dir
             if not _decompress_archive(archive_path, extract_dir, dry_run):
