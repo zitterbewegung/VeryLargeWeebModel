@@ -94,7 +94,7 @@ class UAVScenesConfig:
         """Calculate grid size from range and voxel size."""
         pc_range = np.array(self.point_cloud_range)
         voxel_sz = np.array(self.voxel_size)
-        return tuple(np.round((pc_range[3:] - pc_range[:3]) / voxel_sz).astype(int))
+        return tuple(((pc_range[3:] - pc_range[:3]) / voxel_sz).astype(int))
 
 
 class UAVScenesDataset(Dataset):
@@ -398,13 +398,7 @@ class UAVScenesDataset(Dataset):
         if scene_folder in self._sampleinfos_cache:
             sampleinfos = self._sampleinfos_cache[scene_folder]
 
-            # Try to find by index first
-            if frame_idx < len(sampleinfos):
-                sample = sampleinfos[frame_idx]
-                if 'T4x4' in sample:
-                    return self._parse_t4x4_matrix(sample['T4x4'])
-
-            # Try to find by matching filename
+            # Try filename-based matching first (most reliable)
             if frame_filename:
                 # Extract image timestamp from LiDAR filename
                 # Format: image{ts}_lidar{ts}.txt -> match with OriginalImageName
@@ -414,6 +408,12 @@ class UAVScenesDataset(Dataset):
                         if img_ts in sample.get('OriginalImageName', ''):
                             if 'T4x4' in sample:
                                 return self._parse_t4x4_matrix(sample['T4x4'])
+
+            # Fall back to index-based lookup
+            if frame_idx < len(sampleinfos):
+                sample = sampleinfos[frame_idx]
+                if 'T4x4' in sample:
+                    return self._parse_t4x4_matrix(sample['T4x4'])
 
         # Option 2: Try legacy formats
         scene_path = self.data_root / scene_folder
@@ -500,10 +500,12 @@ class UAVScenesDataset(Dataset):
             y = (R[1, 2] + R[2, 1]) / s
             z = 0.25 * s
 
-        # Normalize quaternion
+        # Normalize quaternion (return identity if degenerate)
         quat = np.array([w, x, y, z], dtype=np.float32)
-        quat = quat / (np.linalg.norm(quat) + 1e-8)
-        return quat
+        norm = np.linalg.norm(quat)
+        if norm < 1e-8:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        return quat / norm
 
     def _parse_pose_json(self, pose_data: Dict) -> np.ndarray:
         """Parse pose from JSON format."""

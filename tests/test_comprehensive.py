@@ -251,8 +251,8 @@ class TestTrainEpoch(unittest.TestCase):
         writer = MagicMock()
 
         loss = train_epoch(model, dataloader, optimizer, criterion, 'cpu', 0, writer)
-        # Should return 0 because the only batch had NaN
-        self.assertEqual(loss, 0.0)
+        # Should return inf because all batches were skipped (NaN)
+        self.assertEqual(loss, float('inf'))
         # Verify optimizer.step() was NOT called (NaN should skip gradient update)
         optimizer.step.assert_not_called()
 
@@ -270,7 +270,7 @@ class TestValidateFunction(unittest.TestCase):
         criterion = MagicMock()
 
         loss = validate(model, dataloader, criterion, 'cpu')
-        self.assertEqual(loss, 0)
+        self.assertEqual(loss, float('inf'))
 
 
 # =============================================================================

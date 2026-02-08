@@ -368,7 +368,14 @@ class FuturePoseRNN(nn.Module):
             # Predict pose delta and add to current
             pose_delta = self.pose_out(hidden)
             current_pose = current_pose + pose_delta  # Residual prediction
-            
+
+            # Re-normalize quaternion to maintain unit length
+            current_pose = torch.cat([
+                current_pose[..., :3],
+                F.normalize(current_pose[..., 3:7], p=2, dim=-1),
+                current_pose[..., 7:],
+            ], dim=-1)
+
             future_poses.append(current_pose)
         
         return torch.stack(future_poses, dim=1)
@@ -752,12 +759,10 @@ class OccWorld6DoFLoss(nn.Module):
         pred_pos_std = pred_pos.std()
         pred_vel_std = pred_vel.std()
 
-        # If std drops below threshold, add penalty
-        variance_penalty = torch.tensor(0.0, device=pred_poses.device)
-        if pred_pos_std < self.min_pose_std:
-            variance_penalty = variance_penalty + (self.min_pose_std - pred_pos_std) ** 2
-        if pred_vel_std < self.min_pose_std:
-            variance_penalty = variance_penalty + (self.min_pose_std - pred_vel_std) ** 2
+        # Differentiable penalty when std drops below threshold
+        min_std = torch.tensor(self.min_pose_std, device=pred_poses.device)
+        variance_penalty = F.relu(min_std - pred_pos_std) ** 2 + \
+                           F.relu(min_std - pred_vel_std) ** 2
 
         pose_loss = pose_loss + self.pose_variance_weight * variance_penalty
         losses['pose'] = pose_loss * self.pose_weight
@@ -781,7 +786,8 @@ class OccWorld6DoFLoss(nn.Module):
             # L = 0.5 * (error^2 / sigma^2 + log(sigma^2))
             pos_error = (pred_pos - target_pos) ** 2
             pos_sigma = uncertainty_clamped[..., :3]
-            pos_nll = 0.5 * (pos_error / pos_sigma + torch.log(pos_sigma))
+            eps = 1e-8
+            pos_nll = 0.5 * (pos_error / (pos_sigma + eps) + torch.log(pos_sigma.clamp(min=eps)))
 
             # Regularize uncertainty to stay in reasonable range (not too large or small)
             uncertainty_reg = ((uncertainty - 1.0) ** 2).mean() * 0.01

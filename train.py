@@ -1236,8 +1236,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 'train/global_step': global_step,
             })
 
-    avg_loss = total_loss / max(num_batches, 1)
-    return avg_loss
+    if num_batches == 0:
+        print(f"  [ERROR] All batches were skipped! Check data loading.")
+        return float('inf')
+    return total_loss / num_batches
 
 
 def validate(model, dataloader, criterion, device, is_6dof=False):
@@ -1284,7 +1286,7 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
             total_loss += loss.item()
             num_batches += 1
 
-    return total_loss / num_batches if num_batches > 0 else 0
+    return total_loss / num_batches if num_batches > 0 else float('inf')
 
 
 def main():

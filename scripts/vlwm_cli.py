@@ -363,6 +363,9 @@ def cmd_train(args: argparse.Namespace) -> int:
     if args.resume:
         cmd.extend(["--resume-from", args.resume])
 
+    if getattr(args, 'interval', None):
+        cmd.extend(["--interval", str(args.interval)])
+
     log_step("Starting training")
     log_info(f"Command: {' '.join(cmd)}")
 
@@ -722,14 +725,8 @@ def _compress_dataset(source_dir, archive_path, compression_level, dry_run):
         file_count = sum(1 for _ in Path(source_dir).rglob("*") if _.is_file())
         log_info(f"Total files: {file_count}")
 
-        # Open with xz compression via preset
-        # tarfile w:xz uses lzma internally; we set preset via the lzma module
-        import lzma
-        xz_filters = [{"id": lzma.FILTER_LZMA2, "preset": compression_level}]
-
         added = 0
-        with tarfile.open(archive_path, "w:xz",
-                          preset=compression_level) as tar:
+        with tarfile.open(archive_path, "w:xz") as tar:
             base_name = os.path.basename(source_dir)
             for root, dirs, files in os.walk(source_dir):
                 for fname in files:
@@ -796,7 +793,7 @@ def _decompress_archive(archive_path, target_dir, dry_run):
                     continue
                 # Skip path traversal
                 normalized = os.path.normpath(member.name)
-                if normalized.startswith("..") or "/../" in member.name:
+                if normalized.startswith("..") or "/.." in normalized:
                     skipped += 1
                     continue
                 safe_members.append(member)
@@ -1245,6 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--precision", choices=["fp16", "bf16"], help="Override precision")
     p_train.add_argument("--gpus", type=int, help="Number of GPUs")
     p_train.add_argument("--resume", help="Resume from checkpoint path")
+    p_train.add_argument("--interval", type=int, help="UAVScenes interval (5=keyframes, 1=full)")
     p_train.add_argument("--dry-run", action="store_true", help="Show config without training")
 
     # --- deploy ---
