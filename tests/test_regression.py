@@ -989,6 +989,18 @@ class TestOccworldSixdofConflict(unittest.TestCase):
         # The conflict guard should produce an error and exit
         self.assertIn('incompatible', source.lower())
 
+    def test_conflict_check_happens_after_autodetect(self):
+        """Conflict check should run after SIXDOF auto-switch logic."""
+        import inspect
+        from train import main
+
+        source = inspect.getsource(main)
+        auto_idx = source.find('SIXDOF_DATASETS')
+        conflict_idx = source.find("if args.use_occworld and args.model_type == '6dof':")
+        self.assertGreaterEqual(auto_idx, 0)
+        self.assertGreaterEqual(conflict_idx, 0)
+        self.assertGreater(conflict_idx, auto_idx)
+
     def test_occworld_flag_without_6dof_is_fine(self):
         """--use-occworld with simple model shouldn't conflict."""
         # This tests that the conflict check is specific to 6dof

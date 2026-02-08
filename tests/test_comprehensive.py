@@ -1303,6 +1303,31 @@ class TestIntervalFlag(unittest.TestCase):
         self.assertEqual(result, 1)
 
 
+class TestTransformerFlag(unittest.TestCase):
+    """Test CLI parsing behavior for transformer selection."""
+
+    def test_use_transformer_default_none(self):
+        """When not specified, transformer mode should defer to config."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py']):
+            args = parse_args()
+        self.assertIsNone(args.use_transformer)
+
+    def test_use_transformer_true(self):
+        """--use-transformer should force transformer mode."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--use-transformer']):
+            args = parse_args()
+        self.assertTrue(args.use_transformer)
+
+    def test_use_transformer_false(self):
+        """--no-use-transformer should force LSTM mode."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--no-use-transformer']):
+            args = parse_args()
+        self.assertFalse(args.use_transformer)
+
+
 # =============================================================================
 # Fix 1: UAVScenes Fallback Warning Tests
 # =============================================================================

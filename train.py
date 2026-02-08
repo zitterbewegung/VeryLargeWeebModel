@@ -686,8 +686,12 @@ def parse_args():
     parser.add_argument('--model-type', type=str, default='simple',
                         choices=['simple', '6dof'],
                         help='Model type: simple (occupancy only) or 6dof (full 6DoF prediction)')
-    parser.add_argument('--use-transformer', action='store_true',
-                        help='Use Transformer instead of LSTM for temporal modeling (6dof only)')
+    transformer_group = parser.add_mutually_exclusive_group()
+    transformer_group.add_argument('--use-transformer', dest='use_transformer', action='store_true',
+                                   help='Use Transformer instead of LSTM for temporal modeling (6dof only)')
+    transformer_group.add_argument('--no-use-transformer', dest='use_transformer', action='store_false',
+                                   help='Force LSTM temporal modeling (overrides config use_transformer)')
+    parser.set_defaults(use_transformer=None)
 
     # Performance optimizations
     parser.add_argument('--amp', action='store_true',
@@ -1560,13 +1564,6 @@ def main():
         print("Then set OCCWORLD_PATH environment variable, or install to ~/OccWorld (default)")
         sys.exit(1)
 
-    if args.use_occworld and args.model_type == '6dof':
-        print("ERROR: --use-occworld and --model-type 6dof are incompatible.")
-        print("  External OccWorld produces occupancy-only outputs,")
-        print("  but 6DoF mode requires pose predictions (future_poses, global_pose).")
-        print("  Use --model-type simple with --use-occworld, or remove --use-occworld for 6dof.")
-        sys.exit(1)
-
     # Create dataset
     print("Creating dataset...")
     data_root = getattr(config, 'data_root', 'data/tokyo_gazebo')
@@ -1592,6 +1589,17 @@ def main():
         print(f"\n[AUTO-DETECT] Dataset '{dataset_type}' requires 6DoF model.")
         print(f"              Switching from --model-type '{args.model_type}' to '6dof'")
         args.model_type = '6dof'
+
+    # Re-validate incompatible flag combinations AFTER auto-detection mutates model_type.
+    if args.use_occworld and args.model_type == '6dof':
+        print("ERROR: --use-occworld and --model-type 6dof are incompatible.")
+        print("  External OccWorld produces occupancy-only outputs,")
+        print("  but 6DoF mode requires pose predictions (future_poses, global_pose).")
+        if dataset_type in SIXDOF_DATASETS:
+            print(f"  Dataset '{dataset_type}' enforces 6DoF mode, so remove --use-occworld.")
+        else:
+            print("  Use --model-type simple with --use-occworld, or remove --use-occworld for 6dof.")
+        sys.exit(1)
 
     # Validate data before creating dataset
     # This will auto-download from S3 if data is missing (unless --no-auto-download)
@@ -1893,6 +1901,7 @@ def main():
 
     # Create model
     print(f"Creating model (type: {args.model_type})...")
+    use_transformer_effective = False
     if use_occworld and args.use_occworld:
         # Use OccWorld model
         model_cfg = getattr(config, 'model', {})
@@ -1902,11 +1911,16 @@ def main():
         # Use 6DoF model — read from config if available, else use defaults
         grid_size = tuple(getattr(config, 'grid_size', [200, 200, 121]))
         model_cfg = getattr(config, 'model', {})
+        use_transformer_effective = (
+            args.use_transformer
+            if args.use_transformer is not None
+            else model_cfg.get('use_transformer', False)
+        )
         model_config = OccWorld6DoFConfig(
             grid_size=grid_size,
             history_frames=getattr(config, 'history_frames', 4),
             future_frames=getattr(config, 'future_frames', 6),
-            use_transformer=args.use_transformer,
+            use_transformer=use_transformer_effective,
             pose_dim=model_cfg.get('pose_dim', 13),
             encoder_channels=model_cfg.get('encoder_channels', (64, 128, 256)),
             num_transformer_layers=model_cfg.get('num_transformer_layers', 4),
@@ -1920,7 +1934,7 @@ def main():
             enable_place_recognition=model_cfg.get('enable_place_recognition', True),
         )
         model = OccWorld6DoF(model_config)
-        print(f"  6DoF Config: grid={grid_size}, transformer={args.use_transformer}")
+        print(f"  6DoF Config: grid={grid_size}, transformer={use_transformer_effective}")
     else:
         # Use simple standalone model (occupancy only)
         model = SimpleOccupancyModel(config)
@@ -2141,7 +2155,7 @@ def main():
                 'TransVQVAE' if (use_occworld and args.use_occworld) else 'SimpleOccupancyModel'
             ),
             'num_params': num_params,
-            'use_transformer': args.use_transformer if args.model_type == '6dof' else False,
+            'use_transformer': use_transformer_effective if args.model_type == '6dof' else False,
             # Training
             'lr': lr,
             'weight_decay': weight_decay,
