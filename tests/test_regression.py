@@ -938,6 +938,8 @@ class TestConfigKnobPassthrough(unittest.TestCase):
             'uncertainty_weight': 0.05,
             'reloc_weight': 0.3,
             'place_weight': 0.2,
+            'uncertainty_min': 0.05,
+            'uncertainty_max': 8.0,
         }
 
         criterion = OccWorld6DoFLoss(
@@ -946,6 +948,8 @@ class TestConfigKnobPassthrough(unittest.TestCase):
             uncertainty_weight=loss_cfg.get('uncertainty_weight', 0.1),
             reloc_weight=loss_cfg.get('reloc_weight', 0.2),
             place_weight=loss_cfg.get('place_weight', 0.1),
+            uncertainty_min=loss_cfg.get('uncertainty_min', 0.001),
+            uncertainty_max=loss_cfg.get('uncertainty_max', 10.0),
         )
 
         self.assertEqual(criterion.occ_weight, 2.0)
@@ -953,6 +957,8 @@ class TestConfigKnobPassthrough(unittest.TestCase):
         self.assertEqual(criterion.uncertainty_weight, 0.05)
         self.assertEqual(criterion.reloc_weight, 0.3)
         self.assertEqual(criterion.place_weight, 0.2)
+        self.assertEqual(criterion.uncertainty_min, 0.05)
+        self.assertEqual(criterion.uncertainty_max, 8.0)
 
     def test_model_config_from_dict(self):
         """OccWorld6DoFConfig should accept config-driven model params."""

@@ -135,6 +135,8 @@ loss = dict(
 
     # Uncertainty estimation
     uncertainty_weight=0.1,
+    uncertainty_min=0.05,  # Prevent tiny sigma spikes in NLL
+    uncertainty_max=10.0,
 
     # Relocalization
     reloc_weight=0.2,

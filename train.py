@@ -1324,6 +1324,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             if is_6dof and debug_metrics:
                 print(f"    6DoF: pose_std={debug_metrics.get('pose_pos_std', 0):.4f}, "
                       f"unc_mean={debug_metrics.get('uncertainty_mean', 0):.4f}, "
+                      f"unc_min={debug_metrics.get('uncertainty_min', 0):.4f}, "
+                      f"unc_max={debug_metrics.get('uncertainty_max', 0):.4f}, "
                       f"emb_std={debug_metrics.get('embedding_std', 0):.4f}")
 
             # Log prediction stats to wandb
@@ -2227,6 +2229,8 @@ def main():
             mean_weight=loss_cfg.get('mean_weight', 10.0),
             pose_variance_weight=loss_cfg.get('pose_variance_weight', 1.0),
             min_pose_std=loss_cfg.get('min_pose_std', 0.01),
+            uncertainty_min=loss_cfg.get('uncertainty_min', 0.001),
+            uncertainty_max=loss_cfg.get('uncertainty_max', 10.0),
         )
         print("  Using OccWorld6DoFLoss with anti-collapse safeguards")
     else:
