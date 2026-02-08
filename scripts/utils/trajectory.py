@@ -95,9 +95,15 @@ class TrajectoryGenerator:
         total_distance = distances[-1]
 
         if total_distance < 1e-9:
-            # All keypoints coincide — return static trajectory
-            static_pos = np.tile(keypoints[0], (num_frames, 1))
-            return static_pos
+            # All keypoints coincide — return static waypoints
+            x, y = float(keypoints[0][0]), float(keypoints[0][1])
+            if agent_type == 'drone':
+                z = float(np.mean(cfg.altitude_range))
+            else:
+                z = float(cfg.ground_height)
+            for _ in range(num_frames):
+                waypoints.append(self._create_waypoint(x, y, z, 0.0, cfg.speed, agent_type))
+            return waypoints
 
         # Interpolate positions
         t_keypoints = distances / total_distance
@@ -298,6 +304,17 @@ class TrajectoryGenerator:
             [w['position']['x'], w['position']['y'], w['position']['z']]
             for w in waypoints
         ])
+
+        if len(waypoints) < 2:
+            return {
+                'num_frames': len(waypoints),
+                'total_distance': 0.0,
+                'mean_distance': 0.0,
+                'min_distance': 0.0,
+                'max_distance': 0.0,
+                'static_frames': 0,
+                'valid': len(waypoints) == 1,
+            }
 
         distances = np.linalg.norm(np.diff(positions, axis=0), axis=1)
 

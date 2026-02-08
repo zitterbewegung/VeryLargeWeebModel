@@ -381,8 +381,9 @@ class NuScenes6DoFDataset(Dataset):
                 q_diff = q_curr * q_prev.inverse
                 # Convert to axis-angle
                 angle = 2 * np.arccos(np.clip(q_diff.w, -1, 1))
-                if angle > 0.001:
-                    axis = np.array([q_diff.x, q_diff.y, q_diff.z]) / np.sin(angle / 2)
+                sin_half = np.sin(angle / 2)
+                if sin_half > 1e-6:
+                    axis = np.array([q_diff.x, q_diff.y, q_diff.z]) / sin_half
                     angular_vel = axis * angle / dt
                 else:
                     angular_vel = np.zeros(3)

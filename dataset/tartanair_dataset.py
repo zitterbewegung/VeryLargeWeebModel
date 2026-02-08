@@ -294,8 +294,9 @@ class TartanAirDataset(Dataset):
             return np.zeros(grid_size, dtype=np.float32)
 
         # Voxelize
-        voxel_coords = ((points - pc_range[:3]) / voxel_size).astype(np.int32)
-        voxel_coords = np.clip(voxel_coords, 0, np.array(grid_size) - 1)
+        voxel_coords_float = (points - pc_range[:3]) / voxel_size
+        voxel_coords_float = np.clip(voxel_coords_float, 0, np.array(grid_size) - 1)
+        voxel_coords = voxel_coords_float.astype(np.int32)
 
         # Create occupancy grid
         occupancy = np.zeros(grid_size, dtype=np.float32)

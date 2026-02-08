@@ -895,6 +895,12 @@ class SimpleOccupancyModel(nn.Module):
 
                 # Residual prediction
                 current_pose = last_pose + pose_delta
+                # Re-normalize quaternion to maintain unit length
+                current_pose = torch.cat([
+                    current_pose[..., :3],
+                    F.normalize(current_pose[..., 3:7], p=2, dim=-1),
+                    current_pose[..., 7:],
+                ], dim=-1)
                 predicted_poses.append(current_pose)
                 last_pose = current_pose
 
@@ -1895,10 +1901,10 @@ def main():
         val_loss = validate(model, val_loader, criterion, device, is_6dof)
 
         # Update scheduler (skip if training failed to avoid incorrect LR decay)
-        if train_loss != float('inf'):
+        if train_loss != float('inf') and val_loss != float('inf'):
             scheduler.step()
         else:
-            print(f"  [WARN] Skipping scheduler step (training failed this epoch)")
+            print(f"  [WARN] Skipping scheduler step (training or validation failed this epoch)")
 
         # Log
         epoch_time = time.time() - epoch_start
@@ -1930,6 +1936,8 @@ def main():
             for k, v in raw_sd.items():
                 k = k.replace('_orig_mod.', '').replace('module.', '', 1)
                 clean_sd[k] = v
+            # Atomic save: write to tmp then rename to avoid corruption on crash
+            tmp_path = ckpt_path.with_suffix('.pth.tmp')
             torch.save({
                 'epoch': epoch + 1,
                 'state_dict': clean_sd,
@@ -1937,7 +1945,8 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
-            }, ckpt_path)
+            }, tmp_path)
+            tmp_path.replace(ckpt_path)
             print(f"  Saved checkpoint: {ckpt_path}")
 
             # Log checkpoint as wandb artifact
@@ -1960,11 +1969,14 @@ def main():
             for k, v in raw_sd.items():
                 k = k.replace('_orig_mod.', '').replace('module.', '', 1)
                 clean_sd[k] = v
+            # Atomic save: write to tmp then rename to avoid corruption on crash
+            tmp_path = best_path.with_suffix('.pth.tmp')
             torch.save({
                 'epoch': epoch + 1,
                 'state_dict': clean_sd,
                 'val_loss': val_loss,
-            }, best_path)
+            }, tmp_path)
+            tmp_path.replace(best_path)
             print(f"  New best model! Val Loss: {val_loss:.4f}")
 
             # Log best model as wandb artifact

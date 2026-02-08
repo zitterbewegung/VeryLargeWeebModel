@@ -351,11 +351,16 @@ class UAVScenesDataset(Dataset):
             # Fallback: simple PCD parser
             with open(path, 'rb') as f:
                 header = []
-                while True:
-                    line = f.readline().decode('utf-8', errors='ignore').strip()
+                for _ in range(100):  # PCD headers are typically < 20 lines
+                    raw = f.readline()
+                    if not raw:  # EOF
+                        raise ValueError(f"Invalid PCD file: no DATA line found in {path}")
+                    line = raw.decode('utf-8', errors='ignore').strip()
                     header.append(line)
                     if line.startswith('DATA'):
                         break
+                else:
+                    raise ValueError(f"Invalid PCD file: header too large in {path}")
 
                 # Parse header
                 num_points = 0
