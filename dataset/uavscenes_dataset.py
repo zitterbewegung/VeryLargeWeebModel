@@ -402,7 +402,13 @@ class UAVScenesDataset(Dataset):
         if poses_file.exists():
             return self._load_pose_from_txt(poses_file, frame_idx)
 
-        # Fallback: return zero pose
+        # Fallback: return zero pose (warn so users know data is missing)
+        import warnings
+        warnings.warn(
+            f"No pose data found for {scene_folder} frame {frame_idx}. "
+            "Using zero pose — this will degrade training quality.",
+            stacklevel=2,
+        )
         return np.zeros(13, dtype=np.float32)
 
     def _parse_t4x4_matrix(self, t4x4: List[List[float]]) -> np.ndarray:
@@ -576,26 +582,30 @@ class UAVScenesDataset(Dataset):
         """
         Align points to a stable frame.
 
+        Strategy:
+        1. Try ego-frame transform if enabled.
+        2. If ego works (enough points in range), use it for consistency.
+        3. If ego fails AND we already have a sequence_origin, use centering
+           (don't mix ego + centering frames in one sequence).
+        4. If ego fails AND no origin yet, set origin from LiDAR mean.
+
         Returns:
             aligned_points, updated_sequence_origin, used_lidar_center
         """
-        if self.config.fallback_to_lidar_center and sequence_origin is not None:
-            return self._center_points(points, sequence_origin), sequence_origin, True
-
         if self.config.ego_frame:
             points_pose = self._transform_points_to_ego(points, pose)
-            if not self.config.fallback_to_lidar_center:
-                return points_pose, sequence_origin, False
             ratio = self._in_range_ratio(points_pose[:, :3])
             if ratio >= self.config.min_in_range_ratio:
+                # Ego transform works — use it and don't set sequence_origin
+                # so subsequent frames also try ego first
                 return points_pose, sequence_origin, False
 
+        # Ego transform failed or not enabled — use centering fallback
         if self.config.fallback_to_lidar_center:
             if sequence_origin is None and points.shape[0] > 0:
                 sequence_origin = points[:, :3].mean(axis=0).astype(np.float32)
-            if sequence_origin is None:
-                return points, sequence_origin, False
-            return self._center_points(points, sequence_origin), sequence_origin, True
+            if sequence_origin is not None:
+                return self._center_points(points, sequence_origin), sequence_origin, True
 
         return points, sequence_origin, False
 
