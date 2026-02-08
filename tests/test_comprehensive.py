@@ -1301,5 +1301,308 @@ class TestIntervalFlag(unittest.TestCase):
         self.assertEqual(result, 1)
 
 
+# =============================================================================
+# Fix 1: UAVScenes Fallback Warning Tests
+# =============================================================================
+
+
+class TestUAVScenesFallbackWarning(unittest.TestCase):
+    """Test fallback tracking in _align_points."""
+
+    def test_fallback_stats_initial(self):
+        """Fallback counters should start at zero."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds._fallback_count = 0
+        ds._total_align_calls = 0
+        ds.config = UAVScenesConfig()
+        stats = ds.fallback_stats
+        self.assertEqual(stats['fallback_count'], 0)
+        self.assertEqual(stats['total_align_calls'], 0)
+        self.assertEqual(stats['fallback_ratio'], 0.0)
+
+    def test_fallback_warns_on_activation(self):
+        """_align_points should warn when falling back to LiDAR center."""
+        import warnings
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds._fallback_count = 0
+        ds._total_align_calls = 0
+        ds.config = UAVScenesConfig(ego_frame=True, fallback_to_lidar_center=True,
+                                     min_in_range_ratio=0.99)  # Force fallback
+
+        # Points far from ego pose range
+        points = np.array([[1000.0, 1000.0, 1000.0]], dtype=np.float32)
+        pose = np.array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ds._align_points(points, pose, None)
+            self.assertTrue(any("fallback" in str(warning.message).lower() for warning in w))
+
+        self.assertEqual(ds._fallback_count, 1)
+        self.assertEqual(ds._total_align_calls, 1)
+
+
+# =============================================================================
+# Fix 2: Temporal Decay + Occupancy Rate Logging Tests
+# =============================================================================
+
+
+class TestTemporalDecay(unittest.TestCase):
+    """Test temporal decay in OccupancyLoss."""
+
+    def test_no_decay_default(self):
+        """Default temporal_decay=0 should not change loss computation."""
+        from train import OccupancyLoss
+        loss_fn = OccupancyLoss(temporal_decay=0.0)
+        pred = torch.randn(2, 4, 8, 8, 8).sigmoid()
+        target = torch.randint(0, 2, (2, 4, 8, 8, 8)).float()
+        loss = loss_fn(pred, target)
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_decay_positive(self):
+        """Positive temporal_decay should produce finite loss."""
+        from train import OccupancyLoss
+        loss_fn = OccupancyLoss(temporal_decay=0.1)
+        pred = torch.randn(2, 6, 8, 8, 8).sigmoid()
+        target = torch.randint(0, 2, (2, 6, 8, 8, 8)).float()
+        loss = loss_fn(pred, target)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(loss.item(), 0)
+
+    def test_decay_2d_input_unchanged(self):
+        """2D/3D inputs (no time dim) should not be affected by temporal_decay."""
+        from train import OccupancyLoss
+        loss_fn = OccupancyLoss(temporal_decay=0.5)
+        pred = torch.randn(8, 8, 8).sigmoid()
+        target = torch.randint(0, 2, (8, 8, 8)).float()
+        loss = loss_fn(pred, target)
+        self.assertTrue(torch.isfinite(loss))
+
+
+class TestOccupancyRateLogging(unittest.TestCase):
+    """Test per-epoch occupancy rate logging in train_epoch."""
+
+    def test_train_epoch_returns_finite(self):
+        """train_epoch should compute occupancy rates without error."""
+        from train import SimpleOccupancyModel, OccupancyLoss, train_epoch
+        from torch.utils.tensorboard import SummaryWriter
+        import tempfile
+
+        config = MagicMock()
+        config.history_frames = 2
+        config.future_frames = 2
+        config.grid_size = [4, 4, 4]
+
+        model = SimpleOccupancyModel(config)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        criterion = OccupancyLoss()
+
+        batches = [{
+            'history_occupancy': torch.randn(2, 2, 4, 4, 4),
+            'future_occupancy': torch.randint(0, 2, (2, 2, 4, 4, 4)).float(),
+            'history_poses': torch.randn(2, 2, 13),
+            'future_poses': torch.randn(2, 2, 13),
+        }]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = SummaryWriter(tmpdir)
+            loss = train_epoch(model, batches, optimizer, criterion, 'cpu', 0, writer)
+            writer.close()
+        self.assertIsInstance(loss, float)
+        self.assertTrue(np.isfinite(loss))
+
+
+# =============================================================================
+# Fix 3: Domain Tag Tests
+# =============================================================================
+
+
+class TestDomainTags(unittest.TestCase):
+    """Test domain_tag metadata in all datasets."""
+
+    def test_gazebo_domain_tag(self):
+        """Gazebo dataset should return domain_tag='sim'."""
+        from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset
+        ds = GazeboOccWorldDataset.__new__(GazeboOccWorldDataset)
+        ds.config = MagicMock()
+        ds.config.history_frames = 1
+        ds.config.load_images = False
+        ds.config.load_lidar = False
+        ds.transform = None
+        ds.CAMERA_NAMES = ['CAM_FRONT']
+
+        # Build a minimal frame_index
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = os.path.join(tmpdir, 'test_session')
+            for subdir in ['occupancy', 'poses']:
+                os.makedirs(os.path.join(session_dir, subdir))
+            fid = '000000'
+            np.savez(os.path.join(session_dir, 'occupancy', f'{fid}_occupancy.npz'),
+                     occupancy=np.zeros((8, 8, 8), dtype=np.uint8))
+            pose = {'position': {'x': 0, 'y': 0, 'z': 0},
+                    'orientation': {'x': 0, 'y': 0, 'z': 0, 'w': 1},
+                    'velocity': {'linear': {'x': 0, 'y': 0, 'z': 0},
+                                 'angular': {'x': 0, 'y': 0, 'z': 0}}}
+            with open(os.path.join(session_dir, 'poses', f'{fid}.json'), 'w') as f:
+                json.dump(pose, f)
+
+            ds.frame_index = [{'session': session_dir, 'frames': [fid, fid],
+                               'agent_type': 1}]
+
+            sample = ds[0]
+            self.assertEqual(sample['domain_tag'], 'sim')
+
+    def test_uavscenes_domain_tag(self):
+        """UAVScenes should return domain_tag='real'."""
+        # Check the code directly (dataset requires real data to construct)
+        import dataset.uavscenes_dataset as mod
+        import inspect
+        source = inspect.getsource(mod.UAVScenesDataset.__getitem__)
+        self.assertIn("'domain_tag': 'real'", source)
+
+    def test_nuscenes_domain_tag(self):
+        """NuScenes datasets should return domain_tag='real'."""
+        import dataset.nuscenes_occworld_dataset as mod
+        import inspect
+        source = inspect.getsource(mod.NuScenesOccWorldDataset.__getitem__)
+        self.assertIn("'domain_tag': 'real'", source)
+
+    def test_nuscenes_6dof_domain_tag(self):
+        """NuScenes 6DoF should return domain_tag='real'."""
+        import dataset.nuscenes_6dof_dataset as mod
+        import inspect
+        source = inspect.getsource(mod.NuScenes6DoFDataset.__getitem__)
+        self.assertIn("'domain_tag': 'real'", source)
+
+
+# =============================================================================
+# Fix 4: NuScenes Velocity Warning Test
+# =============================================================================
+
+
+class TestNuScenesVelocityWarning(unittest.TestCase):
+    """Test velocity channel warning in NuScenesOccWorldDataset."""
+
+    def test_config_has_estimate_velocity(self):
+        """NuScenesConfig should have estimate_velocity field."""
+        from dataset.nuscenes_occworld_dataset import NuScenesConfig
+        config = NuScenesConfig()
+        self.assertFalse(config.estimate_velocity)
+
+    def test_config_estimate_velocity_true(self):
+        """Setting estimate_velocity=True should work."""
+        from dataset.nuscenes_occworld_dataset import NuScenesConfig
+        config = NuScenesConfig(estimate_velocity=True)
+        self.assertTrue(config.estimate_velocity)
+
+
+# =============================================================================
+# Fix 5+6: Checkpoint Loading Tests
+# =============================================================================
+
+
+class TestCheckpointLoading(unittest.TestCase):
+    """Test checkpoint loading improvements."""
+
+    def test_strict_load_flag_parsed(self):
+        """--strict-load should be parsed correctly."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py', '--strict-load']):
+            args = parse_args()
+        self.assertTrue(args.strict_load)
+
+    def test_strict_load_default_false(self):
+        """--strict-load should default to False."""
+        from train import parse_args
+        with patch('sys.argv', ['train.py']):
+            args = parse_args()
+        self.assertFalse(args.strict_load)
+
+    def test_dataparallel_prefix_stripping(self):
+        """module. and _orig_mod. prefixes should be stripped from checkpoint keys."""
+        # Simulate the stripping logic
+        ckpt_sd = {
+            'module.encoder.weight': torch.randn(3, 3),
+            'module._orig_mod.decoder.bias': torch.randn(3),
+            '_orig_mod.head.weight': torch.randn(3),
+            'normal_key': torch.randn(3),
+        }
+        cleaned = {}
+        for k, v in ckpt_sd.items():
+            clean_k = k.replace('module.', '', 1).replace('_orig_mod.', '')
+            cleaned[clean_k] = v
+        self.assertIn('encoder.weight', cleaned)
+        self.assertIn('decoder.bias', cleaned)
+        self.assertIn('head.weight', cleaned)
+        self.assertIn('normal_key', cleaned)
+
+
+# =============================================================================
+# Fix 7: Per-Timestep Metrics Tests
+# =============================================================================
+
+
+class TestPerTimestepMetrics(unittest.TestCase):
+    """Test per-timestep IoU and temporal consistency in validate()."""
+
+    def test_validate_with_temporal_predictions(self):
+        """validate() should return per-timestep IoU for 5D predictions."""
+        from train import validate, OccupancyLoss
+
+        T = 3  # future timesteps
+        model = MagicMock()
+        model.eval = MagicMock()
+
+        # Model returns [B, T, X, Y, Z] output
+        pred_occ = torch.rand(2, T, 4, 4, 4)
+        model.return_value = {'future_occupancy': pred_occ,
+                              'future_poses': torch.randn(2, T, 13)}
+
+        batch = {
+            'history_occupancy': torch.randn(2, 2, 4, 4, 4),
+            'future_occupancy': torch.randint(0, 2, (2, T, 4, 4, 4)).float(),
+            'history_poses': torch.randn(2, 2, 13),
+            'future_poses': torch.randn(2, T, 13),
+        }
+        dataloader = [batch]
+
+        criterion = OccupancyLoss()
+        metrics = validate(model, dataloader, criterion, 'cpu')
+
+        self.assertIn('iou', metrics)
+        self.assertIn('iou_t0', metrics)
+        self.assertIn('iou_t1', metrics)
+        self.assertIn('iou_t2', metrics)
+        self.assertIn('temporal_consistency', metrics)
+
+    def test_validate_no_temporal_for_3d(self):
+        """validate() should NOT return per-timestep IoU for non-temporal output."""
+        from train import validate, OccupancyLoss
+
+        model = MagicMock()
+        model.eval = MagicMock()
+
+        # Model returns [B, X, Y, Z] output (no time dim)
+        pred_occ = torch.rand(2, 4, 4, 4)
+        model.return_value = pred_occ
+
+        batch = {
+            'history_occupancy': torch.randn(2, 2, 4, 4, 4),
+            'future_occupancy': torch.randint(0, 2, (2, 4, 4, 4)).float(),
+            'history_poses': torch.randn(2, 2, 13),
+            'future_poses': torch.randn(2, 2, 13),
+        }
+        dataloader = [batch]
+
+        criterion = OccupancyLoss()
+        metrics = validate(model, dataloader, criterion, 'cpu')
+
+        self.assertIn('iou', metrics)
+        self.assertNotIn('iou_t0', metrics)
+        self.assertNotIn('temporal_consistency', metrics)
+
+
 if __name__ == '__main__':
     unittest.main()

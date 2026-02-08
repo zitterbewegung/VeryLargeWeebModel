@@ -485,6 +485,7 @@ class NuScenes6DoFDataset(Dataset):
             'future_poses': torch.from_numpy(np.stack(future_poses)).float(),
             'agent_type': torch.tensor(0),  # 0 = ground (but augmented toward aerial)
             'scene_name': sample_info['scene_name'],
+            'domain_tag': 'real',
         }
 
 

@@ -5,6 +5,7 @@ nuScenes dataset adapter for OccWorld training.
 Loads nuScenes data in format compatible with our training pipeline.
 """
 import os
+import warnings
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -33,6 +34,7 @@ class NuScenesConfig:
     max_sweeps: int = 10
     use_occ3d: bool = True
     occ3d_path: Optional[str] = None
+    estimate_velocity: bool = False  # Estimate velocity via finite differences
 
 
 class NuScenesOccWorldDataset(Dataset):
@@ -68,6 +70,16 @@ class NuScenesOccWorldDataset(Dataset):
                 self.scene_names = scene_names[8:]
         else:
             self.scene_names = splits.get(config.split, [])
+
+        # Warn about zero velocity channels
+        if not config.estimate_velocity:
+            warnings.warn(
+                "NuScenesOccWorldDataset: velocity channels (indices 7-12) are zero-padded. "
+                "46% of the 13D pose input is uninformative. Set estimate_velocity=True "
+                "in NuScenesConfig to enable finite-difference velocity estimation, or use "
+                "NuScenes6DoFDataset which computes velocities by default.",
+                stacklevel=2,
+            )
 
         # Build sample index
         self.samples = self._build_sample_index()
@@ -162,28 +174,68 @@ class NuScenesOccWorldDataset(Dataset):
 
         return occupancy
 
+    def _estimate_velocity(self, pose_curr: np.ndarray, pose_prev: np.ndarray,
+                            token_curr: str, token_prev: str) -> np.ndarray:
+        """Estimate velocity via finite differences between consecutive poses.
+
+        Args:
+            pose_curr: Current 13D pose [pos(3) + quat(4) + vel(6)]
+            pose_prev: Previous 13D pose
+            token_curr: Current sample token (for timestamp lookup)
+            token_prev: Previous sample token
+
+        Returns:
+            Updated pose with estimated velocity channels filled in.
+        """
+        # Get timestamps for dt calculation
+        sample_curr = self.nusc.get('sample', token_curr)
+        sample_prev = self.nusc.get('sample', token_prev)
+        lidar_curr = self.nusc.get('sample_data', sample_curr['data']['LIDAR_TOP'])
+        lidar_prev = self.nusc.get('sample_data', sample_prev['data']['LIDAR_TOP'])
+        dt = (lidar_curr['timestamp'] - lidar_prev['timestamp']) / 1e6  # seconds
+        dt = max(dt, 0.01)  # avoid division by zero
+
+        result = pose_curr.copy()
+        # Linear velocity
+        result[7:10] = (pose_curr[:3] - pose_prev[:3]) / dt
+        # Angular velocity (simple finite difference on quaternion)
+        # For more accurate angular velocity, use quaternion log map
+        result[10:13] = 0.0  # placeholder — quaternion diff is complex without pyquaternion
+        return result
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample_info = self.samples[idx]
+        all_tokens = sample_info['history_tokens'] + sample_info['future_tokens']
+
+        # Load all poses first
+        all_poses = [self._load_ego_pose(token) for token in all_tokens]
+
+        # Optionally estimate velocities via finite differences
+        if self.config.estimate_velocity:
+            for i in range(1, len(all_poses)):
+                all_poses[i] = self._estimate_velocity(
+                    all_poses[i], all_poses[i - 1],
+                    all_tokens[i], all_tokens[i - 1],
+                )
+
+        n_hist = len(sample_info['history_tokens'])
 
         # Load history
         history_occ = []
-        history_poses = []
         for token in sample_info['history_tokens']:
             points = self._load_lidar(token)
             occ = self._points_to_occupancy(points)
-            pose = self._load_ego_pose(token)
             history_occ.append(occ)
-            history_poses.append(pose)
 
         # Load future
         future_occ = []
-        future_poses = []
         for token in sample_info['future_tokens']:
             points = self._load_lidar(token)
             occ = self._points_to_occupancy(points)
-            pose = self._load_ego_pose(token)
             future_occ.append(occ)
-            future_poses.append(pose)
+
+        history_poses = all_poses[:n_hist]
+        future_poses = all_poses[n_hist:]
 
         return {
             'history_occupancy': torch.from_numpy(np.stack(history_occ)),
@@ -191,6 +243,7 @@ class NuScenesOccWorldDataset(Dataset):
             'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
             'future_poses': torch.from_numpy(np.stack(future_poses)).float(),
             'scene_name': sample_info['scene_name'],
+            'domain_tag': 'real',
         }
 
 

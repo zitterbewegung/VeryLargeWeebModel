@@ -31,6 +31,7 @@ Usage:
 
 import os
 import json
+import warnings
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -117,6 +118,10 @@ class UAVScenesDataset(Dataset):
 
         # Cache for sampleinfos to avoid repeated file reads
         self._sampleinfos_cache: Dict[str, List[Dict]] = {}
+
+        # Fallback tracking for _align_points
+        self._fallback_count = 0
+        self._total_align_calls = 0
 
         # Build sample index
         self.samples = self._build_sample_index()
@@ -658,6 +663,8 @@ class UAVScenesDataset(Dataset):
         Returns:
             aligned_points, updated_sequence_origin, used_lidar_center
         """
+        self._total_align_calls += 1
+
         if self.config.ego_frame:
             points_pose = self._transform_points_to_ego(points, pose)
             ratio = self._in_range_ratio(points_pose[:, :3])
@@ -667,6 +674,14 @@ class UAVScenesDataset(Dataset):
                 return points_pose, sequence_origin, False
 
         # Ego transform failed or not enabled — use centering fallback
+        self._fallback_count += 1
+        if self._fallback_count <= 5:
+            warnings.warn(
+                f"UAVScenes _align_points: ego-frame alignment fallback activated "
+                f"({self._fallback_count}/{self._total_align_calls} calls). "
+                f"LiDAR-center centering used instead.",
+                stacklevel=2,
+            )
         if self.config.fallback_to_lidar_center:
             if sequence_origin is None and points.shape[0] > 0:
                 sequence_origin = points[:, :3].mean(axis=0).astype(np.float32)
@@ -765,6 +780,17 @@ class UAVScenesDataset(Dataset):
 
         return result
 
+    @property
+    def fallback_stats(self) -> Dict[str, float]:
+        """Return statistics about ego-frame alignment fallback usage."""
+        total = self._total_align_calls
+        fallback = self._fallback_count
+        return {
+            'fallback_count': fallback,
+            'total_align_calls': total,
+            'fallback_ratio': fallback / total if total > 0 else 0.0,
+        }
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -834,6 +860,7 @@ class UAVScenesDataset(Dataset):
             'agent_type': torch.tensor(1),  # 1 = aerial (real UAV data!)
             'scene': scene,
             'scene_folder': scene_folder,
+            'domain_tag': 'real',
         }
 
 

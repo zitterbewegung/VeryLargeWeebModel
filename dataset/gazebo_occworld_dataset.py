@@ -436,6 +436,7 @@ class GazeboOccWorldDataset(Dataset):
             'agent_type': agent_type,
             'session': os.path.basename(session_dir),
             'frames': frames,
+            'domain_tag': 'sim',
         }
 
         if self.transform:

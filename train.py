@@ -708,6 +708,8 @@ def parse_args():
                         help='Max checkpoints to keep (default: 5, -1 = keep all)')
     parser.add_argument('--warmup-epochs', type=int, default=5,
                         help='LR warmup epochs (default: 5)')
+    parser.add_argument('--strict-load', action='store_true',
+                        help='Use strict=True when loading checkpoint weights (fail on any mismatch)')
 
     # Weights & Biases
     parser.add_argument('--wandb', action='store_true',
@@ -1038,12 +1040,13 @@ class OccupancyLoss(nn.Module):
         smooth: Smoothing factor for Dice loss
     """
 
-    def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dice_weight=1.0, mean_weight=10.0, smooth=1.0):
+    def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dice_weight=1.0, mean_weight=10.0, smooth=1.0, temporal_decay=0.0):
         super().__init__()
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
         self.smooth = smooth
+        self.temporal_decay = temporal_decay
         self._debug_counter = 0
         # Store last loss components for logging
         self._last_components = {}
@@ -1051,6 +1054,33 @@ class OccupancyLoss(nn.Module):
     def get_loss_components(self):
         """Return the last computed loss components for logging."""
         return self._last_components
+
+    def _weighted_focal(self, pred, target):
+        """Compute focal loss with optional temporal decay weights.
+
+        When temporal_decay > 0 and input has a time dimension (ndim >= 5),
+        earlier timesteps get higher weight via exponential decay:
+            w_t = exp(-decay * t), normalized so mean weight = 1.
+        """
+        if self.temporal_decay > 0 and pred.ndim >= 5:
+            # pred shape: [B, T, X, Y, Z] — dim 1 is time
+            T = pred.shape[1]
+            t_indices = torch.arange(T, device=pred.device, dtype=pred.dtype)
+            weights = torch.exp(-self.temporal_decay * t_indices)
+            weights = weights / weights.mean()  # normalize so mean = 1
+            # Reshape for broadcasting: [1, T, 1, 1, 1]
+            weights = weights.view(1, T, *([1] * (pred.ndim - 2)))
+
+            # Compute per-element focal loss and apply weights
+            pred_c = pred.clamp(min=1e-7, max=1 - 1e-7)
+            bce = -target * torch.log(pred_c) - (1 - target) * torch.log(1 - pred_c)
+            p_t = torch.where(target == 1, pred_c, 1 - pred_c)
+            focal_weight = (1 - p_t) ** self.focal_loss.gamma
+            alpha_weight = torch.where(target == 1, self.focal_loss.alpha, 1 - self.focal_loss.alpha)
+            focal_per_elem = alpha_weight * focal_weight * bce
+            return (focal_per_elem * weights).mean()
+        else:
+            return self.focal_loss(pred, target)
 
     def forward(self, pred, target):
         # Debug: Print data stats every 100 batches
@@ -1063,7 +1093,7 @@ class OccupancyLoss(nn.Module):
             print(f"  [LOSS DEBUG] target unique values: {torch.unique(target).tolist()[:10]}")
 
         # Focal loss: handles class imbalance, focuses on hard examples
-        focal = self.focal_loss(pred, target)
+        focal = self._weighted_focal(pred, target)
 
         # Dice loss: optimizes for overlap, complements focal loss
         pred_flat = pred.view(-1)
@@ -1104,6 +1134,11 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     model.train()
     total_loss = 0
     num_batches = 0
+
+    # Occupancy rate tracking
+    epoch_pred_occ_sum = 0.0
+    epoch_target_occ_sum = 0.0
+    epoch_voxel_count = 0
 
     for batch_idx, batch in enumerate(dataloader):
         # Only zero gradients at accumulation boundaries
@@ -1298,6 +1333,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
         total_loss += loss.item()
         num_batches += 1
 
+        # Track occupancy rates for epoch summary
+        with torch.no_grad():
+            epoch_pred_occ_sum += (pred_occ > 0.5).float().sum().item()
+            epoch_target_occ_sum += (future_occ > 0).float().sum().item()
+            epoch_voxel_count += future_occ.numel()
+
         # Log
         if batch_idx % 10 == 0:
             loss_val = loss.item()
@@ -1324,11 +1365,30 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     if num_batches == 0:
         print(f"  [ERROR] All batches were skipped! Check data loading.")
         return float('inf')
+
+    # Epoch occupancy rate summary
+    if epoch_voxel_count > 0:
+        pred_occ_rate = epoch_pred_occ_sum / epoch_voxel_count * 100
+        target_occ_rate = epoch_target_occ_sum / epoch_voxel_count * 100
+        print(f"  [EPOCH {epoch}] Occupancy rates: pred={pred_occ_rate:.4f}%, target={target_occ_rate:.4f}%")
+        writer.add_scalar('Train/PredOccRate', pred_occ_rate, epoch)
+        writer.add_scalar('Train/TargetOccRate', target_occ_rate, epoch)
+        if use_wandb:
+            wandb.log({
+                'epoch/pred_occ_rate': pred_occ_rate,
+                'epoch/target_occ_rate': target_occ_rate,
+            }, commit=False)
+
     return total_loss / num_batches
 
 
 def validate(model, dataloader, criterion, device, is_6dof=False):
-    """Validate model with task-specific metrics (IoU, precision, recall, pose errors)."""
+    """Validate model with task-specific metrics (IoU, precision, recall, pose errors).
+
+    When predictions have a time dimension (ndim >= 5), also computes:
+    - Per-timestep IoU (iou_t0, iou_t1, ...)
+    - Temporal consistency (cosine similarity of frame-to-frame voxel changes)
+    """
     model.eval()
     total_loss = 0
     num_batches = 0
@@ -1338,6 +1398,17 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
     fp_sum = 0  # false positives
     fn_sum = 0  # false negatives
     tn_sum = 0  # true negatives
+
+    # Per-timestep accumulators (up to 20 timesteps)
+    MAX_T = 20
+    tp_per_t = [0.0] * MAX_T
+    fp_per_t = [0.0] * MAX_T
+    fn_per_t = [0.0] * MAX_T
+    has_temporal = False
+
+    # Temporal consistency accumulator
+    temporal_consistency_sum = 0.0
+    temporal_consistency_count = 0
 
     # Pose metrics accumulators
     pos_errors = []
@@ -1392,6 +1463,29 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
             fn_sum += ((1 - pred_binary) * target_binary).sum().item()
             tn_sum += ((1 - pred_binary) * (1 - target_binary)).sum().item()
 
+            # Per-timestep metrics when time dimension exists
+            if pred_binary.ndim >= 5:
+                has_temporal = True
+                T = min(pred_binary.shape[1], MAX_T)
+                for t in range(T):
+                    pred_t = pred_binary[:, t]
+                    target_t = target_binary[:, t]
+                    tp_per_t[t] += (pred_t * target_t).sum().item()
+                    fp_per_t[t] += (pred_t * (1 - target_t)).sum().item()
+                    fn_per_t[t] += ((1 - pred_t) * target_t).sum().item()
+
+                # Temporal consistency: cosine similarity of consecutive frame changes
+                if T >= 2:
+                    for t in range(1, T):
+                        diff_pred = pred_binary[:, t].reshape(pred_binary.shape[0], -1) - \
+                                    pred_binary[:, t-1].reshape(pred_binary.shape[0], -1)
+                        diff_target = target_binary[:, t].reshape(target_binary.shape[0], -1) - \
+                                      target_binary[:, t-1].reshape(target_binary.shape[0], -1)
+                        # Cosine similarity per sample
+                        cos_sim = F.cosine_similarity(diff_pred, diff_target, dim=-1)
+                        temporal_consistency_sum += cos_sim.sum().item()
+                        temporal_consistency_count += cos_sim.numel()
+
             # Compute pose metrics
             if pred_poses_val is not None:
                 # Position error (Euclidean distance in meters)
@@ -1418,6 +1512,16 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
         metrics['precision'] = precision
         metrics['recall'] = recall
         metrics['f1'] = f1
+
+        # Per-timestep IoU
+        if has_temporal:
+            for t in range(MAX_T):
+                if tp_per_t[t] + fp_per_t[t] + fn_per_t[t] > 0:
+                    metrics[f'iou_t{t}'] = tp_per_t[t] / (tp_per_t[t] + fp_per_t[t] + fn_per_t[t] + eps)
+
+            # Temporal consistency
+            if temporal_consistency_count > 0:
+                metrics['temporal_consistency'] = temporal_consistency_sum / temporal_consistency_count
 
         if pos_errors:
             metrics['pos_error_m'] = sum(pos_errors) / len(pos_errors)
@@ -1828,6 +1932,12 @@ def main():
             if ckpts:
                 load_from = str(ckpts[-1])
                 resume_checkpoint = load_from
+            else:
+                print("\n" + "!" * 60)
+                print("WARNING: --resume requested but no checkpoints found in")
+                print(f"  {work_dir / 'checkpoints'}")
+                print("Training will start from scratch.")
+                print("!" * 60 + "\n")
 
         # Validate pretrained models exist (auto-download from S3 if missing)
         if (load_from or vqvae_ckpt) and not args.skip_validation:
@@ -1844,24 +1954,40 @@ def main():
                 print("=" * 60)
                 sys.exit(1)
 
-        if load_from and os.path.exists(load_from):
-            print(f"Loading weights from: {load_from}")
-            checkpoint = torch.load(load_from, map_location=device)
-            ckpt_sd = checkpoint.get('state_dict', checkpoint)
-            result = model.load_state_dict(ckpt_sd, strict=False)
-            # Warn about mismatched keys so partial loads don't go unnoticed
-            if result.missing_keys:
-                print(f"  [WARN] Missing keys ({len(result.missing_keys)}): "
-                      f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
-            if result.unexpected_keys:
-                print(f"  [WARN] Unexpected keys ({len(result.unexpected_keys)}): "
-                      f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
-            loaded_pct = 1.0 - len(result.missing_keys) / max(len(ckpt_sd), 1)
-            if loaded_pct < 0.5:
-                print(f"  [WARN] Only {loaded_pct*100:.0f}% of model weights loaded! "
-                      f"Check checkpoint compatibility (DataParallel prefix mismatch?)")
+        if load_from:
+            if not os.path.exists(load_from):
+                print("\n" + "!" * 60)
+                print(f"WARNING: load_from path does not exist: {load_from}")
+                print("Training will proceed WITHOUT pretrained weights.")
+                print("!" * 60 + "\n")
             else:
-                print(f"  Loaded {loaded_pct*100:.0f}% of model weights")
+                print(f"Loading weights from: {load_from}")
+                checkpoint = torch.load(load_from, map_location=device)
+                ckpt_sd = checkpoint.get('state_dict', checkpoint)
+                # Strip DataParallel/torch.compile prefixes from checkpoint keys
+                cleaned_sd = {}
+                for k, v in ckpt_sd.items():
+                    clean_k = k.replace('module.', '', 1).replace('_orig_mod.', '')
+                    cleaned_sd[clean_k] = v
+                ckpt_sd = cleaned_sd
+                result = model.load_state_dict(ckpt_sd, strict=args.strict_load)
+                # Warn about mismatched keys so partial loads don't go unnoticed
+                if result.missing_keys:
+                    print(f"  [WARN] Missing keys ({len(result.missing_keys)}): "
+                          f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+                if result.unexpected_keys:
+                    print(f"  [WARN] Unexpected keys ({len(result.unexpected_keys)}): "
+                          f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
+                model_key_count = len(dict(model.state_dict()))
+                matched = model_key_count - len(result.missing_keys)
+                loaded_pct = matched / max(model_key_count, 1)
+                if loaded_pct < 0.5:
+                    print(f"  [WARN] Only {loaded_pct*100:.0f}% of model weights loaded "
+                          f"({matched}/{model_key_count} keys)! "
+                          f"Check checkpoint compatibility.")
+                else:
+                    print(f"  Loaded {loaded_pct*100:.0f}% of model weights "
+                          f"({matched}/{model_key_count} keys)")
 
     # Optional: Compile model for faster training (PyTorch 2.0+)
     if args.compile:
@@ -1941,6 +2067,7 @@ def main():
             focal_gamma=2.0,
             dice_weight=1.0,
             mean_weight=10.0,
+            temporal_decay=getattr(config, 'temporal_decay', 0.0),
         )
 
     # TensorBoard
@@ -2098,12 +2225,24 @@ def main():
         if 'pos_error_m' in val_metrics:
             print(f"  Pose: pos_err={val_metrics['pos_error_m']:.3f}m, "
                   f"orient_err={val_metrics.get('orient_error_deg', 0):.2f}°")
+        # Per-timestep IoU breakdown
+        per_t_ious = {k: v for k, v in val_metrics.items() if k.startswith('iou_t')}
+        if per_t_ious:
+            iou_strs = [f"t{k[5:]}={v:.4f}" for k, v in sorted(per_t_ious.items())]
+            print(f"  Per-timestep IoU: {', '.join(iou_strs)}")
+        if 'temporal_consistency' in val_metrics:
+            print(f"  Temporal consistency: {val_metrics['temporal_consistency']:.4f}")
 
         writer.add_scalar('Train/EpochLoss', train_loss, epoch)
         writer.add_scalar('Val/Loss', val_loss, epoch)
         writer.add_scalar('Val/IoU', val_metrics.get('iou', 0), epoch)
         writer.add_scalar('Val/Precision', val_metrics.get('precision', 0), epoch)
         writer.add_scalar('Val/Recall', val_metrics.get('recall', 0), epoch)
+        for k, v in val_metrics.items():
+            if k.startswith('iou_t'):
+                writer.add_scalar(f'Val/{k}', v, epoch)
+        if 'temporal_consistency' in val_metrics:
+            writer.add_scalar('Val/TemporalConsistency', val_metrics['temporal_consistency'], epoch)
         writer.add_scalar('Train/LR', current_lr, epoch)
 
         # Weights & Biases epoch logging
@@ -2122,6 +2261,12 @@ def main():
             if 'pos_error_m' in val_metrics:
                 epoch_log['epoch/val_pos_error_m'] = val_metrics['pos_error_m']
                 epoch_log['epoch/val_orient_error_deg'] = val_metrics.get('orient_error_deg', 0)
+            # Per-timestep IoU
+            for k, v in val_metrics.items():
+                if k.startswith('iou_t'):
+                    epoch_log[f'epoch/val_{k}'] = v
+            if 'temporal_consistency' in val_metrics:
+                epoch_log['epoch/val_temporal_consistency'] = val_metrics['temporal_consistency']
             wandb.log(epoch_log)
 
         # Save checkpoint
