@@ -195,7 +195,8 @@ def upload_file(
     bucket: str,
     s3_key: str,
     transfer_config: Optional[Any] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
+    callback: Optional[Any] = None
 ) -> bool:
     """Upload a single file to S3.
 
@@ -206,6 +207,7 @@ def upload_file(
         s3_key: S3 object key
         transfer_config: Optional TransferConfig for large files
         dry_run: If True, don't actually upload
+        callback: Optional progress callback (called with bytes transferred)
 
     Returns:
         True if successful, False otherwise
@@ -215,10 +217,12 @@ def upload_file(
         return True
 
     try:
+        kwargs = {}  # type: Dict[str, Any]
         if transfer_config:
-            s3_client.upload_file(local_path, bucket, s3_key, Config=transfer_config)
-        else:
-            s3_client.upload_file(local_path, bucket, s3_key)
+            kwargs['Config'] = transfer_config
+        if callback:
+            kwargs['Callback'] = callback
+        s3_client.upload_file(local_path, bucket, s3_key, **kwargs)
         return True
     except Exception as e:
         log_error(f"Failed to upload {local_path}: {e}")
@@ -231,7 +235,8 @@ def download_file(
     s3_key: str,
     local_path: str,
     transfer_config: Optional[Any] = None,
-    dry_run: bool = False
+    dry_run: bool = False,
+    callback: Optional[Any] = None
 ) -> bool:
     """Download a single file from S3.
 
@@ -242,6 +247,7 @@ def download_file(
         local_path: Local file path to save to
         transfer_config: Optional TransferConfig for large files
         dry_run: If True, don't actually download
+        callback: Optional progress callback (called with bytes transferred)
 
     Returns:
         True if successful, False otherwise
@@ -253,10 +259,12 @@ def download_file(
 
     try:
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        kwargs = {}  # type: Dict[str, Any]
         if transfer_config:
-            s3_client.download_file(bucket, s3_key, local_path, Config=transfer_config)
-        else:
-            s3_client.download_file(bucket, s3_key, local_path)
+            kwargs['Config'] = transfer_config
+        if callback:
+            kwargs['Callback'] = callback
+        s3_client.download_file(bucket, s3_key, local_path, **kwargs)
         return True
     except Exception as e:
         log_error(f"Failed to download {s3_key}: {e}")

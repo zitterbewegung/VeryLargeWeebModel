@@ -353,7 +353,7 @@ class TestCLIHelp:
         )
         assert result.returncode == 1
 
-    @pytest.mark.parametrize("subcmd", ["setup", "download", "train", "deploy", "sanity", "info"])
+    @pytest.mark.parametrize("subcmd", ["setup", "download", "train", "deploy", "sanity", "info", "pack"])
     def test_subcommand_help(self, subcmd):
         """Each subcommand should have --help."""
         result = subprocess.run(
@@ -493,3 +493,161 @@ class TestCLIMainFunction:
         assert args.command == "train"
         assert args.dry_run is True
         assert args.epochs == 10
+
+    def test_build_parser_pack(self):
+        """build_parser() should parse pack subcommand."""
+        from vlwm_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["pack", "uavscenes", "--dry-run"])
+        assert args.command == "pack"
+        assert args.dataset == "uavscenes"
+        assert args.dry_run is True
+        assert args.upload is False
+        assert args.download is False
+
+
+# =============================================================================
+# Pack subcommand tests
+# =============================================================================
+
+class TestPackSubcommand:
+    """Test CLI pack subcommand."""
+
+    def test_pack_help(self):
+        """pack --help should exit 0."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"), "pack", "--help"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "dataset" in result.stdout
+        assert "--upload" in result.stdout
+        assert "--download" in result.stdout
+
+    def test_pack_dry_run_compress(self, tmp_path):
+        """pack --dry-run should show compress plan for a temp dataset."""
+        # Create a temp dataset directory with a file
+        dataset_dir = tmp_path / "test_dataset"
+        dataset_dir.mkdir()
+        (dataset_dir / "sample.txt").write_text("hello world")
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"),
+             "pack", str(dataset_dir), "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "DRY RUN" in result.stdout
+        assert "1 files" in result.stdout
+
+    def test_pack_dry_run_upload(self, tmp_path):
+        """pack --upload --dry-run should show S3 path."""
+        dataset_dir = tmp_path / "mydata"
+        dataset_dir.mkdir()
+        (dataset_dir / "file.bin").write_bytes(b"\x00" * 100)
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"),
+             "pack", str(dataset_dir), "--upload", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "DRY RUN" in result.stdout
+
+    def test_pack_dry_run_download(self):
+        """pack --download --dry-run should show S3 download plan."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"),
+             "pack", "uavscenes", "--download", "--dry-run", "--force"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "DRY RUN" in result.stdout
+        assert "s3://" in result.stdout
+
+    def test_pack_mutually_exclusive_flags(self):
+        """--upload and --download together should be an argparse error."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"),
+             "pack", "uavscenes", "--upload", "--download"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 2  # argparse error
+
+    def test_pack_nonexistent_dataset(self, tmp_path):
+        """Compressing a nonexistent directory should return 1."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"),
+             "pack", str(tmp_path / "does_not_exist"), "--force"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1
+
+    def test_pack_known_dataset_names(self):
+        """Known dataset names should be listed in help."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "vlwm_cli.py"), "pack", "--help"],
+            capture_output=True, text=True,
+        )
+        assert "uavscenes" in result.stdout
+        assert "tokyo_gazebo" in result.stdout
+
+
+class TestPackCompressDecompress:
+    """Integration test: compress and decompress a small dataset."""
+
+    def test_roundtrip(self, tmp_path):
+        """Compress a temp dir, decompress to new location, verify contents match."""
+        from vlwm_cli import _compress_dataset, _decompress_archive
+
+        # Create source dataset
+        source = tmp_path / "source_dataset"
+        source.mkdir()
+        (source / "file1.txt").write_text("hello")
+        sub = source / "subdir"
+        sub.mkdir()
+        (sub / "file2.bin").write_bytes(b"\x00\x01\x02\x03")
+
+        # Compress
+        archive = str(tmp_path / "source_dataset.tar.xz")
+        assert _compress_dataset(str(source), archive, compression_level=0, dry_run=False) is True
+        assert os.path.isfile(archive)
+
+        # Decompress to new location
+        extract_dir = tmp_path / "extracted"
+        extract_dir.mkdir()
+        assert _decompress_archive(archive, str(extract_dir), dry_run=False) is True
+
+        # Verify contents
+        extracted_root = extract_dir / "source_dataset"
+        assert (extracted_root / "file1.txt").read_text() == "hello"
+        assert (extracted_root / "subdir" / "file2.bin").read_bytes() == b"\x00\x01\x02\x03"
+
+    def test_compress_dry_run_no_file(self, tmp_path):
+        """Dry-run compress should not create an archive file."""
+        from vlwm_cli import _compress_dataset
+
+        source = tmp_path / "data"
+        source.mkdir()
+        (source / "f.txt").write_text("x")
+
+        archive = str(tmp_path / "data.tar.xz")
+        assert _compress_dataset(str(source), archive, compression_level=0, dry_run=True) is True
+        assert not os.path.exists(archive)
+
+    def test_decompress_dry_run_no_extract(self, tmp_path):
+        """Dry-run decompress should not extract anything."""
+        from vlwm_cli import _compress_dataset, _decompress_archive
+
+        source = tmp_path / "data2"
+        source.mkdir()
+        (source / "f.txt").write_text("x")
+
+        archive = str(tmp_path / "data2.tar.xz")
+        _compress_dataset(str(source), archive, compression_level=0, dry_run=False)
+
+        extract_dir = tmp_path / "output"
+        extract_dir.mkdir()
+        assert _decompress_archive(archive, str(extract_dir), dry_run=True) is True
+        # Nothing should be extracted
+        assert list(extract_dir.iterdir()) == []

@@ -693,13 +693,148 @@ class TestCLIParserCompleteness(unittest.TestCase):
     """Test CLI parser has all expected subcommands."""
 
     def test_all_subcommands_present(self):
-        """Parser should have all 6 subcommands."""
+        """Parser should have all 7 subcommands."""
         from scripts.vlwm_cli import build_parser
         parser = build_parser()
         # Parse each subcommand to verify it exists
-        for cmd in ['setup', 'download', 'train', 'deploy', 'sanity', 'info']:
-            args = parser.parse_args([cmd])
+        for cmd in ['setup', 'download', 'train', 'deploy', 'sanity', 'info', 'pack']:
+            args = parser.parse_args([cmd] if cmd != 'pack' else [cmd, 'uavscenes'])
             self.assertEqual(args.command, cmd)
+
+
+class TestCmdPack(unittest.TestCase):
+    """Test cmd_pack function directly."""
+
+    def test_cmd_pack_compress_dry_run(self):
+        """cmd_pack compress dry-run should succeed for existing directory."""
+        from scripts.vlwm_cli import cmd_pack
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a dataset dir
+            ds_dir = os.path.join(tmpdir, "testdata")
+            os.makedirs(ds_dir)
+            with open(os.path.join(ds_dir, "sample.txt"), "w") as f:
+                f.write("hello")
+
+            args = argparse.Namespace(
+                dataset=ds_dir,
+                upload=False,
+                download=False,
+                bucket="verylargeweebmodel",
+                prefix="packed",
+                data_dir=tmpdir,
+                output=None,
+                keep_archive=False,
+                force=True,
+                compression_level=0,
+                dry_run=True,
+            )
+            result = cmd_pack(args)
+            self.assertEqual(result, 0)
+
+    def test_cmd_pack_compress_nonexistent_fails(self):
+        """cmd_pack should return 1 for nonexistent dataset directory."""
+        from scripts.vlwm_cli import cmd_pack
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nonexistent = os.path.join(tmpdir, "does_not_exist")
+            args = argparse.Namespace(
+                dataset=nonexistent,
+                upload=False,
+                download=False,
+                bucket="verylargeweebmodel",
+                prefix="packed",
+                data_dir=tmpdir,
+                output=None,
+                keep_archive=False,
+                force=True,
+                compression_level=6,
+                dry_run=False,
+            )
+            result = cmd_pack(args)
+            self.assertEqual(result, 1)
+
+    def test_cmd_pack_download_dry_run(self):
+        """cmd_pack download dry-run should succeed for known dataset."""
+        from scripts.vlwm_cli import cmd_pack
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                dataset="uavscenes",
+                upload=False,
+                download=True,
+                bucket="verylargeweebmodel",
+                prefix="packed",
+                data_dir=tmpdir,
+                output=None,
+                keep_archive=False,
+                force=True,
+                compression_level=6,
+                dry_run=True,
+            )
+            result = cmd_pack(args)
+            self.assertEqual(result, 0)
+
+    def test_cmd_pack_refuses_overwrite_without_force(self):
+        """cmd_pack should refuse to overwrite existing archive without --force."""
+        from scripts.vlwm_cli import cmd_pack
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create dataset dir
+            ds_dir = os.path.join(tmpdir, "testdata")
+            os.makedirs(ds_dir)
+            with open(os.path.join(ds_dir, "sample.txt"), "w") as f:
+                f.write("hello")
+
+            # Create existing archive
+            archive_path = os.path.join(tmpdir, "testdata.tar.xz")
+            with open(archive_path, "w") as f:
+                f.write("existing")
+
+            args = argparse.Namespace(
+                dataset=ds_dir,
+                upload=False,
+                download=False,
+                bucket="verylargeweebmodel",
+                prefix="packed",
+                data_dir=tmpdir,
+                output=None,
+                keep_archive=False,
+                force=False,
+                compression_level=0,
+                dry_run=False,
+            )
+            result = cmd_pack(args)
+            self.assertEqual(result, 1)
+
+
+class TestResolveDatasetPath(unittest.TestCase):
+    """Test _resolve_dataset_path helper."""
+
+    def test_known_dataset(self):
+        """Known dataset name should resolve to data_dir/name."""
+        from scripts.vlwm_cli import _resolve_dataset_path
+        name, path = _resolve_dataset_path("uavscenes", "/data")
+        self.assertEqual(name, "uavscenes")
+        self.assertEqual(path, "/data/uavscenes")
+
+    def test_arbitrary_path(self):
+        """Arbitrary path should use basename as name."""
+        from scripts.vlwm_cli import _resolve_dataset_path
+        name, path = _resolve_dataset_path("/tmp/my_custom_data", "/data")
+        self.assertEqual(name, "my_custom_data")
+        self.assertEqual(path, "/tmp/my_custom_data")
+
+    def test_all_known_datasets(self):
+        """All known datasets should resolve correctly."""
+        from scripts.vlwm_cli import _resolve_dataset_path, KNOWN_DATASETS
+        for ds_name in KNOWN_DATASETS:
+            name, path = _resolve_dataset_path(ds_name, "/data")
+            self.assertEqual(name, ds_name)
 
 
 # =============================================================================

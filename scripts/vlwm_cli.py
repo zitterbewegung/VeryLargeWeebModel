@@ -11,6 +11,7 @@ Usage:
     python scripts/vlwm_cli.py deploy      # Deploy to remote instance
     python scripts/vlwm_cli.py sanity      # Pre-flight sanity checks
     python scripts/vlwm_cli.py info        # Show environment info
+    python scripts/vlwm_cli.py pack        # Pack/unpack dataset archives
 """
 
 import argparse
@@ -629,6 +630,441 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
+# Pack subcommand
+# =============================================================================
+
+# Known dataset names -> directory names
+KNOWN_DATASETS = {
+    "tokyo_gazebo": "tokyo_gazebo",
+    "uavscenes": "uavscenes",
+    "midair": "midair",
+    "tartanair": "tartanair",
+    "nuscenes": "nuscenes",
+}
+
+
+def _resolve_dataset_path(dataset, data_dir):
+    # type: (str, str) -> tuple
+    """Resolve a dataset name or path to (name, directory_path).
+
+    Args:
+        dataset: Known dataset name or arbitrary directory path.
+        data_dir: Base data directory for known dataset names.
+
+    Returns:
+        Tuple of (dataset_name, dataset_path).
+    """
+    if dataset in KNOWN_DATASETS:
+        name = dataset
+        path = os.path.join(data_dir, KNOWN_DATASETS[dataset])
+    else:
+        # Treat as a directory path
+        path = os.path.abspath(dataset)
+        name = os.path.basename(path)
+    return name, path
+
+
+def _compress_dataset(source_dir, archive_path, compression_level, dry_run):
+    # type: (str, str, int, bool) -> bool
+    """Compress a dataset directory to a .tar.xz archive.
+
+    Args:
+        source_dir: Path to the dataset directory.
+        archive_path: Output archive path.
+        compression_level: xz compression level (0-9).
+        dry_run: If True, show what would be done.
+
+    Returns:
+        True if successful.
+    """
+    import tarfile
+
+    if not os.path.isdir(source_dir):
+        log_error(f"Dataset directory not found: {source_dir}")
+        return False
+
+    if dry_run:
+        log_info(f"[DRY RUN] Would compress: {source_dir} -> {archive_path}")
+        # Count files for informational output
+        file_count = sum(1 for _ in Path(source_dir).rglob("*") if _.is_file())
+        log_info(f"[DRY RUN] Source contains {file_count} files")
+        return True
+
+    log_info(f"Compressing: {source_dir} -> {archive_path}")
+    log_info(f"Compression level: {compression_level}")
+
+    try:
+        # Count files first for progress reporting
+        file_count = sum(1 for _ in Path(source_dir).rglob("*") if _.is_file())
+        log_info(f"Total files: {file_count}")
+
+        # Open with xz compression via preset
+        # tarfile w:xz uses lzma internally; we set preset via the lzma module
+        import lzma
+        xz_filters = [{"id": lzma.FILTER_LZMA2, "preset": compression_level}]
+
+        added = 0
+        with tarfile.open(archive_path, "w:xz",
+                          preset=compression_level) as tar:
+            base_name = os.path.basename(source_dir)
+            for root, dirs, files in os.walk(source_dir):
+                for fname in files:
+                    filepath = os.path.join(root, fname)
+                    arcname = os.path.join(
+                        base_name,
+                        os.path.relpath(filepath, source_dir)
+                    )
+                    tar.add(filepath, arcname=arcname)
+                    added += 1
+                    if added % 500 == 0:
+                        log_info(f"  Added {added}/{file_count} files...")
+
+        archive_size = os.path.getsize(archive_path)
+        size_mb = archive_size / (1024 * 1024)
+        log_success(f"Archive created: {archive_path} ({size_mb:.1f} MB, {added} files)")
+        return True
+
+    except Exception as e:
+        log_error(f"Compression failed: {e}")
+        # Clean up partial archive
+        if os.path.exists(archive_path):
+            try:
+                os.remove(archive_path)
+                log_info("Cleaned up partial archive")
+            except OSError:
+                pass
+        return False
+
+
+def _decompress_archive(archive_path, target_dir, dry_run):
+    # type: (str, str, bool) -> bool
+    """Decompress a .tar.xz archive to a target directory.
+
+    Args:
+        archive_path: Path to the archive.
+        target_dir: Directory to extract into.
+        dry_run: If True, show what would be done.
+
+    Returns:
+        True if successful.
+    """
+    import tarfile
+
+    if not os.path.isfile(archive_path):
+        log_error(f"Archive not found: {archive_path}")
+        return False
+
+    if dry_run:
+        log_info(f"[DRY RUN] Would decompress: {archive_path} -> {target_dir}")
+        return True
+
+    log_info(f"Decompressing: {archive_path} -> {target_dir}")
+
+    try:
+        with tarfile.open(archive_path, "r:xz") as tar:
+            # Path traversal protection: skip members with .. or absolute paths
+            safe_members = []
+            skipped = 0
+            for member in tar.getmembers():
+                # Skip absolute paths
+                if member.name.startswith("/") or member.name.startswith("\\"):
+                    skipped += 1
+                    continue
+                # Skip path traversal
+                normalized = os.path.normpath(member.name)
+                if normalized.startswith("..") or "/../" in member.name:
+                    skipped += 1
+                    continue
+                safe_members.append(member)
+
+            if skipped > 0:
+                log_warn(f"Skipped {skipped} archive members with unsafe paths")
+
+            # Use filter='data' on Python 3.12+ for additional safety
+            if sys.version_info >= (3, 12):
+                tar.extractall(path=target_dir, members=safe_members,
+                               filter='data')
+            else:
+                tar.extractall(path=target_dir, members=safe_members)
+
+        log_success(f"Decompressed {len(safe_members)} members to {target_dir}")
+        return True
+
+    except Exception as e:
+        log_error(f"Decompression failed: {e}")
+        return False
+
+
+def _make_s3_progress_callback(total_size, description):
+    # type: (int, str) -> Any
+    """Create a progress callback for S3 transfers.
+
+    Uses tqdm if available, otherwise prints periodic text updates.
+
+    Args:
+        total_size: Total file size in bytes.
+        description: Description for the progress display.
+
+    Returns:
+        Callback function that accepts bytes_transferred.
+    """
+    try:
+        from tqdm import tqdm as tqdm_cls
+        pbar = tqdm_cls(total=total_size, unit='B', unit_scale=True, desc=description)
+
+        def callback(bytes_transferred):
+            pbar.update(bytes_transferred)
+
+        # Attach close method so caller can finalize
+        callback.close = pbar.close  # type: ignore[attr-defined]
+        return callback
+    except ImportError:
+        pass
+
+    # Text fallback
+    state = {"transferred": 0, "last_pct": -1}
+
+    def callback(bytes_transferred):
+        state["transferred"] += bytes_transferred
+        if total_size > 0:
+            pct = int(state["transferred"] * 100 / total_size)
+            # Print every 10%
+            if pct >= state["last_pct"] + 10:
+                state["last_pct"] = pct
+                mb = state["transferred"] / (1024 * 1024)
+                total_mb = total_size / (1024 * 1024)
+                log_info(f"  {description}: {mb:.1f}/{total_mb:.1f} MB ({pct}%)")
+
+    callback.close = lambda: None  # type: ignore[attr-defined]
+    return callback
+
+
+def _upload_archive(archive_path, bucket, s3_key, dry_run):
+    # type: (str, str, str, bool) -> bool
+    """Upload an archive to S3 with progress tracking.
+
+    Args:
+        archive_path: Local archive file path.
+        bucket: S3 bucket name.
+        s3_key: S3 object key.
+        dry_run: If True, show what would be done.
+
+    Returns:
+        True if successful.
+    """
+    from utils.s3 import (
+        check_aws_credentials, get_s3_client, ensure_bucket_exists,
+        upload_file, get_transfer_config, s3_file_exists,
+    )
+
+    if dry_run:
+        if os.path.exists(archive_path):
+            file_size = os.path.getsize(archive_path)
+            size_mb = file_size / (1024 * 1024)
+            log_info(f"[DRY RUN] Would upload: {archive_path} ({size_mb:.1f} MB)")
+        else:
+            log_info(f"[DRY RUN] Would upload: {archive_path}")
+        log_info(f"[DRY RUN] Destination: s3://{bucket}/{s3_key}")
+        return True
+
+    log_info("Checking AWS credentials...")
+    if not check_aws_credentials():
+        log_error("AWS credentials not configured. Run 'aws configure' first.")
+        return False
+
+    s3_client = get_s3_client()
+
+    if not ensure_bucket_exists(s3_client, bucket):
+        return False
+
+    file_size = os.path.getsize(archive_path)
+    size_mb = file_size / (1024 * 1024)
+    log_info(f"Uploading: {archive_path} ({size_mb:.1f} MB) -> s3://{bucket}/{s3_key}")
+
+    transfer_config = get_transfer_config()
+    progress = _make_s3_progress_callback(file_size, "Upload")
+
+    try:
+        success = upload_file(
+            s3_client, archive_path, bucket, s3_key,
+            transfer_config=transfer_config, callback=progress,
+        )
+    finally:
+        if hasattr(progress, 'close'):
+            progress.close()
+
+    if not success:
+        return False
+
+    # Verify upload size
+    if s3_file_exists(s3_client, bucket, s3_key, local_size=file_size):
+        log_success(f"Upload verified: s3://{bucket}/{s3_key}")
+        return True
+    else:
+        log_error("Upload verification failed: size mismatch")
+        return False
+
+
+def _download_archive(bucket, s3_key, archive_path, dry_run):
+    # type: (str, str, str, bool) -> bool
+    """Download an archive from S3 with progress tracking.
+
+    Args:
+        bucket: S3 bucket name.
+        s3_key: S3 object key.
+        archive_path: Local path to save archive.
+        dry_run: If True, show what would be done.
+
+    Returns:
+        True if successful.
+    """
+    from utils.s3 import (
+        check_aws_credentials, get_s3_client,
+        download_file, get_transfer_config,
+    )
+
+    if dry_run:
+        log_info(f"[DRY RUN] Would download: s3://{bucket}/{s3_key}")
+        log_info(f"[DRY RUN] Destination: {archive_path}")
+        return True
+
+    log_info("Checking AWS credentials...")
+    if not check_aws_credentials():
+        log_error("AWS credentials not configured. Run 'aws configure' first.")
+        return False
+
+    s3_client = get_s3_client()
+
+    # Get file size for progress tracking
+    try:
+        response = s3_client.head_object(Bucket=bucket, Key=s3_key)
+        remote_size = response['ContentLength']
+    except Exception as e:
+        log_error(f"Archive not found in S3: s3://{bucket}/{s3_key} ({e})")
+        return False
+
+    size_mb = remote_size / (1024 * 1024)
+    log_info(f"Downloading: s3://{bucket}/{s3_key} ({size_mb:.1f} MB) -> {archive_path}")
+
+    transfer_config = get_transfer_config()
+    progress = _make_s3_progress_callback(remote_size, "Download")
+
+    try:
+        success = download_file(
+            s3_client, bucket, s3_key, archive_path,
+            transfer_config=transfer_config, callback=progress,
+        )
+    finally:
+        if hasattr(progress, 'close'):
+            progress.close()
+
+    if not success:
+        return False
+
+    # Verify download size
+    local_size = os.path.getsize(archive_path)
+    if local_size == remote_size:
+        log_success(f"Download verified: {archive_path} ({size_mb:.1f} MB)")
+        return True
+    else:
+        log_error(f"Download verification failed: expected {remote_size} bytes, got {local_size}")
+        return False
+
+
+def cmd_pack(args):
+    # type: (argparse.Namespace) -> int
+    """Pack/unpack dataset archives for transfer to/from S3.
+
+    Modes:
+        compress (default): Create a .tar.xz archive from a dataset directory.
+        upload (--upload):  Compress and upload to S3.
+        download (--download): Download from S3 and decompress.
+    """
+    log_step("Pack")
+
+    env = detect_cloud_environment()
+    data_dir = args.data_dir or os.path.join(env.work_dir, "data")
+    dataset_name, dataset_path = _resolve_dataset_path(args.dataset, data_dir)
+    bucket = args.bucket
+    prefix = args.prefix
+    s3_key = "{}/{}.tar.xz".format(prefix, dataset_name)
+    compression_level = args.compression_level
+    dry_run = args.dry_run
+    keep_archive = args.keep_archive
+    force = args.force
+
+    # Determine archive path
+    if args.output:
+        archive_path = os.path.abspath(args.output)
+    else:
+        archive_path = os.path.join(data_dir, "{}.tar.xz".format(dataset_name))
+
+    log_info(f"Dataset: {dataset_name}")
+    log_info(f"Dataset path: {dataset_path}")
+    log_info(f"Archive: {archive_path}")
+
+    if args.download:
+        # === Download mode ===
+        log_info(f"Mode: download from s3://{bucket}/{s3_key}")
+
+        if os.path.isdir(dataset_path) and not force:
+            log_error(f"Dataset directory already exists: {dataset_path}")
+            log_info("Use --force to overwrite")
+            return 1
+
+        if not _download_archive(bucket, s3_key, archive_path, dry_run):
+            return 1
+
+        if not dry_run:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(archive_path) or ".", exist_ok=True)
+
+            # Extract to data_dir (archive contains dataset_name/ as top dir)
+            extract_dir = os.path.dirname(dataset_path) or data_dir
+            if not _decompress_archive(archive_path, extract_dir, dry_run):
+                return 1
+
+            if not keep_archive:
+                log_info(f"Removing archive: {archive_path}")
+                os.remove(archive_path)
+
+        log_success("Download and extract complete")
+        return 0
+
+    else:
+        # === Compress / Upload mode ===
+        upload = args.upload
+
+        if os.path.exists(archive_path) and not force:
+            log_error(f"Archive already exists: {archive_path}")
+            log_info("Use --force to overwrite")
+            return 1
+
+        # Ensure archive parent directory exists
+        if not dry_run:
+            os.makedirs(os.path.dirname(archive_path) or ".", exist_ok=True)
+
+        if not _compress_dataset(dataset_path, archive_path, compression_level, dry_run):
+            return 1
+
+        if upload:
+            log_info(f"Mode: upload to s3://{bucket}/{s3_key}")
+
+            if not _upload_archive(archive_path, bucket, s3_key, dry_run):
+                return 1
+
+            if not dry_run and not keep_archive:
+                log_info(f"Removing local archive: {archive_path}")
+                os.remove(archive_path)
+
+            log_success("Compress and upload complete")
+        else:
+            log_success("Compression complete")
+
+        return 0
+
+
+# =============================================================================
 # Argument parsing
 # =============================================================================
 
@@ -689,6 +1125,34 @@ def build_parser() -> argparse.ArgumentParser:
     # --- info ---
     subparsers.add_parser("info", help="Show environment info")
 
+    # --- pack ---
+    p_pack = subparsers.add_parser("pack", help="Pack/unpack dataset archives for S3 transfer")
+    p_pack.add_argument("dataset",
+                         help="Dataset name ({}) or directory path".format(
+                             ", ".join(sorted(KNOWN_DATASETS.keys()))))
+    pack_mode = p_pack.add_mutually_exclusive_group()
+    pack_mode.add_argument("--upload", action="store_true",
+                           help="Compress and upload archive to S3")
+    pack_mode.add_argument("--download", action="store_true",
+                           help="Download archive from S3 and decompress")
+    p_pack.add_argument("--bucket", default="verylargeweebmodel",
+                         help="S3 bucket (default: verylargeweebmodel)")
+    p_pack.add_argument("--prefix", default="packed",
+                         help="S3 key prefix (default: packed)")
+    p_pack.add_argument("--data-dir",
+                         help="Base data directory override")
+    p_pack.add_argument("--output",
+                         help="Override archive output path")
+    p_pack.add_argument("--keep-archive", action="store_true",
+                         help="Don't delete archive after upload/download")
+    p_pack.add_argument("--force", action="store_true",
+                         help="Overwrite existing archive or directory")
+    p_pack.add_argument("--compression-level", type=int, default=6,
+                         choices=range(0, 10), metavar="N",
+                         help="xz compression level 0-9 (default: 6)")
+    p_pack.add_argument("--dry-run", action="store_true",
+                         help="Show what would be done")
+
     return parser
 
 
@@ -708,6 +1172,7 @@ def main(argv=None) -> int:
         "deploy": cmd_deploy,
         "sanity": cmd_sanity,
         "info": cmd_info,
+        "pack": cmd_pack,
     }
 
     handler = handlers.get(args.command)
