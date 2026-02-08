@@ -1138,6 +1138,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     model.train()
     total_loss = 0
     num_batches = 0
+    valid_step_count = 0  # Counts valid (non-skipped) batches for gradient accumulation
 
     # Occupancy rate tracking
     epoch_pred_occ_sum = 0.0
@@ -1145,10 +1146,6 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     epoch_voxel_count = 0
 
     for batch_idx, batch in enumerate(dataloader):
-        # Only zero gradients at accumulation boundaries
-        if batch_idx % grad_accum_steps == 0:
-            optimizer.zero_grad()
-
         # Validate batch has required keys
         required_keys = ['history_occupancy', 'future_occupancy', 'history_poses', 'future_poses']
         missing = [k for k in required_keys if k not in batch]
@@ -1181,6 +1178,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             if batch_idx % debug_freq == 0:
                 print(f"  [WARN] Batch {batch_idx} has all-zero future occupancy, skipping")
             continue
+
+        # Zero gradients at accumulation boundaries (based on valid batches, not batch_idx)
+        if valid_step_count % grad_accum_steps == 0:
+            optimizer.zero_grad()
 
         # Use autocast for mixed precision
         use_amp = scaler is not None or amp_dtype is not None
@@ -1292,8 +1293,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
 
         # Check for NaN/Inf BEFORE backward to prevent corrupting model weights
         if not torch.isfinite(loss):
-            print(f"  [WARN] Non-finite loss at batch {batch_idx}: {loss.item()}, skipping")
-            optimizer.zero_grad()
+            print(f"  [WARN] Non-finite loss at batch {batch_idx}: {loss.item()}, skipping backward")
             continue
 
         # Scale loss for gradient accumulation
@@ -1324,8 +1324,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                     'debug/params_with_grad': num_params_with_grad,
                 }, commit=False)
 
-        # Only step optimizer at accumulation boundaries
-        if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
+        valid_step_count += 1
+
+        # Only step optimizer at accumulation boundaries (based on valid batches)
+        if valid_step_count % grad_accum_steps == 0:
             if scaler is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
@@ -1366,6 +1368,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 'train/loss': loss.item(),
                 'train/global_step': global_step,
             })
+
+    # Step any remaining accumulated gradients at epoch end
+    if valid_step_count > 0 and valid_step_count % grad_accum_steps != 0:
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+            optimizer.step()
 
     if num_batches == 0:
         print(f"  [ERROR] All batches were skipped! Check data loading.")

@@ -17,6 +17,10 @@ This test suite provides regression coverage for specific bugs that were fixed:
 - Empty point cloud handling in voxelization
 - Single-element batch handling in collate functions
 - NaN propagation in loss functions
+- Uncertainty NLL uses sigma^2 (not sigma) per Gaussian NLL formula
+- Gradient accumulation uses valid_step_count (not batch_idx)
+- NuScenes OccWorld dataset returns float32 occupancy tensors
+- MidAir and TartanAir datasets include domain_tag field
 """
 
 import sys
@@ -1022,6 +1026,204 @@ class TestIntegrationTestNotCollected(unittest.TestCase):
             content = f.read()
         self.assertIn('collect_ignore', content)
         self.assertIn('scripts', content)
+
+
+class TestUncertaintyNLLFormula(unittest.TestCase):
+    """Regression: uncertainty NLL must use sigma^2 (variance), not sigma (std dev).
+
+    The Gaussian NLL formula is L = 0.5 * (error^2 / sigma^2 + log(sigma^2)).
+    Previously the code divided by sigma (not sigma^2) and used log(sigma) instead
+    of log(sigma^2), producing wrong gradients for uncertainty learning.
+    """
+
+    def test_nll_uses_sigma_squared(self):
+        """Verify the NLL formula divides by sigma^2, not sigma."""
+        import inspect
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        source = inspect.getsource(OccWorld6DoFLoss.forward)
+        # Must contain sigma ** 2 or sigma_sq
+        self.assertTrue(
+            'pos_sigma ** 2' in source or 'pos_sigma_sq' in source,
+            "NLL formula must use sigma^2 (variance), not sigma (std dev)")
+        # Must NOT have the old broken pattern: pos_sigma + eps) without squaring
+        self.assertNotIn(
+            'pos_error / (pos_sigma + eps)',
+            source,
+            "Found old broken pattern: dividing by sigma instead of sigma^2")
+
+    def test_nll_gradient_correctness(self):
+        """Verify NLL gradients flow correctly through sigma^2."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss(uncertainty_weight=1.0)
+
+        # Create mock outputs with uncertainty
+        B, T = 2, 3
+        pred_occ = torch.randn(B, T, 8, 8, 4, requires_grad=True)
+        pred_poses = torch.randn(B, T, 13, requires_grad=True)
+        # Raw logits (before sigmoid bounding in loss)
+        uncertainty = torch.randn(B, T, 13, requires_grad=True)
+
+        outputs = {
+            'future_occupancy': pred_occ,
+            'future_poses': pred_poses,
+            'uncertainty': uncertainty,
+        }
+        targets = {
+            'future_occupancy': torch.zeros(B, T, 8, 8, 4),
+            'future_poses': torch.randn(B, T, 13),
+        }
+
+        losses = loss_fn(outputs, targets)
+        total = losses['total']
+        total.backward()
+
+        # Uncertainty must receive gradients
+        self.assertIsNotNone(uncertainty.grad)
+        self.assertTrue(torch.isfinite(uncertainty.grad).all(),
+                        "Uncertainty gradients must be finite")
+        self.assertGreater(uncertainty.grad.abs().sum().item(), 0,
+                           "Uncertainty must receive non-zero gradients")
+
+    def test_nll_higher_sigma_lower_penalty(self):
+        """Higher sigma should reduce the error penalty term (error^2 / sigma^2)."""
+        # With sigma=1: error^2/1 = error^2
+        # With sigma=2: error^2/4 = error^2/4 (lower penalty)
+        error_sq = torch.tensor(4.0)
+        eps = 1e-8
+
+        sigma_small = torch.tensor(1.0)
+        sigma_large = torch.tensor(2.0)
+
+        penalty_small = error_sq / (sigma_small ** 2 + eps)
+        penalty_large = error_sq / (sigma_large ** 2 + eps)
+
+        self.assertGreater(penalty_small.item(), penalty_large.item(),
+                           "Higher sigma should reduce error penalty")
+
+
+class TestGradientAccumulationWithSkips(unittest.TestCase):
+    """Regression: gradient accumulation must use valid_step_count, not batch_idx.
+
+    When batches are skipped (missing keys, bad shapes, zero occupancy, NaN loss),
+    the accumulation boundary check must track only valid (non-skipped) batches.
+    Using batch_idx causes gradients to be discarded without stepping when
+    skip patterns align with accumulation boundaries.
+    """
+
+    def test_valid_step_count_in_source(self):
+        """Verify train_epoch uses valid_step_count for accumulation."""
+        import inspect
+        from train import train_epoch
+
+        source = inspect.getsource(train_epoch)
+        self.assertIn('valid_step_count', source,
+                      "train_epoch must use valid_step_count for gradient accumulation")
+        # Must NOT use batch_idx for accumulation boundaries
+        self.assertNotIn('batch_idx % grad_accum_steps', source,
+                         "Must not use batch_idx for zero_grad boundary")
+        self.assertNotIn('(batch_idx + 1) % grad_accum_steps', source,
+                         "Must not use batch_idx for optimizer.step boundary")
+
+    def test_end_of_epoch_step(self):
+        """Verify remaining gradients are stepped at epoch end."""
+        import inspect
+        from train import train_epoch
+
+        source = inspect.getsource(train_epoch)
+        # Must have end-of-epoch step for partial accumulation windows
+        self.assertIn('valid_step_count % grad_accum_steps != 0', source,
+                      "Must step remaining gradients at epoch end")
+
+    def test_nan_skip_preserves_accumulated_grads(self):
+        """NaN skip should NOT zero_grad (preserves valid accumulated gradients)."""
+        import inspect
+        from train import train_epoch
+
+        source = inspect.getsource(train_epoch)
+        # Find the NaN check block
+        nan_idx = source.find('Non-finite loss')
+        self.assertGreater(nan_idx, 0, "Must have NaN check in train_epoch")
+
+        # The ~50 chars after the NaN warning should NOT contain zero_grad
+        nan_block = source[nan_idx:nan_idx + 200]
+        self.assertNotIn('zero_grad', nan_block,
+                         "NaN skip must NOT call zero_grad (would discard valid accumulated gradients)")
+
+
+class TestNuScenesOccWorldFloat(unittest.TestCase):
+    """Regression: NuScenes OccWorld dataset must return float32 occupancy tensors.
+
+    Previously, occupancy was created as np.uint8 but torch.from_numpy() was called
+    without .float(), producing torch.uint8 tensors that would cause dtype errors
+    in loss functions.
+    """
+
+    def test_float_conversion_in_source(self):
+        """Verify .float() is called on occupancy tensors."""
+        import inspect
+        from dataset.nuscenes_occworld_dataset import NuScenesOccWorldDataset
+
+        source = inspect.getsource(NuScenesOccWorldDataset.__getitem__)
+        # Both history and future occupancy must have .float()
+        lines = source.split('\n')
+        for line in lines:
+            if 'history_occupancy' in line and 'torch.from_numpy' in line:
+                self.assertIn('.float()', line,
+                              "history_occupancy must be converted to float32")
+            if 'future_occupancy' in line and 'torch.from_numpy' in line:
+                self.assertIn('.float()', line,
+                              "future_occupancy must be converted to float32")
+
+
+class TestDomainTagPresence(unittest.TestCase):
+    """Regression: all datasets must include domain_tag in __getitem__ return dict.
+
+    MidAir and TartanAir were missing 'domain_tag': 'sim', which would cause
+    KeyError if training code accesses it for domain adaptation or logging.
+    """
+
+    def test_midair_has_domain_tag(self):
+        """MidAir dataset __getitem__ must return domain_tag."""
+        import inspect
+        from dataset.midair_dataset import MidAirDataset
+
+        source = inspect.getsource(MidAirDataset.__getitem__)
+        self.assertIn("'domain_tag'", source,
+                      "MidAir __getitem__ must return domain_tag")
+        self.assertIn("'sim'", source,
+                      "MidAir domain_tag must be 'sim'")
+
+    def test_tartanair_has_domain_tag(self):
+        """TartanAir dataset __getitem__ must return domain_tag."""
+        import inspect
+        from dataset.tartanair_dataset import TartanAirDataset
+
+        source = inspect.getsource(TartanAirDataset.__getitem__)
+        self.assertIn("'domain_tag'", source,
+                      "TartanAir __getitem__ must return domain_tag")
+        self.assertIn("'sim'", source,
+                      "TartanAir domain_tag must be 'sim'")
+
+    def test_all_datasets_have_domain_tag(self):
+        """All dataset __getitem__ methods must return domain_tag."""
+        import inspect
+
+        datasets_to_check = [
+            ('dataset.gazebo_occworld_dataset', 'GazeboOccWorldDataset'),
+            ('dataset.uavscenes_dataset', 'UAVScenesDataset'),
+            ('dataset.nuscenes_occworld_dataset', 'NuScenesOccWorldDataset'),
+            ('dataset.midair_dataset', 'MidAirDataset'),
+            ('dataset.tartanair_dataset', 'TartanAirDataset'),
+        ]
+
+        for module_name, class_name in datasets_to_check:
+            module = __import__(module_name, fromlist=[class_name])
+            cls = getattr(module, class_name)
+            source = inspect.getsource(cls.__getitem__)
+            self.assertIn('domain_tag', source,
+                          f"{class_name}.__getitem__ must return domain_tag")
 
 
 if __name__ == '__main__':

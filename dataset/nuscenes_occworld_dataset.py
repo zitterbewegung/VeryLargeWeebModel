@@ -238,8 +238,8 @@ class NuScenesOccWorldDataset(Dataset):
         future_poses = all_poses[n_hist:]
 
         return {
-            'history_occupancy': torch.from_numpy(np.stack(history_occ)),
-            'future_occupancy': torch.from_numpy(np.stack(future_occ)),
+            'history_occupancy': torch.from_numpy(np.stack(history_occ)).float(),
+            'future_occupancy': torch.from_numpy(np.stack(future_occ)).float(),
             'history_poses': torch.from_numpy(np.stack(history_poses)).float(),
             'future_poses': torch.from_numpy(np.stack(future_poses)).float(),
             'scene_name': sample_info['scene_name'],

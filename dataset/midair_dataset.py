@@ -456,6 +456,7 @@ class MidAirDataset(Dataset):
             'env': sample['env'],
             'climate': sample['climate'],
             'trajectory': sample['trajectory'],
+            'domain_tag': 'sim',
         }
 
 

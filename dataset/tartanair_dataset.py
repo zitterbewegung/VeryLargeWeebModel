@@ -364,6 +364,7 @@ class TartanAirDataset(Dataset):
             'agent_type': 1,  # Aerial
             'env': sample['env'],
             'trajectory': sample['trajectory'],
+            'domain_tag': 'sim',
         }
 
 

@@ -899,7 +899,8 @@ class OccWorld6DoFLoss(nn.Module):
             pos_error = (pred_pos - target_pos) ** 2
             pos_sigma = uncertainty_bounded[..., :3]
             eps = 1e-8
-            pos_nll = 0.5 * (pos_error / (pos_sigma + eps) + torch.log(pos_sigma.clamp(min=eps)))
+            pos_sigma_sq = pos_sigma ** 2
+            pos_nll = 0.5 * (pos_error / (pos_sigma_sq + eps) + torch.log(pos_sigma_sq.clamp(min=eps)))
 
             # Regularize uncertainty toward 1.0 (moderate confidence)
             uncertainty_reg = ((uncertainty_bounded - 1.0) ** 2).mean() * 0.1
