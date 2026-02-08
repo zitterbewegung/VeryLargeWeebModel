@@ -708,20 +708,65 @@ class OccWorld6DoF(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    """Focal Loss for sparse occupancy."""
-    
-    def __init__(self, alpha: float = 0.99, gamma: float = 2.0):
+    """Focal Loss for sparse occupancy with optional dynamic alpha."""
+
+    def __init__(self, alpha: float = 0.99, gamma: float = 2.0, dynamic_alpha: bool = False):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
-    
+        self.dynamic_alpha = dynamic_alpha
+
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         pred = pred.clamp(min=1e-7, max=1 - 1e-7)
         bce = -target * torch.log(pred) - (1 - target) * torch.log(1 - pred)
         p_t = torch.where(target == 1, pred, 1 - pred)
         focal_weight = (1 - p_t) ** self.gamma
-        alpha_weight = torch.where(target == 1, self.alpha, 1 - self.alpha)
+        alpha = self._get_alpha(target)
+        alpha_weight = torch.where(target == 1, alpha, 1 - alpha)
         return (alpha_weight * focal_weight * bce).mean()
+
+    def _get_alpha(self, target: torch.Tensor) -> float:
+        """Return alpha, adapting to batch occupancy ratio if dynamic."""
+        if self.dynamic_alpha:
+            occupied_ratio = target.sum() / target.numel()
+            return (1.0 - occupied_ratio).clamp(min=0.5, max=0.999)
+        return self.alpha
+
+
+class LovaszBinaryLoss(nn.Module):
+    """Lovász-Softmax loss for binary occupancy prediction.
+
+    Directly optimizes the IoU (Jaccard index) using the Lovász extension,
+    a tight convex surrogate that computes exact subgradients of IoU.
+
+    Reference: Berman et al., "The Lovász-Softmax loss" (CVPR 2018)
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_flat = pred.reshape(-1)
+        target_flat = target.reshape(-1).float()
+
+        if target_flat.numel() == 0:
+            return pred_flat.sum() * 0.0
+
+        errors = (target_flat - pred_flat).abs()
+        errors_sorted, perm = torch.sort(errors, dim=0, descending=True)
+        target_sorted = target_flat[perm]
+
+        grad = self._lovasz_grad(target_sorted)
+        return torch.dot(errors_sorted, grad)
+
+    @staticmethod
+    def _lovasz_grad(gt_sorted: torch.Tensor) -> torch.Tensor:
+        """Gradient of Lovász extension w.r.t sorted errors (Alg. 1 in paper)."""
+        p = len(gt_sorted)
+        gts = gt_sorted.sum()
+        intersection = gts - gt_sorted.cumsum(0)
+        union = gts + (1.0 - gt_sorted).cumsum(0)
+        jaccard = 1.0 - intersection / union
+        if p > 1:
+            jaccard[1:] = jaccard[1:] - jaccard[:-1]
+        return jaccard
 
 
 class OccWorld6DoFLoss(nn.Module):
@@ -745,8 +790,10 @@ class OccWorld6DoFLoss(nn.Module):
         place_weight: float = 0.1,
         focal_alpha: float = 0.99,
         focal_gamma: float = 2.0,
+        dynamic_alpha: bool = True,
         dice_weight: float = 1.0,
         mean_weight: float = 10.0,
+        lovasz_weight: float = 1.0,
         # Anti-collapse parameters
         pose_variance_weight: float = 1.0,  # Penalize low variance in pose predictions
         min_pose_std: float = 0.01,  # Minimum expected std for poses
@@ -763,9 +810,11 @@ class OccWorld6DoFLoss(nn.Module):
         self.place_weight = place_weight
 
         # Focal loss for occupancy
-        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, dynamic_alpha=dynamic_alpha)
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
+        self.lovasz_loss = LovaszBinaryLoss()
+        self.lovasz_weight = lovasz_weight
 
         # Anti-collapse parameters
         self.pose_variance_weight = pose_variance_weight
@@ -832,8 +881,11 @@ class OccWorld6DoFLoss(nn.Module):
         
         # Mean-matching regularization
         mean_loss = F.mse_loss(pred_occ.mean(), target_occ.mean())
-        
-        occ_loss = focal + self.dice_weight * dice + self.mean_weight * mean_loss
+
+        # Lovász loss: directly optimizes IoU
+        lovasz = self.lovasz_loss(pred_occ, target_occ)
+
+        occ_loss = focal + self.dice_weight * dice + self.mean_weight * mean_loss + self.lovasz_weight * lovasz
         losses['occ'] = occ_loss * self.occ_weight
         
         # Pose loss

@@ -1002,12 +1002,14 @@ class FocalLoss(nn.Module):
     Args:
         alpha: Weight for positive class (occupied). Set high for sparse data (e.g., 0.95 for 1% occupancy)
         gamma: Focusing parameter. Higher = more focus on hard examples. Default 2.0 works well.
+        dynamic_alpha: If True, alpha is computed per-batch from actual occupancy ratio.
     """
 
-    def __init__(self, alpha=0.95, gamma=2.0):
+    def __init__(self, alpha=0.95, gamma=2.0, dynamic_alpha=False):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.dynamic_alpha = dynamic_alpha
 
     def forward(self, pred, target):
         # Clamp predictions to avoid log(0)
@@ -1021,10 +1023,54 @@ class FocalLoss(nn.Module):
         focal_weight = (1 - p_t) ** self.gamma
 
         # Alpha weight: alpha for positive, (1-alpha) for negative
-        alpha_weight = torch.where(target == 1, self.alpha, 1 - self.alpha)
+        alpha = self._get_alpha(target)
+        alpha_weight = torch.where(target == 1, alpha, 1 - alpha)
 
         focal_loss = alpha_weight * focal_weight * bce
         return focal_loss.mean()
+
+    def _get_alpha(self, target):
+        """Return alpha, adapting to batch occupancy ratio if dynamic."""
+        if self.dynamic_alpha:
+            occupied_ratio = target.sum() / target.numel()
+            return (1.0 - occupied_ratio).clamp(min=0.5, max=0.999)
+        return self.alpha
+
+
+class LovaszBinaryLoss(nn.Module):
+    """Lovász-Softmax loss for binary occupancy prediction.
+
+    Directly optimizes the IoU (Jaccard index) using the Lovász extension,
+    a tight convex surrogate that computes exact subgradients of IoU.
+
+    Reference: Berman et al., "The Lovász-Softmax loss" (CVPR 2018)
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_flat = pred.reshape(-1)
+        target_flat = target.reshape(-1).float()
+
+        if target_flat.numel() == 0:
+            return pred_flat.sum() * 0.0
+
+        errors = (target_flat - pred_flat).abs()
+        errors_sorted, perm = torch.sort(errors, dim=0, descending=True)
+        target_sorted = target_flat[perm]
+
+        grad = self._lovasz_grad(target_sorted)
+        return torch.dot(errors_sorted, grad)
+
+    @staticmethod
+    def _lovasz_grad(gt_sorted: torch.Tensor) -> torch.Tensor:
+        """Gradient of Lovász extension w.r.t sorted errors (Alg. 1 in paper)."""
+        p = len(gt_sorted)
+        gts = gt_sorted.sum()
+        intersection = gts - gt_sorted.cumsum(0)
+        union = gts + (1.0 - gt_sorted).cumsum(0)
+        jaccard = 1.0 - intersection / union
+        if p > 1:
+            jaccard[1:] = jaccard[1:] - jaccard[:-1]
+        return jaccard
 
 
 class OccupancyLoss(nn.Module):
@@ -1044,11 +1090,14 @@ class OccupancyLoss(nn.Module):
         smooth: Smoothing factor for Dice loss
     """
 
-    def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dice_weight=1.0, mean_weight=10.0, smooth=1.0, temporal_decay=0.0):
+    def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dynamic_alpha=True, dice_weight=1.0,
+                 mean_weight=10.0, lovasz_weight=1.0, smooth=1.0, temporal_decay=0.0):
         super().__init__()
-        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, dynamic_alpha=dynamic_alpha)
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
+        self.lovasz_loss = LovaszBinaryLoss()
+        self.lovasz_weight = lovasz_weight
         self.smooth = smooth
         self.temporal_decay = temporal_decay
         self._debug_counter = 0
@@ -1080,7 +1129,8 @@ class OccupancyLoss(nn.Module):
             bce = -target * torch.log(pred_c) - (1 - target) * torch.log(1 - pred_c)
             p_t = torch.where(target == 1, pred_c, 1 - pred_c)
             focal_weight = (1 - p_t) ** self.focal_loss.gamma
-            alpha_weight = torch.where(target == 1, self.focal_loss.alpha, 1 - self.focal_loss.alpha)
+            alpha = self.focal_loss._get_alpha(target)
+            alpha_weight = torch.where(target == 1, alpha, 1 - alpha)
             focal_per_elem = alpha_weight * focal_weight * bce
             return (focal_per_elem * weights).mean()
         else:
@@ -1113,12 +1163,16 @@ class OccupancyLoss(nn.Module):
         target_mean = target.mean()
         mean_loss = F.mse_loss(pred_mean, target_mean)
 
-        total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
+        # Lovász loss: directly optimizes IoU
+        lovasz = self.lovasz_loss(pred, target)
+
+        total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss + self.lovasz_weight * lovasz
 
         # Store components for wandb logging
         self._last_components = {
             'focal': focal.item(),
             'dice': dice_loss.item(),
+            'lovasz': lovasz.item(),
             'mean_match': mean_loss.item(),
             'intersection': intersection.item(),
             'pred_sum': pred_flat.sum().item(),

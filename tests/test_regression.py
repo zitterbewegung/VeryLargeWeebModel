@@ -1226,5 +1226,150 @@ class TestDomainTagPresence(unittest.TestCase):
                           f"{class_name}.__getitem__ must return domain_tag")
 
 
+class TestDynamicFocalAlpha(unittest.TestCase):
+    """Test that FocalLoss adapts alpha to batch occupancy ratio."""
+
+    def test_dynamic_alpha_sparse_batch(self):
+        """Sparse batch (~1% occupied) should get alpha close to 0.99."""
+        from train import FocalLoss
+
+        fl = FocalLoss(dynamic_alpha=True)
+        # ~1% occupied
+        target = torch.zeros(2, 4, 32, 32, 16)
+        target[:, :, 0, 0, 0] = 1.0  # Very few occupied
+
+        alpha = fl._get_alpha(target)
+        self.assertGreater(alpha.item(), 0.95,
+                           "Sparse batch should produce high alpha")
+
+    def test_dynamic_alpha_dense_batch(self):
+        """Dense batch (~50% occupied) should get alpha ~0.5."""
+        from train import FocalLoss
+
+        fl = FocalLoss(dynamic_alpha=True)
+        target = torch.ones(2, 4, 8, 8, 4)
+        target[:, :, :4, :, :] = 0.0  # 50% occupied
+
+        alpha = fl._get_alpha(target)
+        self.assertAlmostEqual(alpha.item(), 0.5, places=1,
+                               msg="50% occupancy should produce alpha ~0.5")
+
+    def test_dynamic_alpha_clamped(self):
+        """Alpha should be clamped to [0.5, 0.999]."""
+        from train import FocalLoss
+
+        fl = FocalLoss(dynamic_alpha=True)
+
+        # All occupied → ratio=1.0, alpha=0.0 → clamped to 0.5
+        target_full = torch.ones(2, 4, 8, 8, 4)
+        alpha_full = fl._get_alpha(target_full)
+        self.assertGreaterEqual(alpha_full.item(), 0.5)
+
+        # All empty → ratio=0.0, alpha=1.0 → clamped to 0.999
+        target_empty = torch.zeros(2, 4, 8, 8, 4)
+        alpha_empty = fl._get_alpha(target_empty)
+        self.assertLessEqual(alpha_empty.item(), 0.999 + 1e-6)
+
+    def test_static_alpha_unchanged(self):
+        """With dynamic_alpha=False, alpha should always be the init value."""
+        from train import FocalLoss
+
+        fl = FocalLoss(alpha=0.95, dynamic_alpha=False)
+        target = torch.ones(8, 8)
+        self.assertEqual(fl._get_alpha(target), 0.95)
+
+    def test_6dof_focal_also_dynamic(self):
+        """OccWorld6DoFLoss FocalLoss should also support dynamic alpha."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss(dynamic_alpha=True)
+        self.assertTrue(loss_fn.focal_loss.dynamic_alpha)
+
+
+class TestLovaszBinaryLoss(unittest.TestCase):
+    """Test Lovász-Softmax loss for binary occupancy."""
+
+    def test_perfect_prediction_zero_loss(self):
+        """Perfect prediction should give near-zero loss."""
+        from train import LovaszBinaryLoss
+
+        lovasz = LovaszBinaryLoss()
+        target = torch.tensor([0, 1, 1, 0, 0, 1, 0, 0], dtype=torch.float32)
+        pred = target.clone()  # Perfect prediction
+        loss = lovasz(pred, target)
+        self.assertAlmostEqual(loss.item(), 0.0, places=5)
+
+    def test_worst_prediction_high_loss(self):
+        """Inverted prediction should give high loss."""
+        from train import LovaszBinaryLoss
+
+        lovasz = LovaszBinaryLoss()
+        target = torch.tensor([0, 1, 1, 0, 0, 1, 0, 0], dtype=torch.float32)
+        pred = 1.0 - target  # Worst prediction
+        loss = lovasz(pred, target)
+        self.assertGreater(loss.item(), 0.5)
+
+    def test_gradient_flow(self):
+        """Gradients should flow through Lovász loss."""
+        from train import LovaszBinaryLoss
+
+        lovasz = LovaszBinaryLoss()
+        logits = torch.randn(100, requires_grad=True)
+        pred = logits.sigmoid()
+        target = (torch.randn(100) > 0).float()
+
+        loss = lovasz(pred, target)
+        loss.backward()
+        # Check gradient on the leaf tensor (logits), not the non-leaf (pred)
+        self.assertIsNotNone(logits.grad)
+        self.assertTrue(torch.isfinite(logits.grad).all())
+
+    def test_empty_input(self):
+        """Empty input should return zero loss."""
+        from train import LovaszBinaryLoss
+
+        lovasz = LovaszBinaryLoss()
+        pred = torch.tensor([], dtype=torch.float32)
+        target = torch.tensor([], dtype=torch.float32)
+        loss = lovasz(pred, target)
+        self.assertEqual(loss.item(), 0.0)
+
+    def test_sparse_occupancy(self):
+        """Loss should work with very sparse occupancy (~1%)."""
+        from train import LovaszBinaryLoss
+
+        lovasz = LovaszBinaryLoss()
+        target = torch.zeros(10000)
+        target[:100] = 1.0  # 1% occupied
+        pred = torch.zeros(10000) + 0.01  # Predicts nearly empty
+        pred[:50] = 0.9  # Gets half the occupied voxels right
+
+        loss = lovasz(pred, target)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(loss.item(), 0.0)
+
+    def test_integrated_in_occupancy_loss(self):
+        """OccupancyLoss should include Lovász component."""
+        from train import OccupancyLoss
+
+        criterion = OccupancyLoss(lovasz_weight=1.0)
+        pred = torch.randn(2, 4, 8, 8, 4).sigmoid()
+        target = (torch.randn(2, 4, 8, 8, 4) > 1.5).float()  # Sparse
+
+        loss = criterion(pred, target)
+        components = criterion.get_loss_components()
+        self.assertIn('lovasz', components,
+                      "Loss components must include lovasz")
+        self.assertGreater(components['lovasz'], 0.0)
+
+    def test_integrated_in_6dof_loss(self):
+        """OccWorld6DoFLoss should include Lovász component."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss(lovasz_weight=1.0)
+        self.assertTrue(hasattr(loss_fn, 'lovasz_loss'))
+        self.assertEqual(loss_fn.lovasz_weight, 1.0)
+
+
 if __name__ == '__main__':
     unittest.main()
