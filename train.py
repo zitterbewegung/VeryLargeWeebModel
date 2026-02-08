@@ -1924,9 +1924,15 @@ def main():
         # Save checkpoint
         if (epoch + 1) % args.save_freq == 0 or epoch == max_epochs - 1:
             ckpt_path = work_dir / 'checkpoints' / f'epoch_{epoch+1}.pth'
+            # Unwrap state_dict keys from torch.compile (_orig_mod.) and DataParallel (module.)
+            raw_sd = model.state_dict()
+            clean_sd = {}
+            for k, v in raw_sd.items():
+                k = k.replace('_orig_mod.', '').replace('module.', '', 1)
+                clean_sd[k] = v
             torch.save({
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': clean_sd,
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
@@ -1948,9 +1954,15 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_path = work_dir / 'checkpoints' / 'best.pth'
+            # Unwrap state_dict keys from torch.compile/DataParallel
+            raw_sd = model.state_dict()
+            clean_sd = {}
+            for k, v in raw_sd.items():
+                k = k.replace('_orig_mod.', '').replace('module.', '', 1)
+                clean_sd[k] = v
             torch.save({
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': clean_sd,
                 'val_loss': val_loss,
             }, best_path)
             print(f"  New best model! Val Loss: {val_loss:.4f}")

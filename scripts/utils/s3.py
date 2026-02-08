@@ -47,10 +47,14 @@ def check_aws_credentials() -> bool:
         return False
     try:
         import socket
+        old_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(10)
-        sts = boto3.client('sts')
-        sts.get_caller_identity()
-        return True
+        try:
+            sts = boto3.client('sts')
+            sts.get_caller_identity()
+            return True
+        finally:
+            socket.setdefaulttimeout(old_timeout)
     except Exception as e:
         log_error(f"AWS credential check failed: {e}")
         return False

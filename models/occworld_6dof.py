@@ -748,7 +748,7 @@ class OccWorld6DoFLoss(nn.Module):
         pred_quat_norm = F.normalize(pred_quat, p=2, dim=-1)
         target_quat_norm = F.normalize(target_quat, p=2, dim=-1)
         quat_dot = (pred_quat_norm * target_quat_norm).sum(dim=-1).abs()
-        quat_loss = (1 - quat_dot).mean()
+        quat_loss = (1 - quat_dot).clamp(min=0).mean()
         
         # Velocity loss
         pred_vel = pred_poses[..., 7:]

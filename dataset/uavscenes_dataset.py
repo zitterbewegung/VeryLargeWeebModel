@@ -723,8 +723,9 @@ class UAVScenesDataset(Dataset):
             q_prev = Quaternion(pose_prev[3], pose_prev[4], pose_prev[5], pose_prev[6])
             q_diff = q_curr * q_prev.inverse
             angle = 2 * np.arccos(np.clip(q_diff.w, -1, 1))
-            if angle > 0.001:
-                axis = np.array([q_diff.x, q_diff.y, q_diff.z]) / np.sin(angle / 2)
+            sin_half = np.sin(angle / 2)
+            if sin_half > 1e-6:
+                axis = np.array([q_diff.x, q_diff.y, q_diff.z]) / sin_half
                 ang_vel = axis * angle / dt
             else:
                 ang_vel = np.zeros(3)

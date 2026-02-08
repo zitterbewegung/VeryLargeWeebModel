@@ -94,6 +94,11 @@ class TrajectoryGenerator:
         distances = np.array(distances)
         total_distance = distances[-1]
 
+        if total_distance < 1e-9:
+            # All keypoints coincide — return static trajectory
+            static_pos = np.tile(keypoints[0], (num_frames, 1))
+            return static_pos
+
         # Interpolate positions
         t_keypoints = distances / total_distance
         t_frames = np.linspace(0, 1, num_frames)
