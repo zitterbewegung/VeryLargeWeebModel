@@ -269,7 +269,7 @@ class TemporalTransformer(nn.Module):
 
 
 class UncertaintyHead(nn.Module):
-    """Predicts uncertainty (covariance diagonal) for poses."""
+    """Predicts raw uncertainty logits for poses."""
     
     def __init__(self, in_dim: int = 256, hidden_dim: int = 64, uncertainty_dim: int = 6):
         super().__init__()
@@ -278,7 +278,6 @@ class UncertaintyHead(nn.Module):
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, uncertainty_dim),
-            nn.Softplus(),  # Ensure positive covariance
         )
     
     def forward(self, features: torch.Tensor) -> torch.Tensor:
@@ -286,7 +285,7 @@ class UncertaintyHead(nn.Module):
         Args:
             features: [B, T, in_dim]
         Returns:
-            uncertainty: [B, T, uncertainty_dim] - diagonal covariance elements
+            uncertainty: [B, T, uncertainty_dim] - raw logits for bounded sigma
         """
         B, T, D = features.shape
         features_flat = features.contiguous().view(B * T, D)
@@ -759,6 +758,20 @@ class OccWorld6DoFLoss(nn.Module):
         self.uncertainty_max = uncertainty_max
         self.triplet_margin = triplet_margin
 
+        if self.uncertainty_max <= self.uncertainty_min:
+            raise ValueError(
+                f"uncertainty_max ({self.uncertainty_max}) must be > "
+                f"uncertainty_min ({self.uncertainty_min})"
+            )
+        # Center bounded uncertainty so zero logits map to sigma ~= 1.0.
+        target_sigma = min(
+            max(1.0, self.uncertainty_min + 1e-6),
+            self.uncertainty_max - 1e-6,
+        )
+        ratio = (target_sigma - self.uncertainty_min) / (self.uncertainty_max - self.uncertainty_min)
+        ratio = min(max(float(ratio), 1e-6), 1 - 1e-6)
+        self.uncertainty_logit_bias = math.log(ratio / (1.0 - ratio))
+
         # For tracking training health
         self.debug_metrics = {}
     
@@ -857,11 +870,13 @@ class OccWorld6DoFLoss(nn.Module):
         if 'uncertainty' in outputs and self.uncertainty_weight > 0:
             uncertainty = outputs['uncertainty']
 
-            # === ANTI-COLLAPSE: Soft sigmoid bounds for uncertainty ===
-            # Maps unbounded network output to (uncertainty_min, uncertainty_max) with
-            # smooth gradients everywhere (no gradient death from hard clamping)
+            # === ANTI-COLLAPSE: Smooth bounded uncertainty ===
+            # Map raw logits to (uncertainty_min, uncertainty_max). A learned
+            # logit=0 corresponds to sigma~=1.0, which is a stable default.
             unc_range = self.uncertainty_max - self.uncertainty_min
-            uncertainty_bounded = self.uncertainty_min + unc_range * torch.sigmoid(uncertainty)
+            uncertainty_bounded = self.uncertainty_min + unc_range * torch.sigmoid(
+                uncertainty + self.uncertainty_logit_bias
+            )
 
             # Negative log-likelihood with learned uncertainty
             # L = 0.5 * (error^2 / sigma^2 + log(sigma^2))

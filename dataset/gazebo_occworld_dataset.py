@@ -495,25 +495,50 @@ class GazeboOccWorldDataset(Dataset):
         else:
             return torch.zeros(0, 4)
 
+    @staticmethod
+    def _normalize_quaternion_wxyz(quat: np.ndarray) -> np.ndarray:
+        """Normalize quaternion in [w, x, y, z] order."""
+        quat = np.asarray(quat, dtype=np.float32)
+        norm = float(np.linalg.norm(quat))
+        if norm < 1e-8:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        return quat / norm
+
     def _load_pose(self, session_dir: str, frame_id: str) -> torch.Tensor:
         """
         Load vehicle pose from JSON.
 
         Returns pose as a 13-element tensor:
-        [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+        [x, y, z, qw, qx, qy, qz, vx, vy, vz, wx, wy, wz]
         """
         pose_path = os.path.join(session_dir, 'poses', f'{frame_id}.json')
 
         with open(pose_path, 'r') as f:
             data = json.load(f)
 
+        # Preferred format: explicit 13D pose vector in canonical [w, x, y, z] quaternion order.
+        pose_13d = data.get('pose_13d')
+        if pose_13d is not None:
+            pose_arr = np.asarray(pose_13d, dtype=np.float32)
+            if pose_arr.shape[0] < 13:
+                raise ValueError(f"pose_13d in {pose_path} has length {pose_arr.shape[0]} (expected >=13)")
+            pose_arr = pose_arr[:13].copy()
+            pose_arr[3:7] = self._normalize_quaternion_wxyz(pose_arr[3:7])
+            return torch.from_numpy(pose_arr)
+
         pos = data['position']
         ori = data['orientation']
         vel = data['velocity']
+        quat_wxyz = self._normalize_quaternion_wxyz([
+            ori.get('w', 1.0),
+            ori.get('x', 0.0),
+            ori.get('y', 0.0),
+            ori.get('z', 0.0),
+        ])
 
         return torch.tensor([
             pos['x'], pos['y'], pos['z'],
-            ori['x'], ori['y'], ori['z'], ori['w'],
+            quat_wxyz[0], quat_wxyz[1], quat_wxyz[2], quat_wxyz[3],
             vel['linear']['x'], vel['linear']['y'], vel['linear']['z'],
             vel['angular']['x'], vel['angular']['y'], vel['angular']['z'],
         ], dtype=torch.float32)

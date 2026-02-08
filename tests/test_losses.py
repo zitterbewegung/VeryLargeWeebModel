@@ -355,6 +355,39 @@ class TestOccWorld6DoFLoss(unittest.TestCase):
         self.assertIn('uncertainty_mean', metrics)
         self.assertIn('embedding_std', metrics)
 
+    def test_uncertainty_zero_logit_maps_near_one_sigma(self):
+        """Zero uncertainty logits should map close to sigma=1.0 by design."""
+        from models.occworld_6dof import OccWorld6DoFLoss
+
+        loss_fn = OccWorld6DoFLoss(
+            occ_weight=0,
+            pose_weight=0,
+            uncertainty_weight=1.0,
+            reloc_weight=0,
+            place_weight=0,
+            uncertainty_min=0.001,
+            uncertainty_max=10.0,
+        )
+
+        future_poses = torch.zeros(2, 3, 13)
+        future_poses[..., 3] = 1.0  # identity quaternion in [w, x, y, z]
+
+        outputs = {
+            'future_occupancy': torch.zeros(2, 3, 4, 4, 4),
+            'future_poses': future_poses.clone(),
+            'uncertainty': torch.zeros(2, 3, 6),  # zero logits
+        }
+        targets = {
+            'future_occupancy': torch.zeros(2, 3, 4, 4, 4),
+            'future_poses': future_poses.clone(),
+        }
+
+        losses = loss_fn(outputs, targets)
+        metrics = loss_fn.get_debug_metrics()
+
+        self.assertIn('uncertainty', losses)
+        self.assertAlmostEqual(metrics['uncertainty_mean'], 1.0, places=3)
+
 
 class TestLossBackpropagation(unittest.TestCase):
     """Test that losses can backpropagate correctly."""

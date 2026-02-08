@@ -318,6 +318,59 @@ class TestDatasetWithMockData(unittest.TestCase):
         self.assertIn('motion_stats', stats)
         self.assertIn('occupancy_stats', stats)
 
+    def test_gazebo_pose_quaternion_order_is_wxyz(self):
+        """Gazebo pose loader should convert orientation dict to [w, x, y, z]."""
+        from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+
+        frame_id = '000000'
+        pose_path = os.path.join(self.session_dir, 'poses', f'{frame_id}.json')
+        with open(pose_path, 'r') as f:
+            pose_data = json.load(f)
+        pose_data['orientation'] = {'x': 0.2, 'y': -0.3, 'z': 0.4, 'w': 0.5}
+        with open(pose_path, 'w') as f:
+            json.dump(pose_data, f)
+
+        dataset = GazeboOccWorldDataset(
+            self.temp_dir,
+            DatasetConfig(history_frames=2, future_frames=3, filter_static=False),
+        )
+        pose = dataset._load_pose(self.session_dir, frame_id).numpy()
+
+        expected = np.array([0.5, 0.2, -0.3, 0.4], dtype=np.float32)
+        expected = expected / np.linalg.norm(expected)
+        np.testing.assert_allclose(pose[3:7], expected, rtol=1e-6, atol=1e-6)
+
+    def test_gazebo_pose_prefers_pose_13d_when_present(self):
+        """pose_13d should be treated as canonical source when available."""
+        from dataset.gazebo_occworld_dataset import GazeboOccWorldDataset, DatasetConfig
+
+        frame_id = '000001'
+        pose_path = os.path.join(self.session_dir, 'poses', f'{frame_id}.json')
+        with open(pose_path, 'r') as f:
+            pose_data = json.load(f)
+
+        pose_data['orientation'] = {'x': 0.9, 'y': 0.0, 'z': 0.0, 'w': 0.1}
+        pose_data['pose_13d'] = [
+            1.0, 2.0, 3.0,
+            0.5, -0.1, 0.2, -0.3,
+            4.0, 5.0, 6.0,
+            0.7, 0.8, 0.9,
+        ]
+        with open(pose_path, 'w') as f:
+            json.dump(pose_data, f)
+
+        dataset = GazeboOccWorldDataset(
+            self.temp_dir,
+            DatasetConfig(history_frames=2, future_frames=3, filter_static=False),
+        )
+        pose = dataset._load_pose(self.session_dir, frame_id).numpy()
+
+        expected_quat = np.array([0.5, -0.1, 0.2, -0.3], dtype=np.float32)
+        expected_quat = expected_quat / np.linalg.norm(expected_quat)
+        np.testing.assert_allclose(pose[:3], np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        np.testing.assert_allclose(pose[3:7], expected_quat, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(pose[7:], np.array([4.0, 5.0, 6.0, 0.7, 0.8, 0.9], dtype=np.float32))
+
 
 class TestVoxelization(unittest.TestCase):
     """Test point cloud to occupancy grid conversion."""

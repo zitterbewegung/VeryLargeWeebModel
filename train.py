@@ -1195,6 +1195,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
                 targets = {
                     'future_occupancy': future_occ.float(),
                     'future_poses': future_poses,
+                    'global_pose': history_poses[:, -1, :7],
                 }
                 losses = criterion(outputs, targets)
                 loss = losses['total']
@@ -1432,6 +1433,7 @@ def validate(model, dataloader, criterion, device, is_6dof=False):
                 targets = {
                     'future_occupancy': future_occ.float(),
                     'future_poses': future_poses,
+                    'global_pose': history_poses[:, -1, :7],
                 }
                 losses = criterion(outputs, targets)
                 loss = losses['total']
