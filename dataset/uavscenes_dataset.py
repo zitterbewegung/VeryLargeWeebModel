@@ -85,6 +85,11 @@ class UAVScenesConfig:
 
     # Pose format: 13D = position(3) + quaternion(4) + linear_vel(3) + angular_vel(3)
     pose_dim: int = 13
+    # Clamp velocities to physical UAV limits.  GPS/GNSS noise causes
+    # finite-difference velocity estimates to spike to 100s of m/s,
+    # which drives uncertainty NLL loss to explode.
+    max_linear_velocity: float = 20.0   # m/s (~72 km/h, generous for UAVs)
+    max_angular_velocity: float = 6.28  # rad/s (~1 rev/s)
     # Normalize pose translation to the first history frame in each sample.
     # This keeps position scales stable across scenes and avoids very large
     # absolute coordinates dominating regression/NLL losses.
@@ -580,6 +585,9 @@ class UAVScenesDataset(Dataset):
             ang_vel = np.array([pose_data['velocity']['angular']['x'],
                                pose_data['velocity']['angular']['y'],
                                pose_data['velocity']['angular']['z']])
+            # Clamp to physical limits
+            lin_vel = np.clip(lin_vel, -self.config.max_linear_velocity, self.config.max_linear_velocity)
+            ang_vel = np.clip(ang_vel, -self.config.max_angular_velocity, self.config.max_angular_velocity)
         else:
             lin_vel = np.zeros(3)
             ang_vel = np.zeros(3)
@@ -801,6 +809,10 @@ class UAVScenesDataset(Dataset):
                 ang_vel = np.zeros(3)
         else:
             ang_vel = np.zeros(3)
+
+        # Clamp to physical limits — GPS noise causes extreme outliers
+        lin_vel = np.clip(lin_vel, -self.config.max_linear_velocity, self.config.max_linear_velocity)
+        ang_vel = np.clip(ang_vel, -self.config.max_angular_velocity, self.config.max_angular_velocity)
 
         # Return a copy with computed velocities to avoid in-place mutation
         result = pose_curr.copy()

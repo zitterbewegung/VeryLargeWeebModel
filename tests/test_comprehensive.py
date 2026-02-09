@@ -588,8 +588,9 @@ class TestUAVScenesVelocity(unittest.TestCase):
 
     def test_velocity_no_mutation(self):
         """_compute_velocity should not modify input array."""
-        from dataset.uavscenes_dataset import UAVScenesDataset
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
         ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig()
 
         pose_curr = np.array([1, 2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
         pose_prev = np.array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
@@ -601,6 +602,23 @@ class TestUAVScenesVelocity(unittest.TestCase):
         np.testing.assert_array_equal(pose_curr, original)
         # Result should have non-zero velocities
         self.assertFalse(np.allclose(result[7:10], 0))
+
+    def test_velocity_clamped_to_physical_limits(self):
+        """Extreme pose jumps should produce clamped velocities."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(max_linear_velocity=20.0, max_angular_velocity=6.28)
+
+        # 500m jump in 0.1s → 5000 m/s raw, should be clamped to 20
+        pose_curr = np.array([500, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        pose_prev = np.zeros(13, dtype=np.float32)
+        pose_prev[3] = 1.0  # identity quaternion
+
+        result = ds._compute_velocity(pose_curr, pose_prev, dt=0.1)
+
+        self.assertAlmostEqual(result[7], 20.0, places=1)  # clamped
+        self.assertAlmostEqual(result[8], 0.0, places=1)
+        self.assertAlmostEqual(result[9], 0.0, places=1)
 
     def test_velocity_zero_dt(self):
         """Zero dt should return input unchanged."""

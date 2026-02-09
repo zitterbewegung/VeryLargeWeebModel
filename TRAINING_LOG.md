@@ -147,15 +147,92 @@ The mean-matching regularization should prevent collapse, but monitor the `pred/
 ### Symptom
 Most UAVScenes samples had zero occupied voxels when using pose-only ego-frame alignment.
 
-### Fix
-Keep `min_in_range_ratio=0.01` and enable the lidar-centering fallback for UAVScenes:
-- `ego_frame=True`
-- `fallback_to_lidar_center=True`
-- `min_in_range_ratio=0.01`
+### Fix (original)
+Keep `min_in_range_ratio=0.01` and enable the lidar-centering fallback for UAVScenes.
 
-This ensures occupancy grids stay non-empty even when pose alignment is off.
+### Fix (2026-02-08, superseded)
+Set `ego_frame=False` — UAVScenes LiDAR is already in sensor-local frame (standard
+for LiDAR hardware). The ego transform was applying `(sensor_local - world_pos) @ R.T`,
+which always produced out-of-range values, triggering 100% fallback. See entry below.
 
 ### Quick Check
 ```bash
 python scripts/verify_uavscenes_occupancy.py --data data/uavscenes --scenes AMtown --samples 200
 ```
+
+---
+
+## UAVScenes ego_frame=False Fix (2026-02-08)
+
+### Symptom
+100% fallback rate in `_align_points` — every single call triggers the LiDAR-center
+centering fallback, producing 5 warnings per dataset instantiation:
+```
+UAVScenes _align_points: ego-frame alignment fallback activated (1/1 calls).
+UAVScenes _align_points: ego-frame alignment fallback activated (2/2 calls).
+...
+```
+
+### Root Cause
+UAVScenes LiDAR point clouds are in **sensor-local frame** (standard for LiDAR hardware —
+the sensor reports distances relative to itself). The `_transform_points_to_ego` function
+assumes **world-frame** input and computes `(sensor_local_points - world_position) @ R.T`,
+which produces values far outside the [-40, 40] range → `_in_range_ratio` ≈ 0 → fallback.
+
+The centering fallback was near-no-op (sensor-local points are already near origin), so
+training worked despite this, but it was wasteful and misleading.
+
+### Fix
+- Set `ego_frame=False` as default in `UAVScenesConfig`
+- Also fixed in `config/finetune_uavscenes.py`, `config/test_local.py`, and `train.py`
+  fallback default (all three were hardcoding `ego_frame=True`, overriding the dataclass)
+- Added early return in `_align_points` when `ego_frame=False` to skip both the transform
+  and the centering fallback
+
+### Lesson
+Changing a dataclass default is not enough — config files and constructor callsites can
+override it. Always grep for all usages of the parameter.
+
+---
+
+## Uncertainty Loss Spikes from GPS Velocity Noise (2026-02-08)
+
+### Symptom
+Periodic loss spikes dominated by uncertainty component (80-95% of total loss):
+```
+[SPIKE] Epoch 0 batch 94:  loss 121.34 is 21.6x running avg — uncertainty=114.95 (94.7%)
+[SPIKE] Epoch 0 batch 334: loss 50.32  is  9.4x running avg — uncertainty=44.86  (89.1%)
+[SPIKE] Epoch 0 batch 395: loss 31.43  is  5.6x running avg — uncertainty=25.04  (79.7%)
+```
+
+### Root Cause
+GPS/GNSS noise in UAVScenes pose data causes **extreme velocity outliers** when computed
+via finite-difference: `vel = (pos_curr - pos_prev) / dt`. Diagnostic output revealed:
+```
+vel: max=453.43   ← 453 m/s = ~1630 km/h, physically impossible for a UAV
+```
+
+The same `453.43` value appeared in multiple spikes, confirming specific bad frames rather
+than random noise. The Gaussian NLL uncertainty loss (`error²/σ² + log(σ²)`) explodes when
+the pose prediction error is driven by these impossible velocities.
+
+### Fix
+Added velocity clamping in `UAVScenesConfig` with physical UAV limits:
+- `max_linear_velocity=20.0` m/s (~72 km/h, generous for multi-rotor UAVs)
+- `max_angular_velocity=6.28` rad/s (~1 revolution/s)
+
+Clamping applied in both velocity sources:
+1. `_compute_velocity()` — finite-difference estimation
+2. `_parse_pose_json()` — velocities loaded from JSON sampleinfos
+
+### Diagnosis Tool
+EMA-based loss spike detection added to `train_epoch()`:
+```
+[SPIKE] Epoch 0 batch 334: loss 50.32 is 9.4x running avg (5.34)
+[SPIKE]   Dominant component: uncertainty=44.8557 (89.1% of total)
+[SPIKE]   All components: uncertainty=44.8557, occ=2.8107, pose=2.3480, ...
+[SPIKE]   Occ rate: 0.020%, pose_pos: min=0.04 max=85.05, vel: max=453.43
+```
+
+Triggers when any batch loss exceeds 5x the running EMA (α=0.02). Reports dominant
+loss component, all components sorted, pose statistics, and scene names.
