@@ -380,6 +380,17 @@ def cmd_train(args: argparse.Namespace) -> int:
     if getattr(args, 'interval', None):
         cmd.extend(["--interval", str(args.interval)])
 
+    # W&B logging (on by default, --no-wandb to disable)
+    if getattr(args, 'no_wandb', False):
+        cmd.append("--no-wandb")
+
+    if getattr(args, 'wandb_project', None):
+        cmd.extend(["--wandb-project", args.wandb_project])
+
+    if getattr(args, 'wandb_tags', None):
+        for tag in args.wandb_tags:
+            cmd.extend(["--wandb-tags", tag])
+
     log_step("Starting training")
     log_info(f"Command: {' '.join(cmd)}")
 
@@ -1266,6 +1277,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--interval", type=int, help="UAVScenes interval (5=keyframes, 1=full)")
     p_train.add_argument("--uncertainty-weight", type=float,
                          help="Override 6DoF uncertainty loss weight (e.g., 0.05)")
+    p_train.add_argument("--no-wandb", action="store_true",
+                         help="Disable Weights & Biases logging")
+    p_train.add_argument("--wandb-project", type=str, default=None,
+                         help="W&B project name (default: aerialworld)")
+    p_train.add_argument("--wandb-tags", type=str, nargs="+", default=None,
+                         help="W&B tags for the run")
     p_train.add_argument("--dry-run", action="store_true", help="Show config without training")
 
     # --- deploy ---

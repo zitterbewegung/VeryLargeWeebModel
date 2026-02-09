@@ -720,10 +720,12 @@ def parse_args():
                         help='Use strict=True when loading checkpoint weights (fail on any mismatch)')
 
     # Weights & Biases
-    parser.add_argument('--wandb', action='store_true',
-                        help='Enable Weights & Biases logging')
-    parser.add_argument('--wandb-project', type=str, default='occworld-tokyo',
-                        help='W&B project name')
+    parser.add_argument('--wandb', action='store_true', default=True,
+                        help='Enable Weights & Biases logging (default: on)')
+    parser.add_argument('--no-wandb', action='store_true',
+                        help='Disable Weights & Biases logging')
+    parser.add_argument('--wandb-project', type=str, default='aerialworld',
+                        help='W&B project name (default: aerialworld)')
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help='W&B entity (team/username)')
     parser.add_argument('--wandb-run-name', type=str, default=None,
@@ -2332,9 +2334,10 @@ def main():
         return
 
     # Weights & Biases
-    use_wandb = args.wandb and HAS_WANDB
-    if args.wandb and not HAS_WANDB:
-        print("WARNING: --wandb specified but wandb not installed. Run: pip install wandb")
+    want_wandb = args.wandb and not args.no_wandb
+    use_wandb = want_wandb and HAS_WANDB
+    if want_wandb and not HAS_WANDB:
+        print("WARNING: wandb not installed. Run: pip install wandb")
 
     if use_wandb:
         # Check if wandb is logged in, prompt for API key if not
@@ -2386,13 +2389,16 @@ def main():
             'gpu_ids': args.gpu_ids,
         }
 
-        run_name = args.wandb_run_name or f"occworld_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        model_label = '6dof' if args.model_type == '6dof' else 'simple'
+        run_name = args.wandb_run_name or f"{dataset_type}_{model_label}_{timestamp}"
+        auto_tags = [dataset_type, model_label, timestamp[:8]]
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=run_name,
             config=wandb_config,
-            tags=args.wandb_tags + [dataset_type, 'focal-loss'],
+            tags=args.wandb_tags + auto_tags,
             dir=str(work_dir),
         )
         wandb.watch(model, log='gradients', log_freq=100)
@@ -2516,40 +2522,39 @@ def main():
                 epoch_log['epoch/val_temporal_consistency'] = val_metrics['temporal_consistency']
             wandb.log(epoch_log)
 
-        # Save checkpoint
-        if (epoch + 1) % args.save_freq == 0 or epoch == max_epochs - 1:
-            ckpt_path = work_dir / 'checkpoints' / f'epoch_{epoch+1}.pth'
-            # Unwrap state_dict keys from torch.compile (_orig_mod.) and DataParallel (module.)
-            raw_sd = model.state_dict()
-            clean_sd = {}
-            for k, v in raw_sd.items():
-                k = k.replace('_orig_mod.', '').replace('module.', '', 1)
-                clean_sd[k] = v
-            # Atomic save: write to tmp then rename to avoid corruption on crash
-            tmp_path = ckpt_path.with_suffix('.pth.tmp')
-            torch.save({
-                'epoch': epoch + 1,
-                'state_dict': clean_sd,
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-            }, tmp_path)
-            tmp_path.replace(ckpt_path)
-            print(f"  Saved checkpoint: {ckpt_path}")
+        # Save checkpoint every epoch
+        ckpt_path = work_dir / 'checkpoints' / f'epoch_{epoch+1}.pth'
+        # Unwrap state_dict keys from torch.compile (_orig_mod.) and DataParallel (module.)
+        raw_sd = model.state_dict()
+        clean_sd = {}
+        for k, v in raw_sd.items():
+            k = k.replace('_orig_mod.', '').replace('module.', '', 1)
+            clean_sd[k] = v
+        # Atomic save: write to tmp then rename to avoid corruption on crash
+        tmp_path = ckpt_path.with_suffix('.pth.tmp')
+        torch.save({
+            'epoch': epoch + 1,
+            'state_dict': clean_sd,
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+        }, tmp_path)
+        tmp_path.replace(ckpt_path)
+        print(f"  Saved checkpoint: {ckpt_path}")
 
-            # Clean up old checkpoints
-            cleanup_old_checkpoints(work_dir / 'checkpoints', args.max_keep_ckpts)
+        # Clean up old checkpoints
+        cleanup_old_checkpoints(work_dir / 'checkpoints', args.max_keep_ckpts)
 
-            # Log checkpoint as wandb artifact
-            if use_wandb:
-                artifact = wandb.Artifact(
-                    f'model-checkpoint-epoch{epoch+1}',
-                    type='model',
-                    metadata={'epoch': epoch + 1, 'train_loss': train_loss, 'val_loss': val_loss}
-                )
-                artifact.add_file(str(ckpt_path))
-                wandb.log_artifact(artifact)
+        # Log checkpoint as wandb artifact
+        if use_wandb:
+            artifact = wandb.Artifact(
+                f'model-checkpoint-epoch{epoch+1}',
+                type='model',
+                metadata={'epoch': epoch + 1, 'train_loss': train_loss, 'val_loss': val_loss}
+            )
+            artifact.add_file(str(ckpt_path))
+            wandb.log_artifact(artifact)
 
         # Save best model (by IoU — better than val_loss for sparse occupancy)
         val_iou = val_metrics.get('iou', 0)
