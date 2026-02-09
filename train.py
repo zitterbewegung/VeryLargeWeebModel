@@ -677,6 +677,8 @@ def parse_args():
                         help='Override max epochs')
     parser.add_argument('--uncertainty-weight', type=float, default=None,
                         help='Override 6DoF uncertainty loss weight (e.g., 0.05)')
+    parser.add_argument('--occ-threshold', type=float, default=0.3,
+                        help='Occupancy prediction threshold for IoU/recall metrics (default: 0.3)')
 
     # Mode
     parser.add_argument('--eval-only', action='store_true',
@@ -1093,13 +1095,14 @@ class OccupancyLoss(nn.Module):
     """
 
     def __init__(self, focal_alpha=0.99, focal_gamma=2.0, dynamic_alpha=True, dice_weight=1.0,
-                 mean_weight=10.0, lovasz_weight=1.0, smooth=1.0, temporal_decay=0.0):
+                 mean_weight=10.0, lovasz_weight=1.0, recall_weight=2.0, smooth=1.0, temporal_decay=0.0):
         super().__init__()
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, dynamic_alpha=dynamic_alpha)
         self.dice_weight = dice_weight
         self.mean_weight = mean_weight
         self.lovasz_loss = LovaszBinaryLoss()
         self.lovasz_weight = lovasz_weight
+        self.recall_weight = recall_weight
         self.smooth = smooth
         self.temporal_decay = temporal_decay
         self._debug_counter = 0
@@ -1168,13 +1171,23 @@ class OccupancyLoss(nn.Module):
         # Lovász loss: directly optimizes IoU
         lovasz = self.lovasz_loss(pred, target)
 
-        total_loss = focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss + self.lovasz_weight * lovasz
+        # Recall loss: penalize missed occupied voxels (false negatives)
+        occupied_mask = target_flat > 0.5
+        if self.recall_weight > 0 and occupied_mask.any():
+            occupied_preds = pred_flat[occupied_mask]
+            recall_loss = -torch.log(occupied_preds.clamp(min=1e-7)).mean()
+        else:
+            recall_loss = torch.tensor(0.0, device=pred.device)
+
+        total_loss = (focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
+                      + self.lovasz_weight * lovasz + self.recall_weight * recall_loss)
 
         # Store components for wandb logging
         self._last_components = {
             'focal': focal.item(),
             'dice': dice_loss.item(),
             'lovasz': lovasz.item(),
+            'recall': recall_loss.item(),
             'mean_match': mean_loss.item(),
             'intersection': intersection.item(),
             'pred_sum': pred_flat.sum().item(),
@@ -1521,7 +1534,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     return total_loss / num_batches
 
 
-def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_step=0.5):
+def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_step=0.5, occ_threshold=0.3):
     """Validate model with task-specific metrics (IoU, precision, recall, pose errors).
 
     When predictions have a time dimension (ndim >= 5), also computes:
@@ -1597,8 +1610,8 @@ def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_st
             total_loss += loss.item()
             num_batches += 1
 
-            # Compute occupancy metrics (binarize predictions at 0.5 threshold)
-            pred_binary = (pred_occ > 0.5).float()
+            # Compute occupancy metrics (binarize predictions at threshold)
+            pred_binary = (pred_occ > occ_threshold).float()
             target_binary = (future_occ > 0).float()
             tp_sum += (pred_binary * target_binary).sum().item()
             fp_sum += (pred_binary * (1 - target_binary)).sum().item()
@@ -2282,6 +2295,7 @@ def main():
             focal_gamma=loss_cfg.get('focal_gamma', 2.0),
             dice_weight=loss_cfg.get('dice_weight', 1.0),
             mean_weight=loss_cfg.get('mean_weight', 10.0),
+            recall_weight=loss_cfg.get('recall_weight', 2.0),
             pose_variance_weight=loss_cfg.get('pose_variance_weight', 1.0),
             min_pose_std=loss_cfg.get('min_pose_std', 0.01),
             uncertainty_min=loss_cfg.get('uncertainty_min', 0.001),
@@ -2387,6 +2401,7 @@ def main():
     # Resume optimizer/scheduler state if resuming from checkpoint
     start_epoch = 0
     best_val_loss = float('inf')
+    best_iou = -1.0
 
     if resume_checkpoint and os.path.exists(resume_checkpoint):
         checkpoint = torch.load(resume_checkpoint, map_location=device)
@@ -2434,7 +2449,8 @@ def main():
                                   amp_dtype=amp_dtype, grad_accum_steps=args.grad_accum)
 
         # Validate
-        val_metrics = validate(model, val_loader, criterion, device, is_6dof)
+        val_metrics = validate(model, val_loader, criterion, device, is_6dof,
+                              occ_threshold=args.occ_threshold)
         val_loss = val_metrics['loss']
 
         # Update scheduler (skip if training failed to avoid incorrect LR decay)
@@ -2535,8 +2551,10 @@ def main():
                 artifact.add_file(str(ckpt_path))
                 wandb.log_artifact(artifact)
 
-        # Save best model
-        if val_loss < best_val_loss:
+        # Save best model (by IoU — better than val_loss for sparse occupancy)
+        val_iou = val_metrics.get('iou', 0)
+        if val_iou > best_iou:
+            best_iou = val_iou
             best_val_loss = val_loss
             best_path = work_dir / 'checkpoints' / 'best.pth'
             # Unwrap state_dict keys from torch.compile/DataParallel
@@ -2551,16 +2569,17 @@ def main():
                 'epoch': epoch + 1,
                 'state_dict': clean_sd,
                 'val_loss': val_loss,
+                'iou': val_iou,
             }, tmp_path)
             tmp_path.replace(best_path)
-            print(f"  New best model! Val Loss: {val_loss:.4f}")
+            print(f"  New best model! IoU: {val_iou:.4f} (Val Loss: {val_loss:.4f})")
 
             # Log best model as wandb artifact
             if use_wandb:
                 best_artifact = wandb.Artifact(
                     'model-best',
                     type='model',
-                    metadata={'epoch': epoch + 1, 'val_loss': val_loss}
+                    metadata={'epoch': epoch + 1, 'val_loss': val_loss, 'iou': val_iou}
                 )
                 best_artifact.add_file(str(best_path))
                 wandb.log_artifact(best_artifact)
@@ -2573,7 +2592,7 @@ def main():
 
     print("=" * 60)
     print("Training complete!")
-    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Best IoU: {best_iou:.4f} (Val Loss: {best_val_loss:.4f})")
     print(f"Checkpoints saved to: {work_dir / 'checkpoints'}")
     print("=" * 60)
 

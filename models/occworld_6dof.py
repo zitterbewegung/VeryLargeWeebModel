@@ -802,6 +802,7 @@ class OccWorld6DoFLoss(nn.Module):
         dice_weight: float = 1.0,
         mean_weight: float = 10.0,
         lovasz_weight: float = 1.0,
+        recall_weight: float = 2.0,
         # Anti-collapse parameters
         pose_variance_weight: float = 1.0,  # Penalize low variance in pose predictions
         min_pose_std: float = 0.01,  # Minimum expected std for poses
@@ -823,6 +824,7 @@ class OccWorld6DoFLoss(nn.Module):
         self.mean_weight = mean_weight
         self.lovasz_loss = LovaszBinaryLoss()
         self.lovasz_weight = lovasz_weight
+        self.recall_weight = recall_weight
 
         # Anti-collapse parameters
         self.pose_variance_weight = pose_variance_weight
@@ -893,7 +895,17 @@ class OccWorld6DoFLoss(nn.Module):
         # Lovász loss: directly optimizes IoU
         lovasz = self.lovasz_loss(pred_occ, target_occ)
 
-        occ_loss = focal + self.dice_weight * dice + self.mean_weight * mean_loss + self.lovasz_weight * lovasz
+        # Recall loss: penalize missed occupied voxels (false negatives)
+        # -log(pred) where target=1, so low predictions on occupied voxels are heavily penalized
+        occupied_mask = target_flat > 0.5
+        if self.recall_weight > 0 and occupied_mask.any():
+            occupied_preds = pred_flat[occupied_mask]
+            recall_loss = -torch.log(occupied_preds.clamp(min=1e-7)).mean()
+        else:
+            recall_loss = torch.tensor(0.0, device=pred_occ.device)
+
+        occ_loss = (focal + self.dice_weight * dice + self.mean_weight * mean_loss
+                    + self.lovasz_weight * lovasz + self.recall_weight * recall_loss)
         losses['occ'] = occ_loss * self.occ_weight
         
         # Pose loss

@@ -593,6 +593,7 @@ class TestLossComponentInteractions(unittest.TestCase):
             dice_weight=2.0,
             mean_weight=5.0,
             lovasz_weight=1.0,
+            recall_weight=3.0,
             smooth=1.0,
         )
 
@@ -607,12 +608,12 @@ class TestLossComponentInteractions(unittest.TestCase):
         components = criterion.get_loss_components()
 
         # Verify total is approximately sum of weighted components
-        # (Exact match not guaranteed due to internal operations)
         expected = (
             components['focal'] +
             2.0 * components['dice'] +
             5.0 * components['mean_match'] +
-            1.0 * components['lovasz']
+            1.0 * components['lovasz'] +
+            3.0 * components['recall']
         )
 
         # Allow some tolerance due to floating point
@@ -632,7 +633,7 @@ class TestLossComponentInteractions(unittest.TestCase):
         components = criterion.get_loss_components()
 
         # Verify expected keys
-        expected_keys = {'focal', 'dice', 'lovasz', 'mean_match',
+        expected_keys = {'focal', 'dice', 'lovasz', 'mean_match', 'recall',
                         'intersection', 'pred_sum', 'target_sum'}
         self.assertTrue(expected_keys.issubset(components.keys()),
                        f"Missing keys: {expected_keys - components.keys()}")
