@@ -1,0 +1,112 @@
+[project]
+name = "verylargeweebmodel"
+version = "0.1.0"
+description = "Occupancy world models for urban aerial navigation."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "einops>=0.6.0",
+  "timm>=0.9.0",
+  "numpy>=1.24.0,<2.0.0",
+  "scipy>=1.10.0",
+  "h5py>=3.8.0",
+  "trimesh>=4.0.0",
+  "opencv-python>=4.8.0",
+  "pillow>=9.0.0",
+  "matplotlib>=3.7.0",
+  "tensorboard>=2.12.0",
+  "wandb>=0.15.0",
+  "weave>=0.50.0",
+  "tqdm>=4.65.0",
+  "pyyaml>=6.0",
+  "rich>=13.0.0",
+  "pyquaternion>=0.9.9",
+  "numba>=0.57.0",
+  "open3d>=0.18.0",
+  "requests>=2.28.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=7.0.0",
+]
+full = [
+  "torch==2.9.1",
+  "torchvision==0.24.1",
+  "torchaudio==2.9.1",
+  "triton==3.5.1",
+  "einops==0.8.1",
+  "timm==1.0.24",
+  "safetensors==0.7.0",
+  "numpy==1.26.4",
+  "scipy==1.17.0",
+  "pandas==2.3.3",
+  "scikit-learn==1.8.0",
+  "h5py==3.15.1",
+  "trimesh==4.11.0",
+  "open3d==0.19.0",
+  "pyvista==0.46.5",
+  "vtk==9.5.2",
+  "numpy-stl==3.2.0",
+  "pycollada==0.9.2",
+  "fast-simplification==0.1.13",
+  "nuscenes-devkit==1.2.0",
+  "pyquaternion==0.9.9",
+  "pycocotools==2.0.11",
+  "shapely==2.0.7",
+  "descartes==1.1.0",
+  "opencv-python==4.8.1.78",
+  "opencv-python-headless==4.11.0.86",
+  "pillow==12.1.0",
+  "matplotlib==3.10.8",
+  "plotly==6.5.2",
+  "tensorboard==2.20.0",
+  "wandb>=0.15.0",
+  "weave>=0.50.0",
+  "tqdm==4.67.1",
+  "pyyaml==6.0.3",
+  "addict==2.4.0",
+  "fire==0.7.1",
+  "rich==14.2.0",
+  "ipykernel==7.1.0",
+  "ipython==9.8.0",
+  "ipywidgets==8.1.8",
+  "jupyter-client==8.7.0",
+  "jupyter-core==5.9.1",
+  "flask==3.1.2",
+  "dash==3.3.0",
+  "werkzeug==3.1.5",
+  "huggingface-hub==1.2.3",
+  "sentencepiece==0.2.1",
+  "tensorflow==2.20.0",
+  "keras==3.13.1",
+  "numba==0.60.0",
+]
+open3d = [
+  "open3d>=0.18.0",
+  "torch>=2.0.0",
+  "torchvision>=0.15.0",
+  "numpy>=1.24.0,<2.0.0",
+  "scipy>=1.10.0",
+  "requests>=2.28.0",
+  "tqdm>=4.65.0",
+  "trimesh>=4.0.0",
+  "numba>=0.57.0",
+  "opencv-python>=4.8.0",
+  "pillow>=9.0.0",
+  "wandb>=0.15.0",
+  "tensorboard>=2.12.0",
+  "pyyaml>=6.0",
+  "rich>=13.0.0",
+  "pyquaternion>=0.9.9",
+]
+ui = [
+  "streamlit>=1.38.0",
+  "snappy",
+  "regina",
+]
+
+[tool.uv]
+default-groups = ["dev"]

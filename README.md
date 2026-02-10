@@ -19,14 +19,36 @@ Occupancy world models for urban aerial navigation. Fine-tune [OccWorld](https:/
 git clone https://github.com/zitterbewegung/VeryLargeWeebModel.git
 cd VeryLargeWeebModel
 
-# Option A: Cloud GPU (recommended)
+# Option A: uv (recommended for local development)
+uv sync
+uv run python scripts/vlwm_cli.py setup
+uv run python scripts/vlwm_cli.py download
+uv run python scripts/vlwm_cli.py train
+
+# Option B: Cloud GPU (recommended)
 python scripts/vlwm_cli.py setup        # Auto-detects Vast.ai/Lambda/RunPod
 python scripts/vlwm_cli.py download     # Download data and pretrained models
 python scripts/vlwm_cli.py train        # Train with auto GPU detection
 
-# Option B: Manual
-pip install torch torchvision tqdm scipy opencv-python wandb
+# Option C: Manual pip
+pip install -r requirements.txt
 python train.py --config config/finetune_tokyo.py --work-dir ./checkpoints
+```
+
+### uv dependency groups
+
+```bash
+# Base + dev tools
+uv sync
+
+# Full training environment
+uv sync --group full
+
+# Open3D-focused setup
+uv sync --group open3d
+
+# Knot-search UI tooling
+uv sync --group ui
 ```
 
 ## Architecture
@@ -136,7 +158,7 @@ Commands:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v --tb=short
+uv run python -m pytest tests/ -v --tb=short
 ```
 
 ## Citation
