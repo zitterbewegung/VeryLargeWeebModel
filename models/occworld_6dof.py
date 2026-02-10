@@ -680,6 +680,15 @@ class OccWorld6DoF(nn.Module):
         # FiLM: modulate spatial features with pose information
         # Use planned trajectory for conditioning if provided (action-conditioned generation)
         film_poses = planned_trajectory if planned_trajectory is not None else predicted_future_poses
+        if film_poses.shape[1] != self.config.future_frames:
+            # Truncate or pad to match expected future_frames
+            T_film = film_poses.shape[1]
+            if T_film > self.config.future_frames:
+                film_poses = film_poses[:, :self.config.future_frames]
+            else:
+                pad = torch.zeros(B, self.config.future_frames - T_film, film_poses.shape[-1],
+                                  device=film_poses.device, dtype=film_poses.dtype)
+                film_poses = torch.cat([film_poses, pad], dim=1)
         pose_flat = film_poses.reshape(B, -1)  # [B, T_f * pose_dim]
         film_params = self.pose_film(pose_flat)  # [B, latent_dim * 2]
         gamma = film_params[:, :self.config.latent_dim].view(B, self.config.latent_dim, 1, 1, 1)
@@ -1055,11 +1064,12 @@ class OccWorld6DoFLoss(nn.Module):
         neg_distances[self_mask] = float('inf')
         neg_distances[torch.arange(B, device=embeddings.device), pos_idx] = float('inf')
 
-        if (neg_distances < float('inf')).any(dim=1).all():
+        valid_negs = (neg_distances < float('inf')).any(dim=1)
+        if valid_negs.any():
             neg_idx = neg_distances.argmin(dim=1)  # [B]
             d_an = distances[torch.arange(B, device=embeddings.device), neg_idx]
             triplet = F.relu(d_ap - d_an + self.triplet_margin)
-            return triplet.mean()
+            return triplet[valid_negs].mean()
 
         return torch.tensor(0.0, device=embeddings.device)
 

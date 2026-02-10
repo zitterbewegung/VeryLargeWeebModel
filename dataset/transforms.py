@@ -114,11 +114,21 @@ class RandomFlip3D:
 
                     if flip_x:
                         poses[..., 0] = -poses[..., 0]   # Negate x position
+                        poses[..., 5] = -poses[..., 5]   # Negate qy (quaternion reflection about YZ plane)
+                        poses[..., 6] = -poses[..., 6]   # Negate qz
                         poses[..., 7] = -poses[..., 7]   # Negate vx velocity
+                        if poses.shape[-1] > 10:
+                            poses[..., 11] = -poses[..., 11]  # Negate wy angular velocity
+                            poses[..., 12] = -poses[..., 12]  # Negate wz angular velocity
 
                     if flip_y:
                         poses[..., 1] = -poses[..., 1]   # Negate y position
+                        poses[..., 4] = -poses[..., 4]   # Negate qx (quaternion reflection about XZ plane)
+                        poses[..., 6] = -poses[..., 6]   # Negate qz
                         poses[..., 8] = -poses[..., 8]   # Negate vy velocity
+                        if poses.shape[-1] > 10:
+                            poses[..., 10] = -poses[..., 10]  # Negate wx angular velocity
+                            poses[..., 12] = -poses[..., 12]  # Negate wz angular velocity
 
                     result[key] = poses
                 else:

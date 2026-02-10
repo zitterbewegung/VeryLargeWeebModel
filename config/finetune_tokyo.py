@@ -27,6 +27,9 @@ sys.path.insert(0, PROJECT_ROOT)
 # Data paths
 data_root = os.path.join(PROJECT_ROOT, 'data/tokyo_gazebo/')
 
+# Dataset type flag for train.py
+dataset_type = 'gazebo'
+
 # Extended occupancy range for aerial vehicles (drones fly up to 150m)
 point_cloud_range = [-40.0, -40.0, -2.0, 40.0, 40.0, 150.0]
 voxel_size = [0.4, 0.4, 1.25]  # Coarser Z voxels for extended altitude range

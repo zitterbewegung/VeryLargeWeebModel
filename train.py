@@ -1505,7 +1505,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
             wandb.log({
                 'train/loss': loss.item(),
                 'train/global_step': global_step,
-            })
+            }, commit=False)
 
     # Step any remaining accumulated gradients at epoch end
     if valid_step_count > 0 and valid_step_count % grad_accum_steps != 0:
@@ -1538,7 +1538,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch, writer, 
     return total_loss / num_batches
 
 
-def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_step=0.5, occ_threshold=0.3):
+def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_step=0.5, occ_threshold=0.3,
+             point_cloud_range=None, voxel_size_cfg=None):
     """Validate model with task-specific metrics (IoU, precision, recall, pose errors).
 
     When predictions have a time dimension (ndim >= 5), also computes:
@@ -1665,8 +1666,10 @@ def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_st
                         pred_pos_t = pred_poses_val[:, t, :3]  # [B, 3]
                         # Convert position to voxel coordinates
                         # Use default ranges; these match the standard grid
-                        pc_range_min = torch.tensor([-40.0, -40.0, -10.0], device=pred_pos_t.device)
-                        voxel_size = torch.tensor([0.4, 0.4, 0.5], device=pred_pos_t.device)
+                        _pcr = point_cloud_range or [-40.0, -40.0, -10.0, 40.0, 40.0, 50.0]
+                        _vs = voxel_size_cfg or [0.4, 0.4, 0.5]
+                        pc_range_min = torch.tensor(_pcr[:3], device=pred_pos_t.device)
+                        voxel_size = torch.tensor(_vs, device=pred_pos_t.device)
                         grid_size = pred_binary[:, t].shape[-3:]  # (X, Y, Z)
 
                         voxel_coords = ((pred_pos_t - pc_range_min) / voxel_size).long()
@@ -2327,7 +2330,9 @@ def main():
 
     if args.eval_only:
         is_6dof = args.model_type == '6dof'
-        val_metrics = validate(model, val_loader, criterion, device, is_6dof)
+        val_metrics = validate(model, val_loader, criterion, device, is_6dof,
+                              point_cloud_range=getattr(config, 'point_cloud_range', None),
+                              voxel_size_cfg=getattr(config, 'voxel_size', None))
         print(f"Eval-only: Val Loss = {val_metrics['loss']:.6f}")
         print(f"  IoU: {val_metrics.get('iou', 0):.4f}, "
               f"Precision: {val_metrics.get('precision', 0):.4f}, "
@@ -2427,6 +2432,9 @@ def main():
             print("  Restored scheduler state")
         if 'val_loss' in checkpoint:
             best_val_loss = checkpoint['val_loss']
+        if 'iou' in checkpoint:
+            best_iou = checkpoint['iou']
+            print(f"  Restored best_iou={best_iou:.4f}")
 
     # Register signal handlers for graceful shutdown
     TrainingState.model = model
@@ -2461,7 +2469,9 @@ def main():
 
         # Validate
         val_metrics = validate(model, val_loader, criterion, device, is_6dof,
-                              occ_threshold=args.occ_threshold)
+                              occ_threshold=args.occ_threshold,
+                              point_cloud_range=getattr(config, 'point_cloud_range', None),
+                              voxel_size_cfg=getattr(config, 'voxel_size', None))
         val_loss = val_metrics['loss']
 
         # Update scheduler (skip if training failed to avoid incorrect LR decay)
@@ -2544,6 +2554,7 @@ def main():
             'scheduler': scheduler.state_dict(),
             'train_loss': train_loss,
             'val_loss': val_loss,
+            'iou': val_metrics.get('iou', 0),
         }, tmp_path)
         tmp_path.replace(ckpt_path)
         print(f"  Saved checkpoint: {ckpt_path}")
