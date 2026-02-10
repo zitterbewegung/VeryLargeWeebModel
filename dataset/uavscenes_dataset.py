@@ -95,6 +95,12 @@ class UAVScenesConfig:
     # absolute coordinates dominating regression/NLL losses.
     normalize_pose_to_first_frame: bool = True
 
+    # Time between consecutive RAW sensor frames (before keyframe subsampling).
+    # UAVScenes captures at ~10 Hz → 0.1s.  The actual dt between samples in
+    # a training sequence is:  dt = base_frame_interval * interval * frame_skip
+    # E.g. 0.1 * 5 * 1 = 0.5s for default keyframes.
+    base_frame_interval: float = 0.1
+
     # LiDAR settings
     max_points: int = 100000
     use_intensity: bool = True
@@ -403,6 +409,13 @@ class UAVScenesDataset(Dataset):
                             if len(data) % try_cols == 0:
                                 cols = try_cols
                                 break
+                        else:
+                            # No column count divides evenly; truncate to
+                            # nearest multiple to avoid reshape crash
+                            usable = (len(data) // cols) * cols
+                            if usable == 0:
+                                return np.zeros((0, 3), dtype=np.float32)
+                            data = data[:usable]
                     points = data.reshape(-1, cols)[:, :3]
                 else:
                     # ASCII PCD
@@ -478,14 +491,14 @@ class UAVScenesDataset(Dataset):
         if poses_file.exists():
             return self._load_pose_from_txt(poses_file, frame_idx)
 
-        # Fallback: return zero pose (warn so users know data is missing)
+        # Fallback: return None to signal missing data (caller should skip sample)
         import warnings
         warnings.warn(
             f"No pose data found for {scene_folder} frame {frame_idx}. "
-            "Using zero pose — this will degrade training quality.",
+            "Sample will be skipped.",
             stacklevel=2,
         )
-        return np.zeros(13, dtype=np.float32)
+        return None
 
     def _parse_t4x4_matrix(self, t4x4: List[List[float]]) -> np.ndarray:
         """
@@ -787,7 +800,7 @@ class UAVScenesDataset(Dataset):
 
         return occupancy
 
-    def _compute_velocity(self, pose_curr: np.ndarray, pose_prev: np.ndarray, dt: float = 0.1) -> np.ndarray:
+    def _compute_velocity(self, pose_curr: np.ndarray, pose_prev: np.ndarray, dt: float) -> np.ndarray:
         """Compute velocities from pose difference."""
         if dt <= 0:
             return pose_curr
@@ -840,6 +853,13 @@ class UAVScenesDataset(Dataset):
         scene = sample_info['scene']
         scene_folder = sample_info.get('scene_folder', scene)
 
+        # Actual time between consecutive frames in this sequence.
+        # base_frame_interval (raw sensor dt) × interval (keyframe stride)
+        # × frame_skip (sequence stride).  Default: 0.1 × 5 × 1 = 0.5s.
+        frame_dt = (self.config.base_frame_interval
+                    * self.config.interval
+                    * self.config.frame_skip)
+
         # Load history frames
         history_occ = []
         history_poses = []
@@ -852,9 +872,19 @@ class UAVScenesDataset(Dataset):
             frame_filename = frame_info.get('filename', '')
             pose = self._load_pose(scene_folder, frame_idx, frame_filename)
 
-            # Load LiDAR
+            # Skip sample if pose is missing (None = no pose file found)
+            if pose is None:
+                return self.__getitem__((idx + 1) % len(self))
+
+            # Load LiDAR (skip sample if file is missing/corrupt)
             lidar_path = frame_info['path']
-            points = self._load_lidar(lidar_path)
+            try:
+                points = self._load_lidar(lidar_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Failed to load LiDAR {lidar_path}: {e}. Skipping sample.")
+                return self.__getitem__((idx + 1) % len(self))
+
             points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
             if used_lidar_center and sequence_origin is not None:
                 pose = pose.copy()
@@ -863,7 +893,7 @@ class UAVScenesDataset(Dataset):
 
             # Compute velocities if not provided
             if prev_pose is not None and np.allclose(pose[7:], 0):
-                pose = self._compute_velocity(pose, prev_pose)
+                pose = self._compute_velocity(pose, prev_pose, dt=frame_dt)
 
             history_occ.append(occ)
             history_poses.append(pose)
@@ -878,8 +908,17 @@ class UAVScenesDataset(Dataset):
             frame_filename = frame_info.get('filename', '')
             pose = self._load_pose(scene_folder, frame_idx, frame_filename)
 
+            if pose is None:
+                return self.__getitem__((idx + 1) % len(self))
+
             lidar_path = frame_info['path']
-            points = self._load_lidar(lidar_path)
+            try:
+                points = self._load_lidar(lidar_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Failed to load LiDAR {lidar_path}: {e}. Skipping sample.")
+                return self.__getitem__((idx + 1) % len(self))
+
             points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
             if used_lidar_center and sequence_origin is not None:
                 pose = pose.copy()
@@ -887,7 +926,7 @@ class UAVScenesDataset(Dataset):
             occ = self._points_to_occupancy(points)
 
             if prev_pose is not None and np.allclose(pose[7:], 0):
-                pose = self._compute_velocity(pose, prev_pose)
+                pose = self._compute_velocity(pose, prev_pose, dt=frame_dt)
 
             future_occ.append(occ)
             future_poses.append(pose)
@@ -921,6 +960,8 @@ class UAVScenesDataset(Dataset):
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Collate function for DataLoader."""
     collated = {}
+
+    # Stack tensor fields
     for key in ('history_occupancy', 'future_occupancy', 'history_poses', 'future_poses', 'agent_type'):
         tensors = [b[key] for b in batch]
         try:
@@ -931,6 +972,12 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
                 f"Cannot stack '{key}': shapes {shapes}. "
                 f"All samples must have the same shape for '{key}'."
             ) from e
+
+    # Preserve metadata as lists (for logging / debugging)
+    for key in ('scene', 'scene_folder', 'domain_tag'):
+        if key in batch[0]:
+            collated[key] = [b[key] for b in batch]
+
     return collated
 
 

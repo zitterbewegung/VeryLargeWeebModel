@@ -128,7 +128,6 @@ model = dict(
 loss = dict(
     # Occupancy prediction
     occ_weight=1.0,
-    pos_weight=10.0,
     recall_weight=2.0,  # Penalize missed occupied voxels to prevent conservative collapse
 
     # 6DoF pose prediction
