@@ -228,7 +228,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term[:d_model // 2])
         pe = pe.unsqueeze(0)  # [1, max_len, d_model]
         self.register_buffer('pe', pe)
 
@@ -736,6 +736,8 @@ class FocalLoss(nn.Module):
     def _get_alpha(self, target: torch.Tensor) -> float:
         """Return alpha, adapting to batch occupancy ratio if dynamic."""
         if self.dynamic_alpha:
+            if target.numel() == 0:
+                return self.alpha
             occupied_ratio = target.sum() / target.numel()
             return (1.0 - occupied_ratio).clamp(min=0.5, max=0.999)
         return self.alpha
@@ -771,7 +773,7 @@ class LovaszBinaryLoss(nn.Module):
         gts = gt_sorted.sum()
         intersection = gts - gt_sorted.cumsum(0)
         union = gts + (1.0 - gt_sorted).cumsum(0)
-        jaccard = 1.0 - intersection / union
+        jaccard = 1.0 - intersection / (union + 1e-8)
         if p > 1:
             jaccard[1:] = jaccard[1:] - jaccard[:-1]
         return jaccard
@@ -900,9 +902,9 @@ class OccWorld6DoFLoss(nn.Module):
         occupied_mask = target_flat > 0.5
         if self.recall_weight > 0 and occupied_mask.any():
             occupied_preds = pred_flat[occupied_mask]
-            recall_loss = -torch.log(occupied_preds.clamp(min=1e-7)).mean()
+            recall_loss = -torch.log(occupied_preds.clamp(min=1e-6)).mean()
         else:
-            recall_loss = torch.tensor(0.0, device=pred_occ.device)
+            recall_loss = pred_flat.sum() * 0.0
 
         occ_loss = (focal + self.dice_weight * dice + self.mean_weight * mean_loss
                     + self.lovasz_weight * lovasz + self.recall_weight * recall_loss)

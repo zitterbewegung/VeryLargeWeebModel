@@ -1038,6 +1038,8 @@ class FocalLoss(nn.Module):
     def _get_alpha(self, target):
         """Return alpha, adapting to batch occupancy ratio if dynamic."""
         if self.dynamic_alpha:
+            if target.numel() == 0:
+                return self.alpha
             occupied_ratio = target.sum() / target.numel()
             return (1.0 - occupied_ratio).clamp(min=0.5, max=0.999)
         return self.alpha
@@ -1073,7 +1075,7 @@ class LovaszBinaryLoss(nn.Module):
         gts = gt_sorted.sum()
         intersection = gts - gt_sorted.cumsum(0)
         union = gts + (1.0 - gt_sorted).cumsum(0)
-        jaccard = 1.0 - intersection / union
+        jaccard = 1.0 - intersection / (union + 1e-8)
         if p > 1:
             jaccard[1:] = jaccard[1:] - jaccard[:-1]
         return jaccard
@@ -1177,9 +1179,9 @@ class OccupancyLoss(nn.Module):
         occupied_mask = target_flat > 0.5
         if self.recall_weight > 0 and occupied_mask.any():
             occupied_preds = pred_flat[occupied_mask]
-            recall_loss = -torch.log(occupied_preds.clamp(min=1e-7)).mean()
+            recall_loss = -torch.log(occupied_preds.clamp(min=1e-6)).mean()
         else:
-            recall_loss = torch.tensor(0.0, device=pred.device)
+            recall_loss = pred_flat.sum() * 0.0
 
         total_loss = (focal + self.dice_weight * dice_loss + self.mean_weight * mean_loss
                       + self.lovasz_weight * lovasz + self.recall_weight * recall_loss)
@@ -1639,7 +1641,7 @@ def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_st
                         diff_target = target_binary[:, t].reshape(target_binary.shape[0], -1) - \
                                       target_binary[:, t-1].reshape(target_binary.shape[0], -1)
                         # Cosine similarity per sample
-                        cos_sim = F.cosine_similarity(diff_pred, diff_target, dim=-1)
+                        cos_sim = F.cosine_similarity(diff_pred, diff_target, dim=-1, eps=1e-6)
                         temporal_consistency_sum += cos_sim.sum().item()
                         temporal_consistency_count += cos_sim.numel()
 
@@ -1681,7 +1683,7 @@ def validate(model, dataloader, criterion, device, is_6dof=False, seconds_per_st
                         for b in range(pred_pos_t.shape[0]):
                             if not in_bounds[b]:
                                 continue
-                            cx, cy, cz = voxel_coords[b]
+                            cx, cy, cz = voxel_coords[b].tolist()
                             # Check 3x3x3 neighborhood
                             x_lo = max(0, cx - 1)
                             x_hi = min(grid_size[0], cx + 2)
@@ -2295,13 +2297,16 @@ def main():
             place_weight=loss_cfg.get('place_weight', 0.1),
             focal_alpha=loss_cfg.get('focal_alpha', 0.99),
             focal_gamma=loss_cfg.get('focal_gamma', 2.0),
+            dynamic_alpha=loss_cfg.get('dynamic_alpha', True),
             dice_weight=loss_cfg.get('dice_weight', 1.0),
             mean_weight=loss_cfg.get('mean_weight', 10.0),
+            lovasz_weight=loss_cfg.get('lovasz_weight', 1.0),
             recall_weight=loss_cfg.get('recall_weight', 2.0),
             pose_variance_weight=loss_cfg.get('pose_variance_weight', 1.0),
             min_pose_std=loss_cfg.get('min_pose_std', 0.01),
             uncertainty_min=loss_cfg.get('uncertainty_min', 0.001),
             uncertainty_max=loss_cfg.get('uncertainty_max', 10.0),
+            triplet_margin=loss_cfg.get('triplet_margin', 0.2),
         )
         print("  Using OccWorld6DoFLoss with anti-collapse safeguards")
         if args.uncertainty_weight is not None:
