@@ -1625,9 +1625,10 @@ class TestDomainTags(unittest.TestCase):
     def test_uavscenes_domain_tag(self):
         """UAVScenes should return domain_tag='real'."""
         # Check the code directly (dataset requires real data to construct)
+        # domain_tag is in _try_load_sample (called by __getitem__)
         import dataset.uavscenes_dataset as mod
         import inspect
-        source = inspect.getsource(mod.UAVScenesDataset.__getitem__)
+        source = inspect.getsource(mod.UAVScenesDataset._try_load_sample)
         self.assertIn("'domain_tag': 'real'", source)
 
     def test_nuscenes_domain_tag(self):

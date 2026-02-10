@@ -1227,9 +1227,11 @@ class TestDomainTagPresence(unittest.TestCase):
         for module_name, class_name in datasets_to_check:
             module = __import__(module_name, fromlist=[class_name])
             cls = getattr(module, class_name)
-            source = inspect.getsource(cls.__getitem__)
+            # UAVScenesDataset moved loading into _try_load_sample
+            method = getattr(cls, '_try_load_sample', cls.__getitem__)
+            source = inspect.getsource(method)
             self.assertIn('domain_tag', source,
-                          f"{class_name}.__getitem__ must return domain_tag")
+                          f"{class_name} must return domain_tag")
 
 
 class TestDynamicFocalAlpha(unittest.TestCase):
@@ -1375,6 +1377,575 @@ class TestLovaszBinaryLoss(unittest.TestCase):
         loss_fn = OccWorld6DoFLoss(lovasz_weight=1.0)
         self.assertTrue(hasattr(loss_fn, 'lovasz_loss'))
         self.assertEqual(loss_fn.lovasz_weight, 1.0)
+
+
+# =============================================================================
+# UAVScenes Recent Fixes (2026-02-08 batch 6)
+# Regression tests for: velocity dt, retry loop, collate metadata,
+# PCD truncation, config passthrough, pose skip, LiDAR error handling
+# =============================================================================
+
+
+class TestVelocityDtComputation(unittest.TestCase):
+    """Regression: velocity dt must use base_frame_interval * interval * frame_skip."""
+
+    def _make_dataset(self, **config_kwargs):
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(**config_kwargs)
+        ds.transform = None
+        return ds
+
+    def test_default_dt_is_half_second(self):
+        """Default config: 0.1 * 5 * 1 = 0.5s between frames."""
+        ds = self._make_dataset()
+        frame_dt = (ds.config.base_frame_interval
+                    * ds.config.interval
+                    * ds.config.frame_skip)
+        self.assertAlmostEqual(frame_dt, 0.5)
+
+    def test_custom_dt_computation(self):
+        """Custom config: 0.1 * 5 * 2 = 1.0s."""
+        ds = self._make_dataset(base_frame_interval=0.1, interval=5, frame_skip=2)
+        frame_dt = (ds.config.base_frame_interval
+                    * ds.config.interval
+                    * ds.config.frame_skip)
+        self.assertAlmostEqual(frame_dt, 1.0)
+
+    def test_interval_1_dt(self):
+        """Full-rate data: 0.1 * 1 * 1 = 0.1s."""
+        ds = self._make_dataset(base_frame_interval=0.1, interval=1, frame_skip=1)
+        frame_dt = (ds.config.base_frame_interval
+                    * ds.config.interval
+                    * ds.config.frame_skip)
+        self.assertAlmostEqual(frame_dt, 0.1)
+
+    def test_velocity_uses_correct_dt(self):
+        """Velocity = delta_pos / dt with correct dt, not hardcoded 0.1."""
+        ds = self._make_dataset(base_frame_interval=0.1, interval=5, frame_skip=1)
+        # Position delta = 5m over dt = 0.5s → velocity = 10 m/s
+        pose_curr = np.array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        pose_prev = np.array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+
+        frame_dt = 0.5  # base * interval * skip = 0.1 * 5 * 1
+        result = ds._compute_velocity(pose_curr, pose_prev, dt=frame_dt)
+        self.assertAlmostEqual(result[7], 10.0, places=1)  # 5m / 0.5s
+
+    def test_old_hardcoded_dt_would_be_wrong(self):
+        """With hardcoded dt=0.1, same scenario gives 50 m/s (5x too large)."""
+        ds = self._make_dataset()
+        pose_curr = np.array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        pose_prev = np.array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+
+        # Wrong dt=0.1 would give 50 m/s (clamped to 20)
+        wrong_result = ds._compute_velocity(pose_curr, pose_prev, dt=0.1)
+        # Correct dt=0.5 gives 10 m/s
+        correct_result = ds._compute_velocity(pose_curr, pose_prev, dt=0.5)
+
+        # Correct velocity should be 10.0, not 20.0 (clamped from 50)
+        self.assertAlmostEqual(correct_result[7], 10.0, places=1)
+        self.assertAlmostEqual(wrong_result[7], 20.0, places=1)  # clamped
+
+
+class TestGetitemRetryLoop(unittest.TestCase):
+    """Regression: __getitem__ must not infinite-recurse on bad data."""
+
+    def _make_dataset_with_samples(self, n_samples, bad_indices=None):
+        """Create a mock dataset where specific indices fail pose loading."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        from pathlib import Path
+
+        bad_indices = bad_indices or set()
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2, future_frames=1,
+            ego_frame=False, fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=False,
+        )
+        ds.transform = None
+
+        samples = []
+        for i in range(n_samples):
+            samples.append({
+                'scene': 'test',
+                'scene_folder': 'test_scene',
+                'history_frames': [
+                    {'idx': i * 10 + j, 'path': Path(f'/tmp/f{i}_{j}.txt'), 'filename': ''}
+                    for j in range(2)
+                ],
+                'future_frames': [
+                    {'idx': i * 10 + 2, 'path': Path(f'/tmp/f{i}_2.txt'), 'filename': ''}
+                ],
+            })
+        ds.samples = samples
+
+        good_pose = np.array([1, 2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+
+        def mock_load_pose(scene_folder, frame_idx, frame_filename=''):
+            # Bad indices return None
+            sample_idx = frame_idx // 10
+            if sample_idx in bad_indices:
+                return None
+            return good_pose.copy()
+
+        ds._load_pose = mock_load_pose
+        ds._load_lidar = lambda p: np.array([[0, 0, 0]], dtype=np.float32)
+        ds._align_points = lambda pts, pose, origin: (pts, origin, False)
+        ds._points_to_occupancy = lambda pts: np.zeros((2, 2, 2), dtype=np.uint8)
+        ds._total_align_calls = 0
+        ds._fallback_count = 0
+
+        return ds
+
+    def test_skip_to_next_on_missing_pose(self):
+        """Missing pose at idx=0 should return sample from idx=1."""
+        ds = self._make_dataset_with_samples(3, bad_indices={0})
+        result = ds[0]
+        self.assertIsNotNone(result)
+        self.assertIn('history_poses', result)
+
+    def test_skip_multiple_bad_samples(self):
+        """Multiple consecutive bad samples should skip to first good one."""
+        ds = self._make_dataset_with_samples(5, bad_indices={0, 1, 2})
+        result = ds[0]
+        self.assertIsNotNone(result)
+
+    def test_all_bad_raises_runtime_error(self):
+        """All samples bad should raise RuntimeError, not RecursionError."""
+        ds = self._make_dataset_with_samples(5, bad_indices={0, 1, 2, 3, 4})
+        with self.assertRaises(RuntimeError) as ctx:
+            ds[0]
+        self.assertIn("Failed to load a valid sample", str(ctx.exception))
+
+    def test_no_recursion_error(self):
+        """Even with many bad samples, no RecursionError (loop, not recursion)."""
+        ds = self._make_dataset_with_samples(200, bad_indices=set(range(200)))
+        with self.assertRaises(RuntimeError):
+            ds[0]
+        # If we get here without RecursionError, the loop guard works
+
+    def test_wraps_around_dataset(self):
+        """Retry loop wraps around: bad idx=4 (last) tries idx=0."""
+        ds = self._make_dataset_with_samples(5, bad_indices={4})
+        result = ds[4]
+        self.assertIsNotNone(result)
+
+    def test_max_retries_capped(self):
+        """_MAX_GETITEM_RETRIES should be respected."""
+        from dataset.uavscenes_dataset import UAVScenesDataset
+        self.assertGreater(UAVScenesDataset._MAX_GETITEM_RETRIES, 0)
+        self.assertLessEqual(UAVScenesDataset._MAX_GETITEM_RETRIES, 1000)
+
+
+class TestGetitemLidarErrorSkip(unittest.TestCase):
+    """Regression: LiDAR load failure should skip sample, not crash."""
+
+    def test_lidar_exception_skips_to_next(self):
+        """LiDAR load raising Exception should skip to next sample."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        from pathlib import Path
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2, future_frames=1,
+            ego_frame=False, fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=False,
+        )
+        ds.transform = None
+
+        good_pose = np.array([1, 2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        ds.samples = [
+            {
+                'scene': 'test', 'scene_folder': 'test',
+                'history_frames': [
+                    {'idx': 0, 'path': Path('/tmp/bad.pcd'), 'filename': ''},
+                    {'idx': 1, 'path': Path('/tmp/bad.pcd'), 'filename': ''},
+                ],
+                'future_frames': [{'idx': 2, 'path': Path('/tmp/bad.pcd'), 'filename': ''}],
+            },
+            {
+                'scene': 'test', 'scene_folder': 'test',
+                'history_frames': [
+                    {'idx': 10, 'path': Path('/tmp/good.pcd'), 'filename': ''},
+                    {'idx': 11, 'path': Path('/tmp/good.pcd'), 'filename': ''},
+                ],
+                'future_frames': [{'idx': 12, 'path': Path('/tmp/good.pcd'), 'filename': ''}],
+            },
+        ]
+
+        call_count = [0]
+
+        def mock_load_lidar(path):
+            call_count[0] += 1
+            if 'bad' in str(path):
+                raise IOError("Corrupt file")
+            return np.array([[0, 0, 0]], dtype=np.float32)
+
+        ds._load_pose = lambda sf, fi, fn='': good_pose.copy()
+        ds._load_lidar = mock_load_lidar
+        ds._align_points = lambda pts, pose, origin: (pts, origin, False)
+        ds._points_to_occupancy = lambda pts: np.zeros((2, 2, 2), dtype=np.uint8)
+        ds._total_align_calls = 0
+        ds._fallback_count = 0
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = ds[0]
+
+        self.assertIsNotNone(result)
+
+
+class TestCollateFnMetadata(unittest.TestCase):
+    """Regression: collate_fn must preserve scene/domain_tag metadata."""
+
+    def test_metadata_preserved_as_lists(self):
+        """scene, scene_folder, domain_tag should be lists in collated batch."""
+        from dataset.uavscenes_dataset import collate_fn
+
+        batch = [
+            {
+                'history_occupancy': torch.rand(4, 8, 8, 4),
+                'future_occupancy': torch.rand(6, 8, 8, 4),
+                'history_poses': torch.rand(4, 13),
+                'future_poses': torch.rand(6, 13),
+                'agent_type': torch.tensor(1),
+                'scene': 'AMtown',
+                'scene_folder': 'interval5_AMtown01',
+                'domain_tag': 'real',
+            },
+            {
+                'history_occupancy': torch.rand(4, 8, 8, 4),
+                'future_occupancy': torch.rand(6, 8, 8, 4),
+                'history_poses': torch.rand(4, 13),
+                'future_poses': torch.rand(6, 13),
+                'agent_type': torch.tensor(1),
+                'scene': 'HKisland',
+                'scene_folder': 'interval5_HKisland02',
+                'domain_tag': 'real',
+            },
+        ]
+
+        collated = collate_fn(batch)
+
+        # Metadata should be lists
+        self.assertIsInstance(collated['scene'], list)
+        self.assertEqual(collated['scene'], ['AMtown', 'HKisland'])
+        self.assertIsInstance(collated['scene_folder'], list)
+        self.assertEqual(collated['scene_folder'], ['interval5_AMtown01', 'interval5_HKisland02'])
+        self.assertIsInstance(collated['domain_tag'], list)
+        self.assertEqual(collated['domain_tag'], ['real', 'real'])
+
+    def test_metadata_absent_no_crash(self):
+        """collate_fn should not crash if metadata keys are missing."""
+        from dataset.uavscenes_dataset import collate_fn
+
+        batch = [
+            {
+                'history_occupancy': torch.rand(2, 4, 4, 4),
+                'future_occupancy': torch.rand(2, 4, 4, 4),
+                'history_poses': torch.rand(2, 13),
+                'future_poses': torch.rand(2, 13),
+                'agent_type': torch.tensor(1),
+            },
+        ]
+
+        collated = collate_fn(batch)
+        # Should not contain metadata keys
+        self.assertNotIn('scene', collated)
+        self.assertNotIn('domain_tag', collated)
+
+    def test_tensors_still_stacked(self):
+        """Tensor fields should still be properly stacked."""
+        from dataset.uavscenes_dataset import collate_fn
+
+        batch = [
+            {
+                'history_occupancy': torch.rand(4, 8, 8, 4),
+                'future_occupancy': torch.rand(6, 8, 8, 4),
+                'history_poses': torch.rand(4, 13),
+                'future_poses': torch.rand(6, 13),
+                'agent_type': torch.tensor(1),
+                'scene': 'AMtown',
+                'domain_tag': 'real',
+            }
+            for _ in range(3)
+        ]
+
+        collated = collate_fn(batch)
+        self.assertEqual(collated['history_occupancy'].shape[0], 3)
+        self.assertEqual(collated['history_poses'].shape[0], 3)
+
+
+class TestBinaryPCDTruncation(unittest.TestCase):
+    """Regression: binary PCD with non-divisible data length should not crash."""
+
+    def test_truncation_fallback(self):
+        """Binary PCD data that doesn't divide by any column count gets truncated."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig()
+
+        # Create a binary PCD file with 11 floats (not divisible by 3, 4, 5, or 6)
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.pcd', delete=False) as f:
+            temp_path = f.name
+            header = (
+                "# .PCD v0.7\n"
+                "VERSION 0.7\n"
+                "FIELDS x y z intensity\n"
+                "SIZE 4 4 4 4\n"
+                "TYPE F F F F\n"
+                "COUNT 1 1 1 1\n"
+                "WIDTH 3\n"
+                "HEIGHT 1\n"
+                "VIEWPOINT 0 0 0 1 0 0 0\n"
+                "POINTS 3\n"
+                "DATA binary\n"
+            )
+            f.write(header.encode('utf-8'))
+            # Write 11 floats (not divisible by 4)
+            data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], dtype=np.float32)
+            f.write(data.tobytes())
+
+        try:
+            from pathlib import Path
+            result = ds._load_pcd(Path(temp_path))
+            # Should not crash — truncates to 8 floats (2 points × 4 cols)
+            self.assertEqual(result.ndim, 2)
+            self.assertEqual(result.shape[1], 3)
+        finally:
+            os.unlink(temp_path)
+
+    def test_empty_binary_returns_empty(self):
+        """Binary PCD with too little data returns empty array."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig()
+
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.pcd', delete=False) as f:
+            temp_path = f.name
+            header = (
+                "# .PCD v0.7\n"
+                "FIELDS x y z\n"
+                "POINTS 0\n"
+                "DATA binary\n"
+            )
+            f.write(header.encode('utf-8'))
+            # Write only 2 floats (not enough for any point)
+            data = np.array([1, 2], dtype=np.float32)
+            f.write(data.tobytes())
+
+        try:
+            from pathlib import Path
+            result = ds._load_pcd(Path(temp_path))
+            # Should return empty or small array, not crash
+            self.assertIsInstance(result, np.ndarray)
+        finally:
+            os.unlink(temp_path)
+
+
+class TestConfigPassthroughCompleteness(unittest.TestCase):
+    """Regression: all UAVScenesConfig fields must be wired through train.py."""
+
+    def test_all_config_fields_in_train_creation(self):
+        """train.py UAVScenesConfig creation should reference all dataclass fields."""
+        import inspect
+        from dataset.uavscenes_dataset import UAVScenesConfig
+
+        # Get all UAVScenesConfig field names
+        fields = {f.name for f in UAVScenesConfig.__dataclass_fields__.values()}
+
+        # Read the train.py source to check which fields are referenced
+        train_path = os.path.join(PROJECT_ROOT, 'train.py')
+        with open(train_path) as f:
+            source = f.read()
+
+        # Fields that are legitimately set differently (split is always 'train'/'val')
+        # or computed (grid_size is a property)
+        skip_fields = {'split', 'grid_size', 'runs'}
+
+        missing = []
+        for field_name in fields:
+            if field_name in skip_fields:
+                continue
+            # Check if the field appears in train.py UAVScenesConfig creation
+            if f'{field_name}=' not in source and f"'{field_name}'" not in source:
+                missing.append(field_name)
+
+        self.assertEqual(missing, [],
+                         f"UAVScenesConfig fields not wired through train.py: {missing}")
+
+    def test_base_frame_interval_in_config(self):
+        """base_frame_interval field should exist with correct default."""
+        from dataset.uavscenes_dataset import UAVScenesConfig
+        config = UAVScenesConfig()
+        self.assertAlmostEqual(config.base_frame_interval, 0.1)
+
+    def test_velocity_clamp_fields_exist(self):
+        """max_linear_velocity and max_angular_velocity should be configurable."""
+        from dataset.uavscenes_dataset import UAVScenesConfig
+        config = UAVScenesConfig(max_linear_velocity=30.0, max_angular_velocity=10.0)
+        self.assertAlmostEqual(config.max_linear_velocity, 30.0)
+        self.assertAlmostEqual(config.max_angular_velocity, 10.0)
+
+
+class TestNormalizePoseEndToEnd(unittest.TestCase):
+    """Regression: normalize_pose_to_first_frame zeroes first history position."""
+
+    def test_first_history_pose_is_zero(self):
+        """After normalization, history_poses[0][:3] should be [0, 0, 0]."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        from pathlib import Path
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2, future_frames=1,
+            ego_frame=False, fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=True,
+        )
+        ds.transform = None
+        ds.samples = [{
+            'scene': 'test', 'scene_folder': 'test',
+            'history_frames': [
+                {'idx': 0, 'path': Path('/tmp/f0.txt'), 'filename': ''},
+                {'idx': 1, 'path': Path('/tmp/f1.txt'), 'filename': ''},
+            ],
+            'future_frames': [
+                {'idx': 2, 'path': Path('/tmp/f2.txt'), 'filename': ''},
+            ],
+        }]
+
+        poses = {
+            0: np.array([100, 200, 300, 1, 0, 0, 0, 5, 5, 5, 0, 0, 0], dtype=np.float32),
+            1: np.array([101, 201, 301, 1, 0, 0, 0, 5, 5, 5, 0, 0, 0], dtype=np.float32),
+            2: np.array([102, 202, 302, 1, 0, 0, 0, 5, 5, 5, 0, 0, 0], dtype=np.float32),
+        }
+
+        ds._load_pose = lambda sf, fi, fn='': poses[fi].copy()
+        ds._load_lidar = lambda p: np.array([[0, 0, 0]], dtype=np.float32)
+        ds._align_points = lambda pts, pose, origin: (pts, origin, False)
+        ds._points_to_occupancy = lambda pts: np.zeros((2, 2, 2), dtype=np.uint8)
+        ds._total_align_calls = 0
+        ds._fallback_count = 0
+
+        sample = ds[0]
+
+        # First history pose position should be zeroed
+        np.testing.assert_allclose(sample['history_poses'][0, :3].numpy(), [0, 0, 0], atol=1e-6)
+        # Second history should be relative
+        np.testing.assert_allclose(sample['history_poses'][1, :3].numpy(), [1, 1, 1], atol=1e-6)
+        # Future should be relative
+        np.testing.assert_allclose(sample['future_poses'][0, :3].numpy(), [2, 2, 2], atol=1e-6)
+
+    def test_quaternions_unchanged_by_normalization(self):
+        """Quaternions should NOT be affected by position normalization."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        from pathlib import Path
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2, future_frames=1,
+            ego_frame=False, fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=True,
+        )
+        ds.transform = None
+        ds.samples = [{
+            'scene': 'test', 'scene_folder': 'test',
+            'history_frames': [
+                {'idx': 0, 'path': Path('/tmp/f0.txt'), 'filename': ''},
+                {'idx': 1, 'path': Path('/tmp/f1.txt'), 'filename': ''},
+            ],
+            'future_frames': [
+                {'idx': 2, 'path': Path('/tmp/f2.txt'), 'filename': ''},
+            ],
+        }]
+
+        # Non-trivial quaternion (45° around Z)
+        quat = np.array([0.924, 0, 0, 0.383], dtype=np.float32)
+        poses = {
+            i: np.array([100 + i, 200, 300, *quat, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+            for i in range(3)
+        }
+
+        ds._load_pose = lambda sf, fi, fn='': poses[fi].copy()
+        ds._load_lidar = lambda p: np.array([[0, 0, 0]], dtype=np.float32)
+        ds._align_points = lambda pts, pose, origin: (pts, origin, False)
+        ds._points_to_occupancy = lambda pts: np.zeros((2, 2, 2), dtype=np.uint8)
+        ds._total_align_calls = 0
+        ds._fallback_count = 0
+
+        sample = ds[0]
+
+        # Quaternion should be unchanged
+        for t in range(2):
+            np.testing.assert_allclose(
+                sample['history_poses'][t, 3:7].numpy(), quat, atol=1e-5,
+                err_msg=f"History frame {t} quaternion changed by normalization"
+            )
+        np.testing.assert_allclose(
+            sample['future_poses'][0, 3:7].numpy(), quat, atol=1e-5,
+            err_msg="Future frame quaternion changed by normalization"
+        )
+
+    def test_velocities_unchanged_by_normalization(self):
+        """Velocities should NOT be affected by position normalization."""
+        from dataset.uavscenes_dataset import UAVScenesDataset, UAVScenesConfig
+        from pathlib import Path
+
+        ds = UAVScenesDataset.__new__(UAVScenesDataset)
+        ds.config = UAVScenesConfig(
+            history_frames=2, future_frames=1,
+            ego_frame=False, fallback_to_lidar_center=False,
+            normalize_pose_to_first_frame=True,
+        )
+        ds.transform = None
+        ds.samples = [{
+            'scene': 'test', 'scene_folder': 'test',
+            'history_frames': [
+                {'idx': 0, 'path': Path('/tmp/f0.txt'), 'filename': ''},
+                {'idx': 1, 'path': Path('/tmp/f1.txt'), 'filename': ''},
+            ],
+            'future_frames': [
+                {'idx': 2, 'path': Path('/tmp/f2.txt'), 'filename': ''},
+            ],
+        }]
+
+        vel = np.array([5.0, 3.0, 1.0, 0.1, 0.2, 0.3], dtype=np.float32)
+        poses = {
+            i: np.array([100 + i, 200, 300, 1, 0, 0, 0, *vel], dtype=np.float32)
+            for i in range(3)
+        }
+
+        ds._load_pose = lambda sf, fi, fn='': poses[fi].copy()
+        ds._load_lidar = lambda p: np.array([[0, 0, 0]], dtype=np.float32)
+        ds._align_points = lambda pts, pose, origin: (pts, origin, False)
+        ds._points_to_occupancy = lambda pts: np.zeros((2, 2, 2), dtype=np.uint8)
+        ds._total_align_calls = 0
+        ds._fallback_count = 0
+
+        sample = ds[0]
+
+        # Velocities (indices 7-12) should be unchanged
+        np.testing.assert_allclose(
+            sample['history_poses'][0, 7:13].numpy(), vel, atol=1e-5
+        )
+
+
+class TestComputeVelocityNoDefaultDt(unittest.TestCase):
+    """Regression: _compute_velocity must require explicit dt (no default)."""
+
+    def test_dt_is_required_parameter(self):
+        """_compute_velocity should not have a default for dt."""
+        import inspect
+        from dataset.uavscenes_dataset import UAVScenesDataset
+
+        sig = inspect.signature(UAVScenesDataset._compute_velocity)
+        dt_param = sig.parameters['dt']
+        self.assertEqual(dt_param.default, inspect.Parameter.empty,
+                         "dt should not have a default value — it must be explicitly passed")
 
 
 if __name__ == '__main__':

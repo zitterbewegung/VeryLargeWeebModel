@@ -848,7 +848,11 @@ class UAVScenesDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    # Maximum number of consecutive samples to try before raising an error.
+    _MAX_GETITEM_RETRIES = 100
+
+    def _try_load_sample(self, idx: int) -> Optional[Dict[str, torch.Tensor]]:
+        """Try to load a single sample.  Returns None on failure."""
         sample_info = self.samples[idx]
         scene = sample_info['scene']
         scene_folder = sample_info.get('scene_folder', scene)
@@ -867,23 +871,20 @@ class UAVScenesDataset(Dataset):
         sequence_origin = None
 
         for frame_info in sample_info['history_frames']:
-            # Load pose
             frame_idx = frame_info['idx']
             frame_filename = frame_info.get('filename', '')
             pose = self._load_pose(scene_folder, frame_idx, frame_filename)
 
-            # Skip sample if pose is missing (None = no pose file found)
             if pose is None:
-                return self.__getitem__((idx + 1) % len(self))
+                return None
 
-            # Load LiDAR (skip sample if file is missing/corrupt)
             lidar_path = frame_info['path']
             try:
                 points = self._load_lidar(lidar_path)
             except Exception as e:
                 import warnings
                 warnings.warn(f"Failed to load LiDAR {lidar_path}: {e}. Skipping sample.")
-                return self.__getitem__((idx + 1) % len(self))
+                return None
 
             points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
             if used_lidar_center and sequence_origin is not None:
@@ -909,7 +910,7 @@ class UAVScenesDataset(Dataset):
             pose = self._load_pose(scene_folder, frame_idx, frame_filename)
 
             if pose is None:
-                return self.__getitem__((idx + 1) % len(self))
+                return None
 
             lidar_path = frame_info['path']
             try:
@@ -917,7 +918,7 @@ class UAVScenesDataset(Dataset):
             except Exception as e:
                 import warnings
                 warnings.warn(f"Failed to load LiDAR {lidar_path}: {e}. Skipping sample.")
-                return self.__getitem__((idx + 1) % len(self))
+                return None
 
             points, sequence_origin, used_lidar_center = self._align_points(points, pose, sequence_origin)
             if used_lidar_center and sequence_origin is not None:
@@ -955,6 +956,20 @@ class UAVScenesDataset(Dataset):
             result = self.transform(result)
 
         return result
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        max_retries = min(self._MAX_GETITEM_RETRIES, len(self))
+        for attempt in range(max_retries):
+            try_idx = (idx + attempt) % len(self)
+            result = self._try_load_sample(try_idx)
+            if result is not None:
+                return result
+
+        raise RuntimeError(
+            f"Failed to load a valid sample after {max_retries} attempts "
+            f"starting from index {idx}. Check dataset integrity "
+            f"(missing pose files, corrupt LiDAR data)."
+        )
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
