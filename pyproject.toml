@@ -59,7 +59,7 @@ full = [
   "descartes==1.1.0",
   "opencv-python==4.8.1.78",
   "opencv-python-headless==4.11.0.86",
-  "pillow==12.1.0",
+  "pillow==12.1.1",
   "matplotlib==3.10.8",
   "plotly==6.5.2",
   "tensorboard==2.20.0",
