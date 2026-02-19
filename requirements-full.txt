@@ -75,7 +75,7 @@ sentencepiece==0.2.1
 
 # TensorFlow (optional, for some utilities)
 tensorflow==2.20.0
-keras==3.13.1
+keras==3.13.2
 
 # Performance optimization
 numba==0.60.0  # JIT compilation for voxelization speedup

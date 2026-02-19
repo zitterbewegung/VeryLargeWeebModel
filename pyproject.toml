@@ -81,7 +81,7 @@ full = [
   "huggingface-hub==1.2.3",
   "sentencepiece==0.2.1",
   "tensorflow==2.20.0",
-  "keras==3.13.1",
+  "keras==3.13.2",
   "numba==0.60.0",
 ]
 open3d = [
