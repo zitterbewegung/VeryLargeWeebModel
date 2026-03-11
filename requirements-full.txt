@@ -41,7 +41,7 @@ descartes==1.1.0
 # Computer vision
 opencv-python==4.8.1.78
 opencv-python-headless==4.11.0.86
-pillow==12.1.0
+pillow==12.1.1
 
 # Visualization & Experiment Tracking
 matplotlib==3.10.8
